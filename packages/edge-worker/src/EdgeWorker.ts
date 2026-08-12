@@ -6806,9 +6806,9 @@ ${input.userComment}
 					const repoConfig = repo as unknown as Record<string, unknown>;
 					const model =
 						(session.metadata?.model as string | undefined) ||
-						(repoConfig.claudeDefaultModel as string | undefined) ||
 						(repoConfig.model as string | undefined) ||
-						"claude-opus-4-6";
+						this.config.claudeDefaultModel ||
+						"claude-opus-5";
 
 					// Build allowed/disallowed tools — same as what buildAgentRunnerConfig() uses.
 					// Without these, startup() inherits the user's defaultMode ("default"),

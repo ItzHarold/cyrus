@@ -141,19 +141,6 @@ export class RunnerSelectionService {
 			"model",
 		);
 
-		const defaultModelByRunner: Record<RunnerType, string> = {
-			claude: this.getDefaultModelForRunner("claude"),
-			gemini: this.getDefaultModelForRunner("gemini"),
-			codex: this.getDefaultModelForRunner("codex"),
-			cursor: this.getDefaultModelForRunner("cursor"),
-		};
-		const defaultFallbackByRunner: Record<RunnerType, string> = {
-			claude: this.getDefaultFallbackModelForRunner("claude"),
-			gemini: this.getDefaultFallbackModelForRunner("gemini"),
-			codex: this.getDefaultFallbackModelForRunner("codex"),
-			cursor: this.getDefaultFallbackModelForRunner("cursor"),
-		};
-
 		const isCodexModel = (model: string): boolean =>
 			/gpt-[a-z0-9.-]*codex$/i.test(model) || /^gpt-[a-z0-9.-]+$/i.test(model);
 
@@ -185,7 +172,9 @@ export class RunnerSelectionService {
 				if (normalizedModel === "sonnet") return "haiku";
 				// Keep haiku fallback on sonnet for retry behavior
 				if (normalizedModel === "haiku") return "sonnet";
-				return "sonnet";
+				// Explicit claude-* ids: leave undefined so per-repo
+				// fallbackModel / claudeDefaultFallbackModel apply downstream.
+				return undefined;
 			}
 			if (runnerType === "gemini") {
 				if (
@@ -266,10 +255,12 @@ export class RunnerSelectionService {
 				return "gemini-3-pro-preview";
 			}
 
-			if (lowercaseLabels.includes("fable")) return "fable";
-			if (lowercaseLabels.includes("opus")) return "opus";
-			if (lowercaseLabels.includes("sonnet")) return "sonnet";
-			if (lowercaseLabels.includes("haiku")) return "haiku";
+			// Pin labels to exact model ids so routing does not depend on
+			// which release the bundled SDK resolves an alias to.
+			if (lowercaseLabels.includes("fable")) return "claude-fable-5";
+			if (lowercaseLabels.includes("opus")) return "claude-opus-5";
+			if (lowercaseLabels.includes("sonnet")) return "claude-sonnet-4-6";
+			if (lowercaseLabels.includes("haiku")) return "claude-haiku-4-5";
 
 			return undefined;
 		};
@@ -304,23 +295,17 @@ export class RunnerSelectionService {
 			modelOverride = undefined;
 		}
 
-		const resolvedModelOverride =
-			modelOverride ||
-			defaultModelByRunner[runnerType] ||
-			this.getDefaultModelForRunner(runnerType);
-
-		let fallbackModelOverride = inferFallbackModel(
-			resolvedModelOverride,
-			runnerType,
-		);
-		if (!fallbackModelOverride) {
-			fallbackModelOverride = defaultFallbackByRunner[runnerType];
-		}
-
+		// Report an override only when labels/description tags selected one.
+		// RunnerConfigBuilder then applies the documented precedence:
+		// label/tag > repository.model > global claudeDefault* fields.
+		// (Previously this always returned a resolved default, which made
+		// repository.model and claudeDefaultFallbackModel dead code.)
 		return {
 			runnerType,
-			modelOverride: resolvedModelOverride,
-			fallbackModelOverride,
+			modelOverride,
+			fallbackModelOverride: modelOverride
+				? inferFallbackModel(modelOverride, runnerType)
+				: undefined,
 		};
 	}
 }

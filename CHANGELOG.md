@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- Model labels (`fable`, `opus`, `sonnet`, `haiku`) now route issues to exact model ids (`claude-fable-5`, `claude-opus-5`, `claude-sonnet-4-6`, `claude-haiku-4-5`) instead of SDK aliases, so the model an issue runs on no longer depends on which release the bundled SDK resolves an alias to.
+
+### Fixed
+- Per-repository `model` and `fallbackModel` settings now take effect. The runner selector always resolved a global default first, which made the repository fields — and the documented precedence label > repository > global default — unreachable.
+- `claudeDefaultFallbackModel` is now honored for sessions running on explicit model ids. Previously every such session silently used the `sonnet` alias as its fallback, so an overloaded primary model degraded to Sonnet regardless of configuration.
+- Warm session pre-starts use the configured `claudeDefaultModel` instead of a hardcoded `claude-opus-4-6`, and no longer read the global default off the repository config, where it never exists.
+
 ### Security
 - Patched newly reported Cyrus CLI dependency advisories so `pnpm audit` reports no known vulnerabilities. ([CYPACK-1431](https://linear.app/ceedar/issue/CYPACK-1431/address-open-security-patches-for-cyrus-cli), [#1404](https://github.com/cyrusagents/cyrus/pull/1404))
 
