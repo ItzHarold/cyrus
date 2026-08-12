@@ -259,7 +259,7 @@ export class RunnerSelectionService {
 			// which release the bundled SDK resolves an alias to.
 			if (lowercaseLabels.includes("fable")) return "claude-fable-5";
 			if (lowercaseLabels.includes("opus")) return "claude-opus-5";
-			if (lowercaseLabels.includes("sonnet")) return "claude-sonnet-4-6";
+			if (lowercaseLabels.includes("sonnet")) return "claude-sonnet-5";
 			if (lowercaseLabels.includes("haiku")) return "claude-haiku-4-5";
 
 			return undefined;

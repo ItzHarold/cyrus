@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Changed
-- Model labels (`fable`, `opus`, `sonnet`, `haiku`) now route issues to exact model ids (`claude-fable-5`, `claude-opus-5`, `claude-sonnet-4-6`, `claude-haiku-4-5`) instead of SDK aliases, so the model an issue runs on no longer depends on which release the bundled SDK resolves an alias to.
+- Model labels (`fable`, `opus`, `sonnet`, `haiku`) now route issues to exact model ids (`claude-fable-5`, `claude-opus-5`, `claude-sonnet-5`, `claude-haiku-4-5`) instead of SDK aliases, so the model an issue runs on no longer depends on which release the bundled SDK resolves an alias to.
 
 ### Fixed
 - Per-repository `model` and `fallbackModel` settings now take effect. The runner selector always resolved a global default first, which made the repository fields — and the documented precedence label > repository > global default — unreachable.
