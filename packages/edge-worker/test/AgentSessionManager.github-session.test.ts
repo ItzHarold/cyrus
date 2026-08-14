@@ -170,11 +170,14 @@ describe("AgentSessionManager - GitHub Session", () => {
 	it("should still post model notifications for Linear sessions", async () => {
 		createLinearSession();
 
+		// Init reports the pinned model (set in test/setup.ts) — a non-pinned
+		// model would trip the PON-110 drift assertion instead of the plain
+		// notification under test here.
 		const systemMessage = {
 			type: "system",
 			subtype: "init",
 			session_id: "claude-session-1",
-			model: "claude-sonnet-4-5-20250514",
+			model: "claude-opus-5",
 			tools: ["bash", "grep", "edit"],
 			permissionMode: "default",
 			apiKeySource: "user",
@@ -191,7 +194,7 @@ describe("AgentSessionManager - GitHub Session", () => {
 		expect(modelNotificationCall![0]).toBe(sessionId);
 		expect(modelNotificationCall![1]).toEqual({
 			type: "thought",
-			body: "Using model: claude-sonnet-4-5-20250514",
+			body: "Using model: claude-opus-5",
 		});
 	});
 });
