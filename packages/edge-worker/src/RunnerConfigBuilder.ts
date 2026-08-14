@@ -18,6 +18,7 @@ import type {
 	RepositoryConfig,
 	RunnerType,
 } from "cyrus-core";
+import { getPinnedModel } from "cyrus-core";
 import { buildIntentToAddHook } from "./hooks/IntentToAddHook.js";
 import { buildPrMarkerHook } from "./hooks/PrMarkerHook.js";
 import { appendBrowserUseAddendum } from "./prompts/browserUsePromptAddendum.js";
@@ -413,12 +414,14 @@ export class RunnerConfigBuilder {
 			appendSystemPrompt: appendCloudRuntimeAddendum(
 				appendBrowserUseAddendum(appendFailureModeAddendum(input.systemPrompt)),
 			),
-			// Priority order: label override > repository config > global default
-			model: finalModel,
-			fallbackModel:
-				fallbackModelOverride ||
-				input.repository.fallbackModel ||
-				this.runnerSelector.getDefaultFallbackModelForRunner(runnerType),
+			// PON-110: Claude sessions always run the pinned model, never a fallback.
+			model: runnerType === "claude" ? getPinnedModel() : finalModel,
+			...(runnerType !== "claude" && {
+				fallbackModel:
+					fallbackModelOverride ||
+					input.repository.fallbackModel ||
+					this.runnerSelector.getDefaultFallbackModelForRunner(runnerType),
+			}),
 			logger: log,
 			hooks,
 			// Plugins providing managed skills.

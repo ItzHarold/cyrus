@@ -1,4 +1,5 @@
 import type { EdgeWorkerConfig, RunnerType } from "cyrus-core";
+import { getPinnedModel } from "cyrus-core";
 
 export class RunnerSelectionService {
 	private config: EdgeWorkerConfig;
@@ -54,9 +55,7 @@ export class RunnerSelectionService {
 	 */
 	public getDefaultModelForRunner(runnerType: RunnerType): string {
 		if (runnerType === "claude") {
-			return (
-				this.config.claudeDefaultModel || this.config.defaultModel || "opus"
-			);
+			return getPinnedModel();
 		}
 		if (runnerType === "gemini") {
 			return this.config.geminiDefaultModel || "gemini-2.5-pro";
@@ -300,6 +299,15 @@ export class RunnerSelectionService {
 		// label/tag > repository.model > global claudeDefault* fields.
 		// (Previously this always returned a resolved default, which made
 		// repository.model and claudeDefaultFallbackModel dead code.)
+		if (runnerType === "claude") {
+			// PON-110: Claude model is pinned via CYRUS_MODEL; labels/description
+			// tags may select a runner but never a model or fallback for Claude.
+			return {
+				runnerType,
+				modelOverride: undefined,
+				fallbackModelOverride: undefined,
+			};
+		}
 		return {
 			runnerType,
 			modelOverride,

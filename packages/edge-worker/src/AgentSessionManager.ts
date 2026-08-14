@@ -17,9 +17,11 @@ import {
 	type CyrusAgentSession,
 	type CyrusAgentSessionEntry,
 	createLogger,
+	getPinnedModel,
 	type IAgentRunner,
 	type ILogger,
 	type IssueMinimal,
+	modelSatisfiesPin,
 	type RepositoryContext,
 	type SerializedCyrusAgentSession,
 	type SerializedCyrusAgentSessionEntry,
@@ -522,9 +524,23 @@ export class AgentSessionManager extends EventEmitter {
 					if (message.subtype === "init") {
 						this.updateAgentSessionWithRunnerSessionId(sessionId, message);
 
-						// Post model notification
+						// Post model notification + PON-110 pin assertion
 						const systemMessage = message as SDKSystemMessage;
 						if (systemMessage.model) {
+							if (!modelSatisfiesPin(systemMessage.model)) {
+								const pinned = getPinnedModel();
+								log.error(
+									`[event:model_drift] running=${systemMessage.model} pinned=${pinned} - failing session (PON-110)`,
+								);
+								await this.postModelNotificationThought(
+									sessionId,
+									`Model drift: session started on ${systemMessage.model} but the pinned model is ${pinned}. Failing this session (PON-110).`,
+								);
+								throw new Error(
+									`PON-110 model drift: running=${systemMessage.model} pinned=${pinned}`,
+								);
+							}
+							log.info(`[event:model_requested] model=${systemMessage.model}`);
 							await this.postModelNotificationThought(
 								sessionId,
 								systemMessage.model,
@@ -591,6 +607,40 @@ export class AgentSessionManager extends EventEmitter {
 				}
 
 				case "result":
+					{
+						// PON-110: ground truth - assert billed models against the pin.
+						const resultMsg = message as unknown as {
+							modelUsage?: Record<
+								string,
+								{ inputTokens?: number; outputTokens?: number }
+							>;
+						};
+						const usage = resultMsg.modelUsage ?? {};
+						const usedModels = Object.keys(usage);
+						if (usedModels.length > 0) {
+							const weight = (m: string) =>
+								(usage[m]?.inputTokens ?? 0) + (usage[m]?.outputTokens ?? 0);
+							const dominant = usedModels.reduce((a, b) =>
+								weight(a) >= weight(b) ? a : b,
+							);
+							if (!modelSatisfiesPin(dominant)) {
+								const pinned = getPinnedModel();
+								log.error(
+									`[event:model_drift] billed=${dominant} pinned=${pinned} used=${usedModels.join(",")} (PON-110)`,
+								);
+								await this.postModelNotificationThought(
+									sessionId,
+									`Model drift: work was billed to ${dominant} but the pinned model is ${pinned}. Failing this session (PON-110).`,
+								);
+								throw new Error(
+									`PON-110 model drift: billed=${dominant} pinned=${pinned}`,
+								);
+							}
+							log.info(
+								`[event:model_verified] billed=${dominant} used=${usedModels.join(",")}`,
+							);
+						}
+					}
 					// Result arrived: discard buffered entry (addResultEntry uses lastAssistantBodyBySession
 					// to post the content as a response activity)
 					this.bufferedAssistantEntryBySession.delete(sessionId);

@@ -111,7 +111,6 @@ function buildSanitizedQueryOptions(
 	const out: SanitizedQueryOptions = {};
 
 	if (typeof o.model === "string") out.model = o.model;
-	if (typeof o.fallbackModel === "string") out.fallbackModel = o.fallbackModel;
 	if (typeof o.maxTurns === "number") out.maxTurns = o.maxTurns;
 	if (typeof o.outputFormat === "string") out.outputFormat = o.outputFormat;
 	if (typeof o.cwd === "string") out.cwd = o.cwd;
@@ -477,7 +476,6 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 			resumeSessionId: this.config.resumeSessionId,
 			workingDirectory: this.config.workingDirectory,
 			model: this.config.model,
-			fallbackModel: this.config.fallbackModel,
 		});
 		this.logger.debug("Working directory:", this.config.workingDirectory);
 
@@ -654,7 +652,6 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 				prompt: promptForQuery,
 				options: {
 					model: this.config.model || "opus",
-					fallbackModel: this.config.fallbackModel || "sonnet",
 					abortController: this.abortController,
 					// Use Claude Code preset by default to maintain backward compatibility
 					// This can be overridden if systemPrompt is explicitly provided
