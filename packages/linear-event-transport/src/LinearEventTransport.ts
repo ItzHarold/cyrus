@@ -171,14 +171,12 @@ export class LinearEventTransport
 
 			const payload = request.body as LinearWebhookPayload;
 
-			// Emit "event" for legacy IAgentEventTransport compatibility
-			this.emit("event", payload);
-
-			// Emit "message" with translated internal message
-			this.emitMessage(payload);
-
-			// Send success response
+			// Respond immediately after verification — Linear requires the webhook
+			// HTTP response within 5 seconds; all processing happens after the
+			// reply is sent.
 			reply.code(200).send({ success: true });
+
+			this.dispatchPayload(payload);
 		} catch (error) {
 			const err = new Error("Direct webhook verification failed");
 			if (error instanceof Error) {
@@ -213,14 +211,12 @@ export class LinearEventTransport
 		try {
 			const payload = request.body as LinearWebhookPayload;
 
-			// Emit "event" for legacy IAgentEventTransport compatibility
-			this.emit("event", payload);
-
-			// Emit "message" with translated internal message
-			this.emitMessage(payload);
-
-			// Send success response
+			// Respond immediately after verification — Linear requires the webhook
+			// HTTP response within 5 seconds; all processing happens after the
+			// reply is sent.
 			reply.code(200).send({ success: true });
+
+			this.dispatchPayload(payload);
 		} catch (error) {
 			const err = new Error("Proxy webhook processing failed");
 			if (error instanceof Error) {
@@ -228,6 +224,28 @@ export class LinearEventTransport
 			}
 			this.logger.error("Proxy webhook processing failed", err);
 			reply.code(500).send({ error: "Failed to process webhook" });
+		}
+	}
+
+	/**
+	 * Emit the verified payload to listeners after the HTTP response has been
+	 * sent. Errors are logged and emitted as "error" events — they must never
+	 * propagate, since the reply is already sent and cannot carry a 500.
+	 */
+	private dispatchPayload(payload: LinearWebhookPayload): void {
+		try {
+			// Emit "event" for legacy IAgentEventTransport compatibility
+			this.emit("event", payload);
+
+			// Emit "message" with translated internal message
+			this.emitMessage(payload);
+		} catch (error) {
+			const err = new Error("Webhook dispatch failed");
+			if (error instanceof Error) {
+				err.cause = error;
+			}
+			this.logger.error("Webhook dispatch failed", err);
+			this.emit("error", err);
 		}
 	}
 

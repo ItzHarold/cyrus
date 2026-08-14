@@ -4239,7 +4239,23 @@ ${taskSection}`;
 		webhook: AgentSessionCreatedWebhook,
 		repos: RepositoryConfig[],
 	): Promise<void> {
+		const receivedAt = Date.now();
 		const issueId = webhook.agentSession?.issue?.id;
+
+		// Acknowledge before routing, access checks, or any repository work —
+		// Linear marks the session unresponsive if no activity arrives within
+		// 10 seconds of the created webhook. Everything below this may hit the
+		// Linear API (token refresh, label/description routing, blocked-by
+		// checks) and must not delay the first activity.
+		await this.postInstantAcknowledgment(
+			webhook.agentSession.id,
+			webhook.organizationId,
+		);
+		this.logger.event("session_ack_posted", {
+			kind: "created",
+			sessionId: webhook.agentSession.id,
+			elapsedMs: Date.now() - receivedAt,
+		});
 
 		// Check the cache first, as the agentSessionCreated webhook may have been triggered by an @mention
 		// on an issue that already has an agentSession and an associated repository.
@@ -4448,8 +4464,10 @@ ${taskSection}`;
 
 		const agentSessionManager = this.agentSessionManager;
 
-		// Post instant acknowledgment thought
-		await this.postInstantAcknowledgment(sessionId, linearWorkspaceId);
+		// NOTE: The instant acknowledgment is NOT posted here. Every caller has
+		// already posted its first activity by this point (created webhook ack,
+		// repository selection ack, or parked-session wake thought), so posting
+		// here would double-ack.
 
 		// Create the session using the shared method (pass full repositories array)
 		const sessionData = await this.createCyrusAgentSession(
@@ -4739,6 +4757,19 @@ ${taskSection}`;
 
 		log.debug(`Processing repository selection response: "${userMessage}"`);
 
+		// Acknowledge the selection response before initializing the runner —
+		// initializeAgentRunner no longer posts an acknowledgment itself, and
+		// runner startup involves repo work that must not delay first activity.
+		await this.postInstantPromptedAcknowledgment(
+			agentSessionId,
+			webhook.organizationId,
+			false,
+		);
+		this.logger.event("session_ack_posted", {
+			kind: "repository_selection",
+			sessionId: agentSessionId,
+		});
+
 		// Get the selected repository (or fallback)
 		const repository = await this.repositoryRouter.selectRepositoryFromResponse(
 			agentSessionId,
@@ -4863,12 +4894,7 @@ ${taskSection}`;
 			);
 			isNewSession = true;
 
-			// Post instant acknowledgment for new session creation
-			await this.postInstantPromptedAcknowledgment(
-				sessionId,
-				linearWorkspaceId,
-				false,
-			);
+			// Acknowledgment already posted in handleUserPromptedAgentActivity
 
 			// Create the session using the shared method with all repositories
 			const sessionData = await this.createCyrusAgentSession(
@@ -4899,15 +4925,7 @@ ${taskSection}`;
 				`Found existing session ${sessionId} for new user prompt`,
 			);
 
-			// Post instant acknowledgment for existing session BEFORE any async work
-			// Check if runner is currently running (streaming is Claude-specific, use isRunning for both)
-			const isCurrentlyStreaming = session?.agentRunner?.isRunning() || false;
-
-			await this.postInstantPromptedAcknowledgment(
-				sessionId,
-				linearWorkspaceId,
-				isCurrentlyStreaming,
-			);
+			// Acknowledgment already posted in handleUserPromptedAgentActivity
 
 			// Need to fetch full issue for routing context
 			const issueTracker = this.issueTrackers.get(linearWorkspaceId);
@@ -4934,8 +4952,8 @@ ${taskSection}`;
 			);
 		}
 
-		// Acknowledgment already posted above for both new and existing sessions
-		// (before any async routing work to ensure instant user feedback)
+		// Acknowledgment already posted in handleUserPromptedAgentActivity
+		// (before repository resolution, to ensure instant user feedback)
 
 		// Get issue tracker using workspace ID from webhook context
 		const issueTracker = this.issueTrackers.get(linearWorkspaceId);
@@ -5045,6 +5063,7 @@ ${taskSection}`;
 	private async handleUserPromptedAgentActivity(
 		webhook: AgentSessionPromptedWebhook,
 	): Promise<void> {
+		const receivedAt = Date.now();
 		const agentSessionId = webhook.agentSession.id;
 		const activityBody = webhook.agentActivity?.content?.body || "";
 		const signal = (webhook.agentActivity as any)?.signal;
@@ -5100,6 +5119,25 @@ ${taskSection}`;
 			);
 			return;
 		}
+
+		// Acknowledge before repository resolution — the cache-miss fallback
+		// below can hit the Linear API, and session creation later does repo
+		// work. Same 10-second responsiveness contract as session creation.
+		const isCurrentlyStreaming =
+			this.agentSessionManager
+				.getSession(agentSessionId)
+				?.agentRunner?.isRunning() || false;
+		await this.postInstantPromptedAcknowledgment(
+			agentSessionId,
+			webhook.organizationId,
+			isCurrentlyStreaming,
+		);
+		this.logger.event("session_ack_posted", {
+			kind: "prompted",
+			sessionId: agentSessionId,
+			streaming: isCurrentlyStreaming,
+			elapsedMs: Date.now() - receivedAt,
+		});
 
 		// Resolve ALL cached repositories for this issue (not just the first).
 		// Multi-repo sessions need the full set for workspace recreation.
