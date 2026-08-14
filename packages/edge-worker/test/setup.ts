@@ -12,6 +12,11 @@ import { vi } from "vitest";
 // present in the developer's shell env.
 process.env.CYRUS_DISABLE_REMOTE_SESSION_STORE = "1";
 
+// PON-110 pins the Claude model via CYRUS_MODEL and getPinnedModel() throws
+// when it is unset. Tests never spawn a real Claude session, so pin a fixed
+// model here to keep runner-config code paths constructible.
+process.env.CYRUS_MODEL = "claude-opus-5";
+
 // Keep Claude SDK debug output inside the test workspace to avoid HOME write restrictions.
 const claudeConfigDir =
 	process.env.CLAUDE_CONFIG_DIR ??
