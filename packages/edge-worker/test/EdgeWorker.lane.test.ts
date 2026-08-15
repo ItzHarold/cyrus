@@ -283,7 +283,7 @@ describe("EdgeWorker - Serialized lanes (PON-112)", () => {
 	it("persists the queue entry before posting the queued ack", async () => {
 		mockStartFlow();
 		const order: string[] = [];
-		vi.spyOn(edgeWorker as any, "savePersistedState").mockImplementation(
+		vi.spyOn(edgeWorker as any, "savePersistedStateStrict").mockImplementation(
 			async () => {
 				order.push("persist");
 			},
@@ -505,6 +505,114 @@ describe("EdgeWorker - Serialized lanes (PON-112)", () => {
 		expect(spies.graceNotice).toHaveBeenCalledWith("s1", LANE_WS);
 		expect(lm.activeSessionOf(LANE_WS)).toBe("s2");
 		expect(spies.init).toHaveBeenCalledTimes(1);
+	});
+
+	it("a resume prompt on a delivered session while the lane is busy is enqueued, not started", async () => {
+		const spies = mockStartFlow();
+		const normalFlowSpy = vi
+			.spyOn(edgeWorker as any, "runNormalPromptedFlow")
+			.mockResolvedValue(undefined);
+		const repos = [mockRepository];
+
+		// s1 delivered (lane released), s2 now holds the lane
+		await (edgeWorker as any).handleWebhook(createdWebhook("s1"), repos);
+		await (edgeWorker as any).handleWebhook(createdWebhook("s2"), repos);
+		sessionsWithRunners.delete("s1");
+		(edgeWorker as any).handleLaneSessionEnded("s1", "result");
+		await settle();
+		expect((edgeWorker as any).laneManager.activeSessionOf(LANE_WS)).toBe("s2");
+
+		// client replies on delivered s1 while s2 works
+		await (edgeWorker as any).handleWebhook(
+			promptedWebhook("s1", "also handle Y please"),
+			repos,
+		);
+
+		expect(normalFlowSpy).not.toHaveBeenCalled();
+		expect(spies.queuedAck).toHaveBeenLastCalledWith("s1", LANE_WS, 1);
+		expect((edgeWorker as any).laneManager.isQueued("s1")).toBe(true);
+	});
+
+	it("a resume prompt with the lane free acquires it and starts immediately", async () => {
+		const spies = mockStartFlow();
+		const normalFlowSpy = vi
+			.spyOn(edgeWorker as any, "runNormalPromptedFlow")
+			.mockImplementation(async (webhook: any) => {
+				sessionsWithRunners.add(webhook.agentSession.id);
+			});
+		const repos = [mockRepository];
+
+		// s1 delivered, lane free, empty queue
+		await (edgeWorker as any).handleWebhook(createdWebhook("s1"), repos);
+		sessionsWithRunners.delete("s1");
+		(edgeWorker as any).handleLaneSessionEnded("s1", "result");
+		await settle();
+
+		await (edgeWorker as any).handleWebhook(
+			promptedWebhook("s1", "also handle Y please"),
+			repos,
+		);
+
+		expect(normalFlowSpy).toHaveBeenCalledTimes(1);
+		expect(spies.queuedAck).not.toHaveBeenCalled();
+		// the resumed session is accounted as the lane holder
+		expect((edgeWorker as any).laneManager.activeSessionOf(LANE_WS)).toBe("s1");
+	});
+
+	it("a dequeued resume entry replays through the prompted flow with queued context appended", async () => {
+		mockStartFlow();
+		const normalFlowSpy = vi
+			.spyOn(edgeWorker as any, "runNormalPromptedFlow")
+			.mockImplementation(async (webhook: any) => {
+				sessionsWithRunners.add(webhook.agentSession.id);
+			});
+		const repos = [mockRepository];
+
+		await (edgeWorker as any).handleWebhook(createdWebhook("s2"), repos);
+		// s1 (delivered earlier) gets a resume prompt while s2 holds the lane
+		await (edgeWorker as any).handleWebhook(
+			promptedWebhook("s1", "also handle Y please"),
+			repos,
+		);
+		// more context arrives while queued
+		await (edgeWorker as any).handleWebhook(
+			promptedWebhook("s1", "and make sure it works on mobile"),
+			repos,
+		);
+
+		// s2 completes → s1's resume entry replays
+		sessionsWithRunners.delete("s2");
+		(edgeWorker as any).handleLaneSessionEnded("s2", "result");
+		await settle();
+
+		expect(normalFlowSpy).toHaveBeenCalledTimes(1);
+		const replayed = normalFlowSpy.mock.calls[0]![0] as any;
+		expect(replayed.agentSession.id).toBe("s1");
+		expect(replayed.agentActivity.content.body).toContain(
+			"also handle Y please",
+		);
+		expect(replayed.agentActivity.content.body).toContain(
+			"and make sure it works on mobile",
+		);
+		expect((edgeWorker as any).laneManager.activeSessionOf(LANE_WS)).toBe("s1");
+	});
+
+	it("a failed persist on enqueue rolls back the entry and posts NO queued ack", async () => {
+		const spies = mockStartFlow();
+		const repos = [mockRepository];
+		await (edgeWorker as any).handleWebhook(createdWebhook("s1"), repos);
+
+		vi.spyOn(
+			(edgeWorker as any).persistenceManager,
+			"saveEdgeWorkerState",
+		).mockRejectedValue(new Error("disk full"));
+
+		// handleWebhook swallows the rethrow (logs it); the observable
+		// contract is: no ack, no queue entry.
+		await (edgeWorker as any).handleWebhook(createdWebhook("s2"), repos);
+
+		expect(spies.queuedAck).not.toHaveBeenCalled();
+		expect((edgeWorker as any).laneManager.isQueued("s2")).toBe(false);
 	});
 
 	it("boot recovery drains a lane left free with queued work", async () => {

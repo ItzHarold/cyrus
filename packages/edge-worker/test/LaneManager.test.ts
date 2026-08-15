@@ -15,6 +15,7 @@ function entry(sessionId: string, issueId = `issue-${sessionId}`) {
 		issueIdentifier: `TEST-${sessionId}`,
 		enqueuedAt: new Date().toISOString(),
 		webhook: { organizationId: WS, agentSession: { id: sessionId } },
+		kind: "created" as const,
 	};
 }
 

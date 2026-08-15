@@ -84,6 +84,13 @@ export interface SerializedLaneState {
 		enqueuedAt: string;
 		webhook: unknown;
 		contextPrompts: string[];
+		/**
+		 * "created": webhook is an AgentSessionCreatedWebhook, replayed through
+		 * the created flow. "resume": webhook is an AgentSessionPromptedWebhook
+		 * for an existing (delivered) session, replayed through the prompted
+		 * flow. Absent in pre-4.2 state — treated as "created".
+		 */
+		kind?: "created" | "resume";
 	}>;
 }
 

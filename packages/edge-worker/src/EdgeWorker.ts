@@ -4357,10 +4357,22 @@ ${taskSection}`;
 						issueIdentifier: webhook.agentSession.issue?.identifier,
 						enqueuedAt: new Date().toISOString(),
 						webhook,
+						kind: "created",
 					});
 					// Persist BEFORE the client-visible ack: once the client has
 					// been told "position #N", a crash must not lose the entry.
-					await this.savePersistedState();
+					// Strict: a failed write rolls the entry back and aborts —
+					// told-but-not-persisted must be impossible.
+					try {
+						await this.savePersistedStateStrict();
+					} catch (error) {
+						this.laneManager.removeQueued(sessionId);
+						this.logger.event("lane_enqueue_persist_failed", {
+							workspaceId,
+							sessionId,
+						});
+						throw error;
+					}
 					await this.activityPoster.postQueuedAcknowledgment(
 						sessionId,
 						workspaceId,
@@ -4657,12 +4669,31 @@ ${taskSection}`;
 		}
 
 		try {
-			const repos = Array.from(this.repositories.values());
-			await this.handleAgentSessionCreatedWebhook(
-				next.webhook as AgentSessionCreatedWebhook,
-				repos,
-				{ laneAssigned: true, queuedContextPrompts: next.contextPrompts },
-			);
+			if (next.kind === "resume") {
+				// Resume entry: replay the stored prompted webhook. It re-enters
+				// handleUserPromptedAgentActivity, where the lane check sees this
+				// session as the holder and proceeds; that path's own backstop
+				// releases if the resume never starts a runner.
+				const resumeWebhook = structuredClone(
+					next.webhook,
+				) as AgentSessionPromptedWebhook;
+				if (
+					next.contextPrompts.length > 0 &&
+					resumeWebhook.agentActivity?.content
+				) {
+					resumeWebhook.agentActivity.content.body = `${resumeWebhook.agentActivity.content.body}\n\nAdditional context added while queued:\n${next.contextPrompts
+						.map((p) => `- ${p}`)
+						.join("\n")}`;
+				}
+				await this.handleUserPromptedAgentActivity(resumeWebhook);
+			} else {
+				const repos = Array.from(this.repositories.values());
+				await this.handleAgentSessionCreatedWebhook(
+					next.webhook as AgentSessionCreatedWebhook,
+					repos,
+					{ laneAssigned: true, queuedContextPrompts: next.contextPrompts },
+				);
+			}
 		} catch (error) {
 			this.logger.error(
 				`Failed to start queued session ${next.sessionId} in workspace ${workspaceId}:`,
@@ -5605,6 +5636,102 @@ ${taskSection}`;
 			);
 			return;
 		}
+
+		// PON-112: lane admission for resumes. "At most one active session per
+		// workspace" applies to resumes too — a prompt that would resume work
+		// on a non-running session while a DIFFERENT session holds the lane is
+		// enqueued instead (the prompt travels as the resume payload). Lane
+		// free → acquire, so quick follow-ups on delivered work still start
+		// instantly whenever the queue is empty. Child sessions bypass (the
+		// parent blocks on them); a session already running keeps streaming.
+		const workspaceId = webhook.organizationId;
+		let resumeLaneHeld = false;
+		if (
+			this.laneManager.isEnabled(workspaceId) &&
+			!this.globalSessionRegistry.getParentSessionId(agentSessionId)
+		) {
+			const holder = this.laneManager.activeSessionOf(workspaceId);
+			const isSessionRunning =
+				this.agentSessionManager
+					.getSession(agentSessionId)
+					?.agentRunner?.isRunning() === true;
+			if (holder === agentSessionId) {
+				resumeLaneHeld = true;
+			} else if (!isSessionRunning) {
+				if (holder !== null) {
+					const position = this.laneManager.enqueue(workspaceId, {
+						sessionId: agentSessionId,
+						issueId,
+						issueIdentifier: webhook.agentSession.issue?.identifier,
+						enqueuedAt: new Date().toISOString(),
+						webhook,
+						kind: "resume",
+					});
+					try {
+						await this.savePersistedStateStrict();
+					} catch (error) {
+						this.laneManager.removeQueued(agentSessionId);
+						this.logger.event("lane_enqueue_persist_failed", {
+							workspaceId,
+							sessionId: agentSessionId,
+						});
+						throw error;
+					}
+					await this.activityPoster.postQueuedAcknowledgment(
+						agentSessionId,
+						workspaceId,
+						position,
+					);
+					this.logger.event("session_ack_posted", {
+						kind: "prompted",
+						queued: true,
+						position,
+						sessionId: agentSessionId,
+						elapsedMs: Date.now() - receivedAt,
+					});
+					return;
+				}
+				this.laneManager.acquire(workspaceId, agentSessionId);
+				resumeLaneHeld = true;
+			}
+			// holder !== session && session running: legacy overlap — the
+			// session is already working outside the lane; deliver the prompt
+			// to the running stream rather than queueing it out from under it.
+		}
+
+		try {
+			await this.runNormalPromptedFlow(webhook, receivedAt, issueId);
+		} finally {
+			// Backstop (PON-112): if this resume took (or held) the lane but no
+			// runner ended up running — repository recovery failed, blocked
+			// user, thrown error — free the lane so queued work continues.
+			if (
+				resumeLaneHeld &&
+				!this.agentSessionManager
+					.getSession(agentSessionId)
+					?.agentRunner?.isRunning()
+			) {
+				this.releaseLaneAndContinue(
+					workspaceId,
+					agentSessionId,
+					"resume_not_started",
+				);
+			}
+		}
+	}
+
+	/**
+	 * The pre-PON-112 tail of handleUserPromptedAgentActivity: prompted ack,
+	 * repository resolution, access check, and the normal prompted flow.
+	 * Split out so the lane admission above can wrap it with a release
+	 * backstop.
+	 */
+	private async runNormalPromptedFlow(
+		webhook: AgentSessionPromptedWebhook,
+		receivedAt: number,
+		issueId: string,
+	): Promise<void> {
+		const agentSessionId = webhook.agentSession.id;
 
 		// Acknowledge before repository resolution — the cache-miss fallback
 		// below can hit the Linear API, and session creation later does repo
@@ -7390,14 +7517,23 @@ ${input.userComment}
 	 */
 	private async savePersistedState(): Promise<void> {
 		try {
-			const state = this.serializeMappings();
-			await this.persistenceManager.saveEdgeWorkerState(state);
-			this.logger.debug(
-				`✅ Saved EdgeWorker state for ${Object.keys(state.agentSessions || {}).length} sessions`,
-			);
+			await this.savePersistedStateStrict();
 		} catch (error) {
 			this.logger.error(`Failed to save persisted EdgeWorker state:`, error);
 		}
+	}
+
+	/**
+	 * Persist state, PROPAGATING write failures. Used by the lane enqueue
+	 * paths (PON-112): the client-visible "Queued — position #N" ack must
+	 * never be posted for an entry that failed to reach disk.
+	 */
+	private async savePersistedStateStrict(): Promise<void> {
+		const state = this.serializeMappings();
+		await this.persistenceManager.saveEdgeWorkerState(state);
+		this.logger.debug(
+			`✅ Saved EdgeWorker state for ${Object.keys(state.agentSessions || {}).length} sessions`,
+		);
 	}
 
 	/**

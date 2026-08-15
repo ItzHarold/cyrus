@@ -15,6 +15,12 @@ export interface LaneQueueEntry {
 	webhook: unknown;
 	/** Prompts received while queued; delivered as context when the session starts. */
 	contextPrompts: string[];
+	/**
+	 * "created": new session, webhook replays through the created flow.
+	 * "resume": prompt on an existing (delivered) session that arrived while
+	 * another session held the lane; webhook replays through the prompted flow.
+	 */
+	kind: "created" | "resume";
 }
 
 interface LaneState {
@@ -269,6 +275,7 @@ export class LaneManager {
 				queue: (laneState.queue ?? []).map((e) => ({
 					...e,
 					contextPrompts: e.contextPrompts ?? [],
+					kind: e.kind ?? "created",
 				})),
 			};
 			this.lanes.set(workspaceId, lane);
