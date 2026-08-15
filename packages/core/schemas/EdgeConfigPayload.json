@@ -500,6 +500,9 @@
 					},
 					"linearWorkspaceName": {
 						"type": "string"
+					},
+					"laneSerialization": {
+						"type": "boolean"
 					}
 				},
 				"required": ["linearToken"],

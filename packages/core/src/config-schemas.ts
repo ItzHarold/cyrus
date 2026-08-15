@@ -264,6 +264,12 @@ export const LinearWorkspaceConfigSchema = z.object({
 	linearWorkspaceSlug: z.string().optional(),
 	/** Human-readable workspace name (e.g., "Ceedar") */
 	linearWorkspaceName: z.string().optional(),
+	/**
+	 * Serialize work in this workspace to one active session at a time (a
+	 * "lane"); additional sessions queue FIFO and start automatically as the
+	 * lane frees up. Default off: sessions run concurrently as before.
+	 */
+	laneSerialization: z.boolean().optional(),
 });
 
 /**

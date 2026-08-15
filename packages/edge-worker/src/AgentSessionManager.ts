@@ -97,6 +97,7 @@ export class AgentSessionManager extends EventEmitter {
 		prompt: string,
 		childSessionId: string,
 	) => Promise<void>;
+	private onSessionEnded?: (sessionId: string) => void;
 
 	constructor(
 		getParentSessionId?: (childSessionId: string) => string | undefined,
@@ -106,11 +107,13 @@ export class AgentSessionManager extends EventEmitter {
 			childSessionId: string,
 		) => Promise<void>,
 		logger?: ILogger,
+		onSessionEnded?: (sessionId: string) => void,
 	) {
 		super();
 		this.logger = logger ?? createLogger({ component: "AgentSessionManager" });
 		this.getParentSessionId = getParentSessionId;
 		this.resumeParentSession = resumeParentSession;
+		this.onSessionEnded = onSessionEnded;
 	}
 
 	/**
@@ -375,6 +378,15 @@ export class AgentSessionManager extends EventEmitter {
 			totalCostUsd: resultMessage.total_cost_usd,
 			usage: resultMessage.usage,
 		});
+
+		// Notify before the early returns below — every outcome (success,
+		// error, user stop) must count as "session ended" so a workspace lane
+		// holding this session releases (PON-112).
+		try {
+			this.onSessionEnded?.(sessionId);
+		} catch (error) {
+			log.error(`onSessionEnded callback failed:`, error);
+		}
 
 		if (wasStopRequested) {
 			log.info(`Session was stopped by user`);

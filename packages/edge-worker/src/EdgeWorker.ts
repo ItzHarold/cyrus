@@ -152,6 +152,16 @@ import { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
 import { EgressProxy } from "./EgressProxy.js";
 import { GitService } from "./GitService.js";
 import { GlobalSessionRegistry } from "./GlobalSessionRegistry.js";
+import { isQueueReorderIntent, LaneManager } from "./LaneManager.js";
+
+/** Options threaded through the created-session flow by the lane machinery. */
+interface LaneStartOptions {
+	/** The lane is already assigned to this session (dequeue replay). */
+	laneAssigned?: boolean;
+	/** Prompts collected while the session was queued. */
+	queuedContextPrompts?: string[];
+}
+
 import { McpConfigService } from "./McpConfigService.js";
 import { PromptBuilder } from "./PromptBuilder.js";
 import type {
@@ -227,6 +237,10 @@ export class EdgeWorker extends EventEmitter {
 	private sharedApplicationServer: SharedApplicationServer;
 	private cyrusHome: string;
 	private globalSessionRegistry: GlobalSessionRegistry; // Centralized session storage across all repositories
+	private laneManager: LaneManager; // Per-workspace serialized lanes (PON-112)
+	private laneGraceTimers: Map<string, NodeJS.Timeout> = new Map(); // workspaceId → boot-grace timer
+	/** Grace window for a restored lane holder with no live runner (PON-112). */
+	private static readonly LANE_BOOT_GRACE_MS = 10 * 60 * 1000;
 	private configPath?: string; // Path to config.json file
 	/** @internal - Exposed for testing only */
 	public repositoryRouter: RepositoryRouter; // Repository routing and selection
@@ -383,6 +397,11 @@ export class EdgeWorker extends EventEmitter {
 
 		// Initialize global session registry (centralized session storage)
 		this.globalSessionRegistry = new GlobalSessionRegistry();
+		this.laneManager = new LaneManager(
+			(workspaceId) =>
+				this.config.linearWorkspaces?.[workspaceId]?.laneSerialization === true,
+			this.logger,
+		);
 
 		// Initialize repository router with dependencies
 		const repositoryRouterDeps: RepositoryRouterDeps = {
@@ -488,6 +507,10 @@ export class EdgeWorker extends EventEmitter {
 					childSessionId,
 				);
 			},
+			undefined,
+			// PON-112: every session outcome (success, error, user stop) must
+			// release a lane held by that session.
+			(sessionId: string) => this.handleLaneSessionEnded(sessionId, "result"),
 		);
 
 		// Initialize repositories with path resolution
@@ -859,6 +882,46 @@ export class EdgeWorker extends EventEmitter {
 
 		// 5. Register /version endpoint for CLI version info
 		this.registerVersionEndpoint();
+
+		// 6. Register localhost-only /admin/lanes endpoint (PON-112)
+		this.registerLanesEndpoint();
+
+		// 7. Lane boot recovery (PON-112): grace window for a restored active
+		// session with no live runner; drain lanes left free with queued work.
+		// Runs last so transports, trackers, and endpoints are all live before
+		// any queued session starts.
+		this.armLaneBootRecovery();
+	}
+
+	/**
+	 * Register the /admin/lanes debug endpoint (PON-112). Loopback source AND
+	 * absence of proxy-forwarding headers are both required: Caddy proxies
+	 * public traffic to this server FROM loopback, so an IP check alone would
+	 * expose the endpoint. Non-local requests get a 404, not a 403, so the
+	 * route's existence is not advertised.
+	 */
+	private registerLanesEndpoint(): void {
+		const fastify = this.sharedApplicationServer.getFastifyInstance();
+
+		fastify.get("/admin/lanes", async (request, reply) => {
+			const forwarded = [
+				"x-forwarded-for",
+				"x-forwarded-proto",
+				"x-forwarded-host",
+				"x-real-ip",
+				"forwarded",
+			].some((header) => request.headers[header] !== undefined);
+			const loopback = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(
+				request.ip,
+			);
+			if (!loopback || forwarded) {
+				return reply.status(404).send({ error: "Not found" });
+			}
+			return reply.status(200).send({ lanes: this.laneManager.snapshot() });
+		});
+
+		this.logger.info("✅ Lanes endpoint registered (localhost only)");
+		this.logger.info("   Route: GET /admin/lanes");
 	}
 
 	/**
@@ -2593,6 +2656,13 @@ ${taskSection}`;
 		// Stop config file watcher
 		await this.configManager.stop();
 
+		// Cancel pending lane grace timers (PON-112); state is persisted below
+		// and recovery re-arms on next boot.
+		for (const timer of this.laneGraceTimers.values()) {
+			clearTimeout(timer);
+		}
+		this.laneGraceTimers.clear();
+
 		try {
 			await this.savePersistedState();
 			this.logger.info("✅ EdgeWorker state saved successfully");
@@ -3405,6 +3475,17 @@ ${taskSection}`;
 				`Session stopped — ${message.workItemIdentifier} was marked as Done or Canceled.`,
 			);
 			this.agentSessionManager.removeSession(session.id);
+		}
+
+		// Lane cleanup (PON-112): release the lane if a stopped session held
+		// it, and drop queued sessions of this issue from their lane queue.
+		for (const session of sessions) {
+			await this.cleanupLaneForSession(session.id);
+		}
+		for (const queuedSessionId of this.laneManager.queuedSessionIdsForIssue(
+			issueId,
+		)) {
+			await this.cleanupLaneForSession(queuedSessionId);
 		}
 
 		// Build the set of repositories involved with this issue so per-repo
@@ -4238,8 +4319,98 @@ ${taskSection}`;
 	private async handleAgentSessionCreatedWebhook(
 		webhook: AgentSessionCreatedWebhook,
 		repos: RepositoryConfig[],
+		laneOptions?: LaneStartOptions,
 	): Promise<void> {
 		const receivedAt = Date.now();
+		const issueId = webhook.agentSession?.issue?.id;
+		const sessionId = webhook.agentSession.id;
+		const workspaceId = webhook.organizationId;
+
+		// PON-112: serialized-lane admission, before the ack so the FIRST
+		// activity is already queue-aware. Lane bookkeeping is synchronous and
+		// local — it adds no latency to the acknowledgment path.
+		let laneHeld = laneOptions?.laneAssigned === true;
+		if (this.laneManager.isEnabled(workspaceId) && !laneOptions?.laneAssigned) {
+			// Child sessions bypass the lane: the active (parent) session waits
+			// on their result, so queueing a child would deadlock the lane.
+			const isChildSession = Boolean(
+				this.globalSessionRegistry.getParentSessionId(sessionId),
+			);
+			if (!isChildSession) {
+				const existingPosition = this.laneManager.positionOf(sessionId);
+				if (existingPosition !== null) {
+					// Duplicate webhook delivery for an already-queued session —
+					// restate the position, never enqueue twice.
+					await this.activityPoster.postQueuedAcknowledgment(
+						sessionId,
+						workspaceId,
+						existingPosition,
+					);
+					return;
+				}
+				if (this.laneManager.acquire(workspaceId, sessionId)) {
+					laneHeld = true;
+				} else {
+					const position = this.laneManager.enqueue(workspaceId, {
+						sessionId,
+						issueId,
+						issueIdentifier: webhook.agentSession.issue?.identifier,
+						enqueuedAt: new Date().toISOString(),
+						webhook,
+					});
+					// Persist BEFORE the client-visible ack: once the client has
+					// been told "position #N", a crash must not lose the entry.
+					await this.savePersistedState();
+					await this.activityPoster.postQueuedAcknowledgment(
+						sessionId,
+						workspaceId,
+						position,
+					);
+					this.logger.event("session_ack_posted", {
+						kind: "created",
+						queued: true,
+						position,
+						sessionId,
+						elapsedMs: Date.now() - receivedAt,
+					});
+					return;
+				}
+			}
+		}
+
+		try {
+			await this.runAgentSessionCreatedFlow(
+				webhook,
+				repos,
+				receivedAt,
+				laneOptions,
+			);
+		} finally {
+			// Backstop (PON-112): if this session took the lane but no runner
+			// ever started — routing "none", pending repository selection,
+			// blocked-by park, blocked user, or a thrown error — free the lane
+			// so queued work continues. Release is idempotent.
+			if (laneHeld) {
+				if (this.agentSessionManager.getSession(sessionId)?.agentRunner) {
+					this.clearLaneGrace(workspaceId);
+				} else {
+					this.releaseLaneAndContinue(workspaceId, sessionId, "not_started");
+				}
+			}
+		}
+	}
+
+	/**
+	 * The pre-PON-112 body of handleAgentSessionCreatedWebhook: ack, routing,
+	 * access checks, blocked-by check, runner initialization. Split out so the
+	 * lane admission above can wrap it with a release backstop.
+	 */
+	private async runAgentSessionCreatedFlow(
+		webhook: AgentSessionCreatedWebhook,
+		repos: RepositoryConfig[],
+		receivedAt: number,
+		laneOptions?: LaneStartOptions,
+	): Promise<void> {
 		const issueId = webhook.agentSession?.issue?.id;
 
 		// Acknowledge before routing, access checks, or any repository work —
@@ -4253,6 +4424,7 @@ ${taskSection}`;
 		);
 		this.logger.event("session_ack_posted", {
 			kind: "created",
+			...(laneOptions?.laneAssigned && { laneDequeue: true }),
 			sessionId: webhook.agentSession.id,
 			elapsedMs: Date.now() - receivedAt,
 		});
@@ -4387,19 +4559,312 @@ ${taskSection}`;
 			return;
 		}
 
+		// Deliver prompts the user posted while this session sat in the lane
+		// queue (PON-112): appended to the comment body so prompt assembly
+		// includes them in the initial prompt.
+		const queuedContext = laneOptions?.queuedContextPrompts?.length
+			? `Context added while this issue was queued:\n${laneOptions.queuedContextPrompts
+					.map((p) => `- ${p}`)
+					.join("\n")}`
+			: undefined;
+		const effectiveCommentBody = queuedContext
+			? `${commentBody ?? ""}\n\n${queuedContext}`
+			: commentBody;
+
 		// Initialize agent runner using shared logic (pass full repositories array)
 		await this.initializeAgentRunner(
 			agentSession,
 			repositories,
 			linearWorkspaceId,
 			guidance,
-			commentBody,
+			effectiveCommentBody,
 			baseBranchOverrides,
 			routingMethod,
 		);
 	}
 
+	// ========================================================================
+	// SERIALIZED LANES (PON-112)
+	// ========================================================================
+
 	/**
+	 * A session ended (result message: success, error, or user stop). Release
+	 * the lane if this session holds one and start the next queued session.
+	 */
+	private handleLaneSessionEnded(sessionId: string, reason: string): void {
+		const workspaceId = this.laneManager.workspaceOf(sessionId);
+		if (!workspaceId || !this.laneManager.isActive(sessionId)) return;
+		this.releaseLaneAndContinue(workspaceId, sessionId, reason);
+	}
+
+	/**
+	 * Runner-level "error" event. Only release the lane when the runner is
+	 * actually dead — non-fatal errors can be emitted while a session keeps
+	 * running, and releasing then would start a second concurrent session.
+	 */
+	private handleLaneRunnerError(sessionId: string): void {
+		const session = this.agentSessionManager.getSession(sessionId);
+		if (session?.agentRunner?.isRunning?.()) return;
+		this.handleLaneSessionEnded(sessionId, "runner_error");
+	}
+
+	/**
+	 * Idempotently release a lane and kick off the next queued session.
+	 * Synchronous callers (result handling, error events) must not await the
+	 * next session's start, so the continuation is fire-and-forget with its
+	 * own error logging.
+	 */
+	private releaseLaneAndContinue(
+		workspaceId: string,
+		sessionId: string,
+		reason: string,
+	): void {
+		if (!this.laneManager.release(workspaceId, sessionId)) return;
+		this.clearLaneGrace(workspaceId);
+		this.logger.event("lane_released", { workspaceId, sessionId, reason });
+		void this.startNextInLane(workspaceId).catch((error) => {
+			this.logger.error(
+				`Failed to start next queued session in workspace ${workspaceId}:`,
+				error,
+			);
+		});
+	}
+
+	/**
+	 * Dequeue the head of the lane queue, persist, notify shifted positions,
+	 * and start the session by replaying its stored created-webhook through
+	 * the normal start flow (with a normal start acknowledgment).
+	 */
+	private async startNextInLane(workspaceId: string): Promise<void> {
+		const next = this.laneManager.takeNext(workspaceId);
+		await this.savePersistedState();
+		if (!next) return;
+
+		this.logger.event("lane_start_next", {
+			workspaceId,
+			sessionId: next.sessionId,
+			queuedRemaining: this.laneManager.queueLength(workspaceId),
+		});
+
+		// Every remaining entry moved up one position.
+		const snapshot = this.laneManager.snapshot()[workspaceId];
+		for (const entry of snapshot?.queue ?? []) {
+			await this.activityPoster.postQueuePositionUpdate(
+				entry.sessionId,
+				workspaceId,
+				entry.position,
+			);
+		}
+
+		try {
+			const repos = Array.from(this.repositories.values());
+			await this.handleAgentSessionCreatedWebhook(
+				next.webhook as AgentSessionCreatedWebhook,
+				repos,
+				{ laneAssigned: true, queuedContextPrompts: next.contextPrompts },
+			);
+		} catch (error) {
+			this.logger.error(
+				`Failed to start queued session ${next.sessionId} in workspace ${workspaceId}:`,
+				error,
+			);
+			// The replay's own backstop releases and continues; this is a
+			// second, idempotent safety in case the throw happened before it.
+			this.releaseLaneAndContinue(workspaceId, next.sessionId, "start_failed");
+		}
+	}
+
+	/**
+	 * Remove sessions from lane bookkeeping when their issue goes away
+	 * (unassign, cancel, delete). Active holders release the lane; queued
+	 * entries are removed and shifted positions are notified.
+	 */
+	private async cleanupLaneForSession(sessionId: string): Promise<void> {
+		const workspaceId = this.laneManager.workspaceOf(sessionId);
+		if (!workspaceId) return;
+		if (this.laneManager.isActive(sessionId)) {
+			this.releaseLaneAndContinue(workspaceId, sessionId, "issue_removed");
+			return;
+		}
+		const result = this.laneManager.removeQueued(sessionId);
+		if (!result) return;
+		await this.savePersistedState();
+		for (const change of result.changes) {
+			await this.activityPoster.postQueuePositionUpdate(
+				change.sessionId,
+				workspaceId,
+				change.position,
+			);
+		}
+	}
+
+	/**
+	 * Stop signal on a queued session: it has no runner — remove it from the
+	 * queue and confirm.
+	 */
+	private async handleQueuedSessionStop(
+		webhook: AgentSessionPromptedWebhook,
+	): Promise<void> {
+		const sessionId = webhook.agentSession.id;
+		const workspaceId = this.laneManager.workspaceOf(sessionId);
+		if (!workspaceId) return;
+		const result = this.laneManager.removeQueued(sessionId);
+		await this.savePersistedState();
+		await this.activityPoster.postQueueRemovedNotice(sessionId, workspaceId);
+		for (const change of result?.changes ?? []) {
+			await this.activityPoster.postQueuePositionUpdate(
+				change.sessionId,
+				workspaceId,
+				change.position,
+			);
+		}
+		this.logger.event("lane_queue_removed", {
+			workspaceId,
+			sessionId,
+			reason: "stop_signal",
+		});
+	}
+
+	/**
+	 * Prompt on a queued session (PON-112): a short next/prioritize intent
+	 * moves it to the front; anything else is stored as context for when the
+	 * session starts. Everything here is local except the activity posts, so
+	 * the response is immediate.
+	 */
+	private async handleQueuedSessionPrompt(
+		webhook: AgentSessionPromptedWebhook,
+		receivedAt: number,
+	): Promise<void> {
+		const sessionId = webhook.agentSession.id;
+		const workspaceId = this.laneManager.workspaceOf(sessionId);
+		if (!workspaceId) return;
+		const body = webhook.agentActivity?.content?.body ?? "";
+
+		if (isQueueReorderIntent(body)) {
+			const result = this.laneManager.moveToFront(sessionId);
+			if (!result) return;
+			await this.savePersistedState();
+			await this.activityPoster.postQueueReorderConfirmation(
+				sessionId,
+				workspaceId,
+				result.alreadyFirst,
+			);
+			for (const change of result.changes) {
+				await this.activityPoster.postQueuePositionUpdate(
+					change.sessionId,
+					workspaceId,
+					change.position,
+				);
+			}
+			this.logger.event("lane_reordered", {
+				workspaceId,
+				sessionId,
+				elapsedMs: Date.now() - receivedAt,
+			});
+			return;
+		}
+
+		this.laneManager.addContextPrompt(sessionId, body);
+		await this.savePersistedState();
+		const position = this.laneManager.positionOf(sessionId);
+		if (position !== null) {
+			await this.activityPoster.postQueueContextAcknowledgment(
+				sessionId,
+				workspaceId,
+				position,
+			);
+		}
+		this.logger.event("session_ack_posted", {
+			kind: "prompted",
+			queued: true,
+			position,
+			sessionId,
+			elapsedMs: Date.now() - receivedAt,
+		});
+	}
+
+	/**
+	 * Boot recovery (PON-112): arm a bounded grace window for a restored
+	 * active session with no live runner, and drain lanes left free with a
+	 * non-empty queue (crash between release and start). A paying client must
+	 * never sit behind a dead session.
+	 */
+	private armLaneBootRecovery(): void {
+		for (const workspaceId of this.laneManager.workspaceIds()) {
+			const activeSessionId = this.laneManager.activeSessionOf(workspaceId);
+			if (activeSessionId) {
+				if (this.agentSessionManager.getSession(activeSessionId)?.agentRunner) {
+					continue;
+				}
+				const deadline = new Date(
+					Date.now() + EdgeWorker.LANE_BOOT_GRACE_MS,
+				).toISOString();
+				this.laneManager.setGraceDeadline(workspaceId, deadline);
+				this.logger.event("lane_grace_armed", {
+					workspaceId,
+					sessionId: activeSessionId,
+					deadline,
+				});
+				const timer = setTimeout(() => {
+					void this.fireLaneGrace(workspaceId, activeSessionId).catch(
+						(error) => {
+							this.logger.error(
+								`Lane grace handling failed for workspace ${workspaceId}:`,
+								error,
+							);
+						},
+					);
+				}, EdgeWorker.LANE_BOOT_GRACE_MS);
+				timer.unref?.();
+				this.laneGraceTimers.set(workspaceId, timer);
+			} else if (this.laneManager.queueLength(workspaceId) > 0) {
+				void this.startNextInLane(workspaceId).catch((error) => {
+					this.logger.error(
+						`Failed to drain lane queue for workspace ${workspaceId} on boot:`,
+						error,
+					);
+				});
+			}
+		}
+	}
+
+	/** Grace window expired: release the stalled session's lane and move on. */
+	private async fireLaneGrace(
+		workspaceId: string,
+		sessionId: string,
+	): Promise<void> {
+		this.laneGraceTimers.delete(workspaceId);
+		if (this.laneManager.activeSessionOf(workspaceId) !== sessionId) return;
+		if (
+			this.agentSessionManager.getSession(sessionId)?.agentRunner?.isRunning?.()
+		) {
+			this.laneManager.setGraceDeadline(workspaceId, null);
+			return;
+		}
+		this.logger.event("lane_grace_released", { workspaceId, sessionId });
+		await this.activityPoster.postLaneGraceReleaseNotice(
+			sessionId,
+			workspaceId,
+		);
+		this.releaseLaneAndContinue(workspaceId, sessionId, "boot_grace_expired");
+	}
+
+	private clearLaneGrace(workspaceId: string): void {
+		const timer = this.laneGraceTimers.get(workspaceId);
+		if (timer) {
+			clearTimeout(timer);
+			this.laneGraceTimers.delete(workspaceId);
+		}
+		this.laneManager.setGraceDeadline(workspaceId, null);
+	}
+
+	/** Clear a pending grace window when the holding session's runner starts. */
+	private clearLaneGraceForSession(sessionId: string): void {
+		const workspaceId = this.laneManager.workspaceOf(sessionId);
+		if (workspaceId && this.laneManager.isActive(sessionId)) {
+			this.clearLaneGrace(workspaceId);
+		}
+	}
 
 	/**
 	 * Initialize and start agent runner for an agent session
@@ -5075,6 +5540,12 @@ ${taskSection}`;
 		// Per CLAUDE.md: "an agentSession MUST already exist" for stop signals
 		// IMPORTANT: Stop signals do NOT require repository lookup
 		if (signal === "stop" || isTextStopRequest) {
+			// A queued session has no runner — a stop removes it from the lane
+			// queue instead (PON-112).
+			if (this.laneManager.isQueued(agentSessionId)) {
+				await this.handleQueuedSessionStop(webhook);
+				return;
+			}
 			await this.handleStopSignal(webhook);
 			return;
 		}
@@ -5088,6 +5559,15 @@ ${taskSection}`;
 			this.parkedSessions.has(issueIdForParkedCheck)
 		) {
 			await this.handleParkedSessionReprompt(webhook, issueIdForParkedCheck);
+			return;
+		}
+
+		// Branch 1.7: Prompts on lane-queued sessions (PON-112) — reorder
+		// intent moves the session to the front; anything else is stored as
+		// context. Must come before the generic prompted flow: a queued
+		// session has no runner to stream into.
+		if (this.laneManager.isQueued(agentSessionId)) {
+			await this.handleQueuedSessionPrompt(webhook, receivedAt);
 			return;
 		}
 
@@ -5248,6 +5728,17 @@ ${taskSection}`;
 				linearWorkspaceId,
 				// No parentId - post as a new comment on the issue
 			);
+		}
+
+		// Lane cleanup (PON-112): release the lane if a stopped session held
+		// it, and drop queued sessions of this issue from their lane queue.
+		for (const session of sessions) {
+			await this.cleanupLaneForSession(session.id);
+		}
+		for (const queuedSessionId of this.laneManager.queuedSessionIdsForIssue(
+			issue.id,
+		)) {
+			await this.cleanupLaneForSession(queuedSessionId);
 		}
 
 		// Emit events
@@ -6538,7 +7029,12 @@ ${input.userComment}
 			onMessage: (message: SDKMessage) => {
 				this.handleClaudeMessage(sessionId, message, repository.id);
 			},
-			onError: (error: Error) => this.handleClaudeError(error),
+			onError: (error: Error) => {
+				this.handleClaudeError(error);
+				// PON-112: a runner that dies without emitting a result message
+				// must not wedge the workspace lane.
+				this.handleLaneRunnerError(sessionId);
+			},
 			createAskUserQuestionCallback: (sid, wid) =>
 				this.createAskUserQuestionCallback(sid, wid)!,
 			requireLinearWorkspaceId,
@@ -6919,6 +7415,7 @@ ${input.userComment}
 			agentSessionEntries: serializedState.entries,
 			childToParentAgentSession,
 			issueRepositoryCache,
+			lanes: this.laneManager.serialize(),
 		};
 	}
 
@@ -6989,6 +7486,13 @@ ${input.userComment}
 			this.logger.debug(
 				`Restored ${cache.size} issue-to-repository cache mappings`,
 			);
+		}
+
+		// Restore per-workspace lane state (PON-112). Restore never starts
+		// runners; armLaneBootRecovery decides what happens to a restored
+		// active session and drains lanes left free with queued work.
+		if (state.lanes) {
+			this.laneManager.restore(state.lanes);
 		}
 	}
 
@@ -7339,6 +7843,9 @@ ${input.userComment}
 
 		// Start session - use streaming mode if supported for ability to add messages later
 		try {
+			// A restored lane holder resuming counts as alive — cancel any
+			// pending boot-grace release before the (long) streaming await.
+			this.clearLaneGraceForSession(sessionId);
 			if (runner.supportsStreamingInput && runner.startStreaming) {
 				await runner.startStreaming(fullPrompt);
 			} else {

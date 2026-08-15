@@ -44,3 +44,7 @@ unrelated prompt which we should handle by just using the fallback repo (first r
 For this case an agentSession MUST exist and a repository MUST already be associated with the Linear issue. The repository will be retrieved from the issue-to-repository cache - no new routing logic is performed.
 
 
+
+### Serialized lanes (PON-112)
+
+Workspaces with `linearWorkspaces[id].laneSerialization: true` run at most ONE active session at a time. A `created` webhook while the lane is busy does NOT start a runner: the session is enqueued (raw webhook persisted immediately) and its single first activity is the queued-position ack. The stored webhook is replayed through the normal created flow when the session reaches the front. Prompts on queued sessions are intercepted before the normal prompted flow: a short next/prioritize intent reorders the queue; anything else is stored as context for start time. The lane releases on every end path (result success/error, dead runner, stop, unassign, terminal issue state) plus a 10-minute boot grace for a restored holder with no live runner. Child agent sessions bypass the lane (parent waits on them — queueing would deadlock). Default is off: workspaces without the flag behave exactly as before.
