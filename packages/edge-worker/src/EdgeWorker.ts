@@ -5173,6 +5173,12 @@ ${taskSection}`;
 				);
 			}
 			this.lastStopTimeBySession.delete(agentSessionId);
+			// PON-112: an aborted runner emits neither a result message nor an
+			// "error" event (ClaudeRunner swallows user aborts and SIGTERM as
+			// normal stops), so the lane must release here explicitly. The
+			// soft-interrupt branch below deliberately does NOT release — the
+			// session stays warm and in progress.
+			this.handleLaneSessionEnded(agentSessionId, "stop_signal");
 			await this.agentSessionManager.createResponseActivity(
 				agentSessionId,
 				isDoubleStop

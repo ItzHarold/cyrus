@@ -87,7 +87,10 @@ describe("EdgeWorker - Serialized lanes (PON-112)", () => {
 			// backstop sees them as running.
 			getSession: vi.fn((sessionId: string) =>
 				sessionsWithRunners.has(sessionId)
-					? { id: sessionId, agentRunner: { isRunning: () => true } }
+					? {
+							id: sessionId,
+							agentRunner: { isRunning: () => true, stop: vi.fn() },
+						}
 					: null,
 			),
 			getSessionsByIssueId: vi.fn().mockReturnValue([]),
@@ -379,6 +382,22 @@ describe("EdgeWorker - Serialized lanes (PON-112)", () => {
 		await settle();
 
 		expect((edgeWorker as any).laneManager.activeSessionOf(LANE_WS)).toBe("s1");
+	});
+
+	it("stop on the ACTIVE session releases the lane and starts the next (aborted runners emit no result/error)", async () => {
+		const spies = mockStartFlow();
+		const repos = [mockRepository];
+		await (edgeWorker as any).handleWebhook(createdWebhook("s1"), repos);
+		await (edgeWorker as any).handleWebhook(createdWebhook("s2"), repos);
+
+		await (edgeWorker as any).handleWebhook(
+			promptedWebhook("s1", "stop"),
+			repos,
+		);
+		await settle();
+
+		expect((edgeWorker as any).laneManager.activeSessionOf(LANE_WS)).toBe("s2");
+		expect(spies.init).toHaveBeenCalledTimes(2);
 	});
 
 	it("stop on a queued session removes it and reposts shifted positions", async () => {
