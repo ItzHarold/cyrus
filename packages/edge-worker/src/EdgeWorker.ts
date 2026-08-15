@@ -512,6 +512,8 @@ export class EdgeWorker extends EventEmitter {
 			// PON-112: every session outcome (success, error, user stop) must
 			// release a lane held by that session.
 			(sessionId: string) => this.handleLaneSessionEnded(sessionId, "result"),
+			// PON-115: tag every session log line with its owning tenant.
+			(sessionId: string) => this.resolveWorkspaceIdForSession(sessionId),
 		);
 
 		// Initialize repositories with path resolution
@@ -4557,6 +4559,7 @@ ${taskSection}`;
 			sessionId: webhook.agentSession.id,
 			platform: this.getRepositoryPlatform(linearWorkspaceId),
 			issueIdentifier: webhook.agentSession.issue.identifier,
+			workspaceId: linearWorkspaceId,
 		});
 		log.info(`Handling agent session created`);
 		const { agentSession, guidance } = webhook;
@@ -4628,6 +4631,17 @@ ${taskSection}`;
 	 * (legacy setups predating both fields); on any configured instance an
 	 * unknown or missing workspace id is rejected.
 	 */
+	/**
+	 * The Linear workspace owning a session, resolved through its repository.
+	 * Used to tag log lines per tenant (PON-115); returns undefined for
+	 * sessions with no Linear repository (GitHub/Slack) or none recorded yet.
+	 */
+	private resolveWorkspaceIdForSession(sessionId: string): string | undefined {
+		const repoId = this.sessionRepositories.get(sessionId);
+		if (!repoId) return undefined;
+		return this.repositories.get(repoId)?.linearWorkspaceId;
+	}
+
 	private isKnownWorkspace(workspaceId: string | undefined): boolean {
 		const known = new Set<string>(
 			Object.keys(this.config.linearWorkspaces ?? {}),
@@ -4975,6 +4989,7 @@ ${taskSection}`;
 		const log = this.logger.withContext({
 			sessionId,
 			issueIdentifier: issue.identifier,
+			workspaceId: linearWorkspaceId,
 		});
 
 		// Log guidance if present
@@ -7158,6 +7173,7 @@ ${input.userComment}
 			sessionId,
 			platform: session.issueContext?.trackerId,
 			issueIdentifier: session.issueContext?.issueIdentifier,
+			workspaceId: linearWorkspaceId,
 		});
 
 		// Resolve plugins once so we can also derive the per-session scoped

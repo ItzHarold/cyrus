@@ -98,6 +98,13 @@ export class AgentSessionManager extends EventEmitter {
 		childSessionId: string,
 	) => Promise<void>;
 	private onSessionEnded?: (sessionId: string) => void;
+	/**
+	 * Resolves the owning tenant for a session so every log line can carry it
+	 * (PON-115). Supplied by EdgeWorker, which holds the session→repository→
+	 * workspace mapping; kept as a lookup rather than a field on the session so
+	 * that sessions restored from older persisted state are tagged too.
+	 */
+	private getWorkspaceIdForSession?: (sessionId: string) => string | undefined;
 
 	constructor(
 		getParentSessionId?: (childSessionId: string) => string | undefined,
@@ -108,12 +115,14 @@ export class AgentSessionManager extends EventEmitter {
 		) => Promise<void>,
 		logger?: ILogger,
 		onSessionEnded?: (sessionId: string) => void,
+		getWorkspaceIdForSession?: (sessionId: string) => string | undefined,
 	) {
 		super();
 		this.logger = logger ?? createLogger({ component: "AgentSessionManager" });
 		this.getParentSessionId = getParentSessionId;
 		this.resumeParentSession = resumeParentSession;
 		this.onSessionEnded = onSessionEnded;
+		this.getWorkspaceIdForSession = getWorkspaceIdForSession;
 	}
 
 	/**
@@ -140,6 +149,7 @@ export class AgentSessionManager extends EventEmitter {
 			sessionId,
 			platform: session?.issueContext?.trackerId,
 			issueIdentifier: session?.issueContext?.issueIdentifier,
+			workspaceId: this.getWorkspaceIdForSession?.(sessionId),
 		});
 	}
 

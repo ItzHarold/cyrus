@@ -196,6 +196,43 @@ describe("Logger", () => {
 		});
 	});
 
+	describe("tenant context (PON-115)", () => {
+		it("renders the workspace id, truncated, on the log line", () => {
+			const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+			const logger = createLogger({
+				component: "Test",
+				context: { workspaceId: "9a84691b-34ab-4c73-890f-b350fcfcd0a0" },
+			});
+			logger.info("msg");
+
+			expect(logSpy).toHaveBeenCalledWith(
+				expect.stringMatching(
+					new RegExp(`^${TS}\\[INFO ] \\[Test] \\{ws=9a84691b\\} msg$`),
+				),
+			);
+		});
+
+		it("carries the workspace id through withContext", () => {
+			const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+			const logger = createLogger({ component: "Test" }).withContext({
+				sessionId: "abcdef1234",
+				workspaceId: "ws-aaaaaaaa",
+			});
+			logger.info("msg");
+
+			const line = String(logSpy.mock.calls[0]![0]);
+			expect(line).toContain("session=abcdef12");
+			expect(line).toContain("ws=ws-aaaaa");
+		});
+
+		it("omits the tenant tag entirely when unknown", () => {
+			const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+			createLogger({ component: "Test" }).info("msg");
+
+			expect(String(logSpy.mock.calls[0]![0])).not.toContain("ws=");
+		});
+	});
+
 	describe("withContext()", () => {
 		it("returns a new logger with merged context", () => {
 			const parent = createLogger({
