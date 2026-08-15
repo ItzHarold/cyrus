@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Serialized lanes: workspaces can opt in (`linearWorkspaces[id].laneSerialization: true`) to run one issue at a time. Additional delegations queue with a visible position ("Queued — position #N"), can be reordered by replying "next" on a queued session, and start automatically — with position updates posted only when a position actually changes — when the active session completes, fails, or is cancelled. Queue order and the active session survive restarts, and a session that dies holding the lane releases it instead of blocking queued work. Default off; workspaces without the flag are unchanged. ([PON-112](https://linear.app/pontedigital/issue/PON-112), [#3](https://github.com/ItzHarold/cyrus/pull/3))
+
 ### Changed
 - Agent sessions now acknowledge instantly in Linear: a brief thought ("Got it. Looking at this now.") is posted as soon as a delegation or prompt arrives, before repository routing, dependency checks, or any repository setup. Previously the first activity waited on several Linear API round-trips and could exceed Linear's 10-second responsiveness window, showing sessions as unresponsive. The webhook HTTP response is also sent before any processing begins. ([PON-111](https://linear.app/pontedigital/issue/PON-111), [#1](https://github.com/ItzHarold/cyrus/pull/1))
 - Model labels (`fable`, `opus`, `sonnet`, `haiku`) now route issues to exact model ids (`claude-fable-5`, `claude-opus-5`, `claude-sonnet-5`, `claude-haiku-4-5`) instead of SDK aliases, so the model an issue runs on no longer depends on which release the bundled SDK resolves an alias to.
