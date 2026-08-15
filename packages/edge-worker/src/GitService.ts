@@ -1002,18 +1002,116 @@ export class GitService {
 		issueIdentifier: string,
 		options: DeleteWorktreeOptions = {},
 	): Promise<void> {
-		const workspacePath = join(
-			getDefaultWorktreesDir(this.cyrusHome),
+		const workspacePaths = this.resolveWorkspacePathsForDeletion(
 			issueIdentifier,
+			options.repositories,
 		);
 
-		if (!existsSync(workspacePath)) {
+		if (workspacePaths.length === 0) {
 			this.logger.info(
 				`Worktree directory does not exist for ${issueIdentifier}, nothing to delete`,
 			);
 			return;
 		}
 
+		for (const workspacePath of workspacePaths) {
+			await this.deleteWorkspaceDirectory(
+				issueIdentifier,
+				workspacePath,
+				options,
+			);
+		}
+	}
+
+	/**
+	 * Resolve which workspace directories to delete for an issue.
+	 *
+	 * The path must come from the repositories' configured `workspaceBaseDir`,
+	 * NOT from the global default: with per-tenant base directories, two
+	 * workspaces can both hold an issue called `ENG-1`, and deleting the
+	 * global-default path would destroy another tenant's in-flight worktree
+	 * (PON-115).
+	 *
+	 * The legacy global-default path is still considered — worktrees created
+	 * before per-tenant base dirs live there — but only when it is provably
+	 * one of ours: its `.git` file must point at a repository we were handed.
+	 * An unowned directory at that path belongs to someone else and is left
+	 * alone. Leaking a directory is recoverable; deleting another tenant's
+	 * work is not.
+	 */
+	private resolveWorkspacePathsForDeletion(
+		issueIdentifier: string,
+		repositories?: RepositoryConfig[],
+	): string[] {
+		const paths: string[] = [];
+		const seen = new Set<string>();
+
+		const add = (path: string) => {
+			if (!seen.has(path) && existsSync(path)) {
+				seen.add(path);
+				paths.push(path);
+			}
+		};
+
+		for (const repo of repositories ?? []) {
+			if (repo.workspaceBaseDir) {
+				add(join(repo.workspaceBaseDir, issueIdentifier));
+			}
+		}
+
+		const legacyPath = join(
+			getDefaultWorktreesDir(this.cyrusHome),
+			issueIdentifier,
+		);
+		if (!seen.has(legacyPath) && existsSync(legacyPath)) {
+			// With no repositories supplied there is no better information than
+			// the default; that is the pre-PON-115 behavior and the only option.
+			if (!repositories || repositories.length === 0) {
+				add(legacyPath);
+			} else if (this.isWorkspaceOwnedBy(legacyPath, repositories)) {
+				add(legacyPath);
+			} else {
+				this.logger.warn(
+					`Skipping legacy worktree path ${legacyPath} for ${issueIdentifier}: it is not owned by this issue's repositories`,
+				);
+			}
+		}
+
+		return paths;
+	}
+
+	/**
+	 * Whether every git worktree under `workspacePath` belongs to one of the
+	 * given repositories, as determined by the worktree's `.git` gitdir
+	 * pointer. Used to decide whether a legacy-path directory is safe to
+	 * delete.
+	 */
+	private isWorkspaceOwnedBy(
+		workspacePath: string,
+		repositories: RepositoryConfig[],
+	): boolean {
+		const worktreePaths = this.findWorktreesUnderPath(workspacePath);
+		if (worktreePaths.length === 0) return false;
+
+		const repoPaths = new Set(
+			repositories
+				.map((repo) => repo.repositoryPath)
+				.filter((path): path is string => Boolean(path))
+				.map((path) => pathResolve(path)),
+		);
+
+		return worktreePaths.every((worktreePath) => {
+			const mainRepo = this.getMainRepoFromWorktree(worktreePath);
+			return mainRepo !== null && repoPaths.has(pathResolve(mainRepo));
+		});
+	}
+
+	/** Tear down a single resolved workspace directory. */
+	private async deleteWorkspaceDirectory(
+		issueIdentifier: string,
+		workspacePath: string,
+		options: DeleteWorktreeOptions,
+	): Promise<void> {
 		this.logger.info(
 			`Deleting worktree directory for ${issueIdentifier} at ${workspacePath}`,
 		);

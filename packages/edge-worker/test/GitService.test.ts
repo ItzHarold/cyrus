@@ -904,6 +904,105 @@ describe("GitService", () => {
 		});
 	});
 
+	describe("deleteWorktree tenant scoping (PON-115)", () => {
+		const tenantA = {
+			id: "repo-a",
+			name: "repo-a",
+			repositoryPath: "/home/user/repos/tenant-a",
+			workspaceBaseDir: "/home/user/.cyrus/worktrees/ws-aaa",
+		} as any;
+
+		it("deletes the repo's configured base dir, not the global default", async () => {
+			mockExistsSync.mockImplementation((p: any) => {
+				const s = String(p);
+				if (s === "/home/user/.cyrus/worktrees/ws-aaa/ENG-1") return true;
+				if (s === "/home/user/.cyrus/worktrees/ws-aaa/ENG-1/.git") return true;
+				if (s === "/home/user/repos/tenant-a") return true;
+				return false;
+			});
+			mockStatSync.mockReturnValue({ isFile: () => true } as any);
+			mockReadFileSync.mockReturnValue(
+				"gitdir: /home/user/repos/tenant-a/.git/worktrees/ENG-1",
+			);
+			mockExecSync.mockReturnValue(Buffer.from(""));
+
+			await gitService.deleteWorktree("ENG-1", { repositories: [tenantA] });
+
+			expect(mockRmSync).toHaveBeenCalledWith(
+				"/home/user/.cyrus/worktrees/ws-aaa/ENG-1",
+				expect.anything(),
+			);
+			expect(mockRmSync).not.toHaveBeenCalledWith(
+				"/home/user/.cyrus/worktrees/ENG-1",
+				expect.anything(),
+			);
+		});
+
+		it("NEVER deletes a legacy-path worktree owned by another tenant", async () => {
+			// Tenant A closes ENG-1. A directory for ENG-1 also sits at the old
+			// global-default path — but it belongs to tenant B.
+			mockExistsSync.mockImplementation((p: any) => {
+				const s = String(p);
+				if (s === "/home/user/.cyrus/worktrees/ENG-1") return true;
+				if (s === "/home/user/.cyrus/worktrees/ENG-1/.git") return true;
+				if (s === "/home/user/repos/tenant-b") return true;
+				return false;
+			});
+			mockStatSync.mockReturnValue({ isFile: () => true } as any);
+			mockReadFileSync.mockReturnValue(
+				"gitdir: /home/user/repos/tenant-b/.git/worktrees/ENG-1",
+			);
+
+			await gitService.deleteWorktree("ENG-1", { repositories: [tenantA] });
+
+			expect(mockRmSync).not.toHaveBeenCalled();
+			expect(mockLogger.warn).toHaveBeenCalledWith(
+				expect.stringContaining("not owned by this issue's repositories"),
+			);
+		});
+
+		it("still cleans up a legacy-path worktree that IS ours", async () => {
+			mockExistsSync.mockImplementation((p: any) => {
+				const s = String(p);
+				if (s === "/home/user/.cyrus/worktrees/ENG-1") return true;
+				if (s === "/home/user/.cyrus/worktrees/ENG-1/.git") return true;
+				if (s === "/home/user/repos/tenant-a") return true;
+				return false;
+			});
+			mockStatSync.mockReturnValue({ isFile: () => true } as any);
+			mockReadFileSync.mockReturnValue(
+				"gitdir: /home/user/repos/tenant-a/.git/worktrees/ENG-1",
+			);
+			mockExecSync.mockReturnValue(Buffer.from(""));
+
+			await gitService.deleteWorktree("ENG-1", { repositories: [tenantA] });
+
+			expect(mockRmSync).toHaveBeenCalledWith(
+				"/home/user/.cyrus/worktrees/ENG-1",
+				expect.anything(),
+			);
+		});
+
+		it("falls back to the global default when no repositories are supplied", async () => {
+			mockExistsSync.mockImplementation((p: any) => {
+				const s = String(p);
+				if (s === "/home/user/.cyrus/worktrees/ENG-1") return true;
+				if (s === "/home/user/.cyrus/worktrees/ENG-1/.git") return true;
+				return false;
+			});
+			mockStatSync.mockReturnValue({ isFile: () => true } as any);
+			mockReadFileSync.mockReturnValue("");
+			mockExecSync.mockReturnValue(Buffer.from(""));
+
+			await gitService.deleteWorktree("ENG-1");
+
+			expect(mockRmSync).toHaveBeenCalledWith(
+				"/home/user/.cyrus/worktrees/ENG-1",
+				expect.anything(),
+			);
+		});
+	});
+
 	describe("deleteWorktree", () => {
 		it("does nothing when workspace directory does not exist", async () => {
 			mockExistsSync.mockReturnValue(false);
