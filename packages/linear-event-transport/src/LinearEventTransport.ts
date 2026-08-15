@@ -176,7 +176,8 @@ export class LinearEventTransport
 			// reply is sent.
 			reply.code(200).send({ success: true });
 
-			this.dispatchPayload(payload);
+			// Fire-and-forget: dispatchPayload handles all errors internally
+			void this.dispatchPayload(payload);
 		} catch (error) {
 			const err = new Error("Direct webhook verification failed");
 			if (error instanceof Error) {
@@ -216,7 +217,8 @@ export class LinearEventTransport
 			// reply is sent.
 			reply.code(200).send({ success: true });
 
-			this.dispatchPayload(payload);
+			// Fire-and-forget: dispatchPayload handles all errors internally
+			void this.dispatchPayload(payload);
 		} catch (error) {
 			const err = new Error("Proxy webhook processing failed");
 			if (error instanceof Error) {
@@ -232,13 +234,15 @@ export class LinearEventTransport
 	 * sent. Errors are logged and emitted as "error" events — they must never
 	 * propagate, since the reply is already sent and cannot carry a 500.
 	 */
-	private dispatchPayload(payload: LinearWebhookPayload): void {
+	private async dispatchPayload(payload: LinearWebhookPayload): Promise<void> {
 		try {
 			// Emit "event" for legacy IAgentEventTransport compatibility
 			this.emit("event", payload);
 
-			// Emit "message" with translated internal message
-			this.emitMessage(payload);
+			// Emit "message" with translated internal message. Awaited so the
+			// catch also covers a rejection if translation ever becomes async —
+			// a sync-only try around it would leave that an unhandled rejection.
+			await this.emitMessage(payload);
 		} catch (error) {
 			const err = new Error("Webhook dispatch failed");
 			if (error instanceof Error) {
