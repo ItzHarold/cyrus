@@ -56,6 +56,7 @@ import {
 	CLIRPCServer,
 	createLogger,
 	DEFAULT_PROXY_URL,
+	getAttachmentsDir,
 	getPinnedModel,
 	isAgentSessionCreatedWebhook,
 	isAgentSessionPromptedWebhook,
@@ -511,6 +512,8 @@ export class EdgeWorker extends EventEmitter {
 			// PON-112: every session outcome (success, error, user stop) must
 			// release a lane held by that session.
 			(sessionId: string) => this.handleLaneSessionEnded(sessionId, "result"),
+			// PON-115: tag every session log line with its owning tenant.
+			(sessionId: string) => this.resolveWorkspaceIdForSession(sessionId),
 		);
 
 		// Initialize repositories with path resolution
@@ -650,6 +653,14 @@ export class EdgeWorker extends EventEmitter {
 
 		// Load persisted state for each repository
 		await this.loadPersistedState();
+
+		// PON-115: fill in per-install identity (app-user id, install
+		// timestamp) for workspaces authorized before those fields existed.
+		// Fire-and-forget — it costs one API call per incomplete workspace and
+		// must never delay serving webhooks.
+		void this.backfillWorkspaceInstallRecords().catch((error) => {
+			this.logger.warn("Workspace install-record backfill failed:", error);
+		});
 
 		// Pre-warm the 30 most recent Claude sessions in the background
 		// so their first query after restart has near-zero cold-start latency.
@@ -3717,10 +3728,10 @@ ${taskSection}`;
 				return;
 			}
 			const workspaceFolderName = basename(firstSession.workspace.path);
-			const attachmentsDir = join(
+			const attachmentsDir = getAttachmentsDir(
 				this.cyrusHome,
 				workspaceFolderName,
-				"attachments",
+				webhook.organizationId,
 			);
 
 			try {
@@ -4272,10 +4283,10 @@ ${taskSection}`;
 
 		// Pre-create attachments directory even if no attachments exist yet
 		const workspaceFolderName = basename(workspace.path);
-		const attachmentsDir = join(
+		const attachmentsDir = getAttachmentsDir(
 			this.cyrusHome,
 			workspaceFolderName,
-			"attachments",
+			linearWorkspaceId,
 		);
 		await mkdir(attachmentsDir, { recursive: true });
 
@@ -4548,6 +4559,7 @@ ${taskSection}`;
 			sessionId: webhook.agentSession.id,
 			platform: this.getRepositoryPlatform(linearWorkspaceId),
 			issueIdentifier: webhook.agentSession.issue.identifier,
+			workspaceId: linearWorkspaceId,
 		});
 		log.info(`Handling agent session created`);
 		const { agentSession, guidance } = webhook;
@@ -4619,6 +4631,17 @@ ${taskSection}`;
 	 * (legacy setups predating both fields); on any configured instance an
 	 * unknown or missing workspace id is rejected.
 	 */
+	/**
+	 * The Linear workspace owning a session, resolved through its repository.
+	 * Used to tag log lines per tenant (PON-115); returns undefined for
+	 * sessions with no Linear repository (GitHub/Slack) or none recorded yet.
+	 */
+	private resolveWorkspaceIdForSession(sessionId: string): string | undefined {
+		const repoId = this.sessionRepositories.get(sessionId);
+		if (!repoId) return undefined;
+		return this.repositories.get(repoId)?.linearWorkspaceId;
+	}
+
 	private isKnownWorkspace(workspaceId: string | undefined): boolean {
 		const known = new Set<string>(
 			Object.keys(this.config.linearWorkspaces ?? {}),
@@ -4966,6 +4989,7 @@ ${taskSection}`;
 		const log = this.logger.withContext({
 			sessionId,
 			issueIdentifier: issue.identifier,
+			workspaceId: linearWorkspaceId,
 		});
 
 		// Log guidance if present
@@ -5504,10 +5528,10 @@ ${taskSection}`;
 
 		// Always set up attachments directory, even if no attachments in current comment
 		const workspaceFolderName = basename(session.workspace.path);
-		const attachmentsDir = join(
+		const attachmentsDir = getAttachmentsDir(
 			this.cyrusHome,
 			workspaceFolderName,
-			"attachments",
+			linearWorkspaceId,
 		);
 		// Ensure directory exists
 		await mkdir(attachmentsDir, { recursive: true });
@@ -7149,6 +7173,7 @@ ${input.userComment}
 			sessionId,
 			platform: session.issueContext?.trackerId,
 			issueIdentifier: session.issueContext?.issueIdentifier,
+			workspaceId: linearWorkspaceId,
 		});
 
 		// Resolve plugins once so we can also derive the per-session scoped
@@ -7945,10 +7970,10 @@ ${input.userComment}
 
 		// Set up attachments directory
 		const workspaceFolderName = basename(session.workspace.path);
-		const attachmentsDir = join(
+		const attachmentsDir = getAttachmentsDir(
 			this.cyrusHome,
 			workspaceFolderName,
-			"attachments",
+			resolvedWorkspaceId,
 		);
 		await mkdir(attachmentsDir, { recursive: true });
 
@@ -8162,6 +8187,105 @@ ${input.userComment}
 	/**
 	 * Save OAuth tokens to config.json (workspace-level storage)
 	 */
+	/**
+	 * Populate `appUserId` and `installedAt` for any configured workspace
+	 * missing them (PON-115).
+	 *
+	 * Linear issues a distinct app-user id per installation, and its platform
+	 * docs recommend storing it alongside the token so the agent can identify
+	 * itself in each tenant. Installs authorized before this field existed have
+	 * a token but no id, so it is fetched once via `viewer { id }` using that
+	 * tenant's own tracker — never a shared client.
+	 *
+	 * `installedAt` cannot be recovered retroactively; for pre-existing
+	 * installs it records when we first observed the install, which is stated
+	 * as such rather than presented as the true install date.
+	 */
+	private async backfillWorkspaceInstallRecords(): Promise<void> {
+		const workspaces = this.config.linearWorkspaces ?? {};
+		const updates: Array<{
+			workspaceId: string;
+			appUserId?: string;
+			installedAt?: string;
+		}> = [];
+
+		for (const [workspaceId, wsConfig] of Object.entries(workspaces)) {
+			const needsAppUserId = !wsConfig.appUserId;
+			const needsInstalledAt = !wsConfig.installedAt;
+			if (!needsAppUserId && !needsInstalledAt) continue;
+
+			let appUserId: string | undefined;
+			if (needsAppUserId) {
+				const issueTracker = this.issueTrackers.get(workspaceId);
+				if (!issueTracker) continue;
+				try {
+					const viewer = await issueTracker.fetchCurrentUser();
+					appUserId = viewer?.id;
+				} catch (error) {
+					// A revoked or expired install fails here; leave it for the
+					// next boot rather than blocking the others.
+					this.logger.warn(
+						`Could not resolve app user id for workspace ${workspaceId}:`,
+						error,
+					);
+				}
+			}
+
+			if (appUserId || needsInstalledAt) {
+				updates.push({
+					workspaceId,
+					...(appUserId ? { appUserId } : {}),
+					...(needsInstalledAt
+						? { installedAt: new Date().toISOString() }
+						: {}),
+				});
+			}
+		}
+
+		if (updates.length === 0) return;
+
+		for (const update of updates) {
+			const existing = this.config.linearWorkspaces?.[update.workspaceId];
+			if (!existing) continue;
+			if (update.appUserId) existing.appUserId = update.appUserId;
+			if (update.installedAt) existing.installedAt = update.installedAt;
+			this.logger.event("workspace_install_record_backfilled", {
+				workspaceId: update.workspaceId,
+				appUserId: update.appUserId ? "resolved" : "unchanged",
+				installedAt: update.installedAt ? "first_seen" : "unchanged",
+			});
+		}
+
+		await this.persistWorkspaceConfig();
+	}
+
+	/**
+	 * Write the in-memory `linearWorkspaces` map back to config.json,
+	 * preserving every other key in the file.
+	 */
+	private async persistWorkspaceConfig(): Promise<void> {
+		if (!this.configPath) return;
+		try {
+			const configContent = await readFile(this.configPath, "utf-8");
+			const config = JSON.parse(configContent);
+			config.linearWorkspaces = config.linearWorkspaces ?? {};
+			for (const [workspaceId, wsConfig] of Object.entries(
+				this.config.linearWorkspaces ?? {},
+			)) {
+				config.linearWorkspaces[workspaceId] = {
+					...(config.linearWorkspaces[workspaceId] ?? {}),
+					...wsConfig,
+				};
+			}
+			await writeFile(this.configPath, JSON.stringify(config, null, "\t"), {
+				mode: 0o600,
+			});
+			await chmod(this.configPath, 0o600);
+		} catch (error) {
+			this.logger.error("Failed to persist workspace config:", error);
+		}
+	}
+
 	private async saveOAuthTokens(tokens: {
 		linearToken: string;
 		linearRefreshToken?: string;

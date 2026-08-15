@@ -6,6 +6,7 @@ import type {
 	Issue,
 	LinearWorkspaceConfig,
 } from "cyrus-core";
+import { getAttachmentsDir } from "cyrus-core";
 import { fileTypeFromBuffer } from "file-type";
 
 export class AttachmentService {
@@ -75,10 +76,10 @@ export class AttachmentService {
 		}
 		// Create attachments directory in home directory
 		const workspaceFolderName = basename(workspacePath);
-		const attachmentsDir = join(
+		const attachmentsDir = getAttachmentsDir(
 			this.cyrusHome,
 			workspaceFolderName,
-			"attachments",
+			linearWorkspaceId,
 		);
 
 		try {

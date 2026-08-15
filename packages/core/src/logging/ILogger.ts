@@ -11,6 +11,13 @@ export interface LogContext {
 	platform?: string;
 	issueIdentifier?: string;
 	repository?: string;
+	/**
+	 * Owning tenant (Linear workspace / organization id). Present on every
+	 * session-scoped line so one tenant's activity can be isolated in the
+	 * journal and in Sentry — a prerequisite for supporting more than one
+	 * client from a single instance (PON-115).
+	 */
+	workspaceId?: string;
 }
 
 /**

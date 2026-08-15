@@ -627,7 +627,12 @@ export class GitService {
 		}
 
 		// N repos: parent folder with per-repo subdirectories
-		const baseDir = overrideBaseDir ?? repositories[0]!.workspaceBaseDir;
+		const baseDir =
+			overrideBaseDir ??
+			this.tenantScopedBaseDir(
+				repositories[0]!.workspaceBaseDir,
+				repositories[0],
+			);
 		const parentPath = join(baseDir, issue.identifier);
 		mkdirSync(parentPath, { recursive: true });
 		this.logger.info(
@@ -731,15 +736,16 @@ export class GitService {
 					.replace(/\s+/g, "-")
 					.substring(0, 30)}`;
 			const branchName = this.sanitizeBranchName(rawBranchName);
+			const scopedBaseDir = this.tenantScopedBaseDir(
+				repository.workspaceBaseDir,
+				repository,
+			);
 			const workspacePath =
-				workspacePathOverride ??
-				join(repository.workspaceBaseDir, issue.identifier);
+				workspacePathOverride ?? join(scopedBaseDir, issue.identifier);
 
 			// Ensure workspace directory's parent exists
 			mkdirSync(
-				workspacePathOverride
-					? join(workspacePath, "..")
-					: repository.workspaceBaseDir,
+				workspacePathOverride ? join(workspacePath, "..") : scopedBaseDir,
 				{ recursive: true },
 			);
 
@@ -1002,18 +1008,149 @@ export class GitService {
 		issueIdentifier: string,
 		options: DeleteWorktreeOptions = {},
 	): Promise<void> {
-		const workspacePath = join(
-			getDefaultWorktreesDir(this.cyrusHome),
+		const workspacePaths = this.resolveWorkspacePathsForDeletion(
 			issueIdentifier,
+			options.repositories,
 		);
 
-		if (!existsSync(workspacePath)) {
+		if (workspacePaths.length === 0) {
 			this.logger.info(
 				`Worktree directory does not exist for ${issueIdentifier}, nothing to delete`,
 			);
 			return;
 		}
 
+		for (const workspacePath of workspacePaths) {
+			await this.deleteWorkspaceDirectory(
+				issueIdentifier,
+				workspacePath,
+				options,
+			);
+		}
+	}
+
+	/**
+	 * Insert the owning tenant as a path segment under a worktrees base dir
+	 * (PON-115).
+	 *
+	 * Issue identifiers are unique only *within* a Linear workspace: two
+	 * tenants can each have `ENG-1`. Without a tenant segment they resolve to
+	 * the same directory and the same branch name, so one tenant's session
+	 * would check out over another's. Repositories with no Linear workspace
+	 * (GitHub- or Slack-only) keep the flat layout — there is no tenant to
+	 * scope by, and they cannot collide with a Linear tenant's namespaced path.
+	 */
+	private tenantScopedBaseDir(
+		baseDir: string,
+		repository?: RepositoryConfig,
+	): string {
+		const workspaceId = repository?.linearWorkspaceId;
+		return workspaceId ? join(baseDir, workspaceId) : baseDir;
+	}
+
+	/**
+	 * Resolve which workspace directories to delete for an issue.
+	 *
+	 * The path must come from the repositories' configured `workspaceBaseDir`,
+	 * NOT from the global default: with per-tenant base directories, two
+	 * workspaces can both hold an issue called `ENG-1`, and deleting the
+	 * global-default path would destroy another tenant's in-flight worktree
+	 * (PON-115).
+	 *
+	 * The legacy global-default path is still considered — worktrees created
+	 * before per-tenant base dirs live there — but only when it is provably
+	 * one of ours: its `.git` file must point at a repository we were handed.
+	 * An unowned directory at that path belongs to someone else and is left
+	 * alone. Leaking a directory is recoverable; deleting another tenant's
+	 * work is not.
+	 */
+	private resolveWorkspacePathsForDeletion(
+		issueIdentifier: string,
+		repositories?: RepositoryConfig[],
+	): string[] {
+		const paths: string[] = [];
+		const seen = new Set<string>();
+
+		const add = (path: string) => {
+			if (!seen.has(path) && existsSync(path)) {
+				seen.add(path);
+				paths.push(path);
+			}
+		};
+
+		// Primary: the tenant-scoped path this repo would create today.
+		for (const repo of repositories ?? []) {
+			if (repo.workspaceBaseDir) {
+				add(
+					join(
+						this.tenantScopedBaseDir(repo.workspaceBaseDir, repo),
+						issueIdentifier,
+					),
+				);
+			}
+		}
+
+		// Legacy: paths from before tenant scoping — the repo's un-scoped base
+		// dir, and the global default. Both may hold another tenant's worktree,
+		// so each is deleted only when it provably belongs to these repos.
+		const legacyCandidates = [
+			...(repositories ?? [])
+				.map((repo) => repo.workspaceBaseDir)
+				.filter((dir): dir is string => Boolean(dir))
+				.map((dir) => join(dir, issueIdentifier)),
+			join(getDefaultWorktreesDir(this.cyrusHome), issueIdentifier),
+		];
+
+		for (const legacyPath of legacyCandidates) {
+			if (seen.has(legacyPath) || !existsSync(legacyPath)) continue;
+			// With no repositories supplied there is no better information than
+			// the default; that is the pre-PON-115 behavior and the only option.
+			if (!repositories || repositories.length === 0) {
+				add(legacyPath);
+			} else if (this.isWorkspaceOwnedBy(legacyPath, repositories)) {
+				add(legacyPath);
+			} else {
+				this.logger.warn(
+					`Skipping legacy worktree path ${legacyPath} for ${issueIdentifier}: it is not owned by this issue's repositories`,
+				);
+			}
+		}
+
+		return paths;
+	}
+
+	/**
+	 * Whether every git worktree under `workspacePath` belongs to one of the
+	 * given repositories, as determined by the worktree's `.git` gitdir
+	 * pointer. Used to decide whether a legacy-path directory is safe to
+	 * delete.
+	 */
+	private isWorkspaceOwnedBy(
+		workspacePath: string,
+		repositories: RepositoryConfig[],
+	): boolean {
+		const worktreePaths = this.findWorktreesUnderPath(workspacePath);
+		if (worktreePaths.length === 0) return false;
+
+		const repoPaths = new Set(
+			repositories
+				.map((repo) => repo.repositoryPath)
+				.filter((path): path is string => Boolean(path))
+				.map((path) => pathResolve(path)),
+		);
+
+		return worktreePaths.every((worktreePath) => {
+			const mainRepo = this.getMainRepoFromWorktree(worktreePath);
+			return mainRepo !== null && repoPaths.has(pathResolve(mainRepo));
+		});
+	}
+
+	/** Tear down a single resolved workspace directory. */
+	private async deleteWorkspaceDirectory(
+		issueIdentifier: string,
+		workspacePath: string,
+		options: DeleteWorktreeOptions,
+	): Promise<void> {
 		this.logger.info(
 			`Deleting worktree directory for ${issueIdentifier} at ${workspacePath}`,
 		);

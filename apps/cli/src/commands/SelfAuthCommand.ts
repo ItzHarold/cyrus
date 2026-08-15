@@ -99,12 +99,18 @@ export class SelfAuthCommand extends BaseCommand {
 				(config as Record<string, unknown>).linearWorkspaces = {};
 			}
 			config.linearWorkspaces![workspace.id] = {
+				// Preserve any existing per-workspace settings on re-auth.
+				...(config.linearWorkspaces![workspace.id] ?? {}),
 				linearToken: tokens.accessToken,
 				...(tokens.refreshToken
 					? { linearRefreshToken: tokens.refreshToken }
 					: {}),
 				linearWorkspaceName: workspace.name,
 				linearWorkspaceSlug: workspace.slug,
+				...(workspace.appUserId ? { appUserId: workspace.appUserId } : {}),
+				installedAt:
+					config.linearWorkspaces![workspace.id]?.installedAt ??
+					new Date().toISOString(),
 			};
 			// 0600: this file holds per-workspace Linear OAuth tokens.
 			writeFileSync(configPath, JSON.stringify(config, null, "\t"), {
@@ -265,7 +271,7 @@ export class SelfAuthCommand extends BaseCommand {
 
 	private async fetchWorkspaceInfo(
 		accessToken: string,
-	): Promise<{ id: string; name: string; slug: string }> {
+	): Promise<{ id: string; name: string; slug: string; appUserId?: string }> {
 		const linearClient = new LinearClient({ accessToken });
 		const viewer = await linearClient.viewer;
 		const organization = await viewer.organization;
@@ -278,6 +284,9 @@ export class SelfAuthCommand extends BaseCommand {
 			id: organization.id,
 			name: organization.name || organization.id,
 			slug: organization.urlKey,
+			// Linear issues a distinct app-user id per install; storing it
+			// alongside the token is how we identify ourselves in this tenant.
+			...(viewer.id ? { appUserId: viewer.id } : {}),
 		};
 	}
 

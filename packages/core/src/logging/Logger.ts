@@ -23,6 +23,9 @@ function formatContext(context: LogContext): string {
 	if (context.repository) {
 		parts.push(`repo=${context.repository}`);
 	}
+	if (context.workspaceId) {
+		parts.push(`ws=${context.workspaceId.slice(0, 8)}`);
+	}
 	return parts.length > 0 ? ` {${parts.join(", ")}}` : "";
 }
 
@@ -145,6 +148,7 @@ class Logger implements ILogger {
 		if (this.context.issueIdentifier)
 			attrs.issueIdentifier = this.context.issueIdentifier;
 		if (this.context.repository) attrs.repository = this.context.repository;
+		if (this.context.workspaceId) attrs.workspaceId = this.context.workspaceId;
 		return attrs;
 	}
 

@@ -1,4 +1,4 @@
-import { exec } from "node:child_process";
+import { exec, execSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
@@ -20,6 +20,42 @@ function isGitRepository(path: string): boolean {
 	} catch {
 		return false;
 	}
+}
+
+/**
+ * The `origin` remote URL of a clone, or null when it cannot be read.
+ */
+function getOriginUrl(repoPath: string): string | null {
+	try {
+		return (
+			execSync("git config --get remote.origin.url", {
+				cwd: repoPath,
+				encoding: "utf-8",
+				stdio: ["pipe", "pipe", "pipe"],
+			}).trim() || null
+		);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Whether two git URLs address the same repository, ignoring differences that
+ * do not change identity: scheme (ssh vs https), a `.git` suffix, credentials
+ * in the URL, trailing slashes, and case.
+ */
+export function sameRepository(a: string, b: string): boolean {
+	const normalize = (url: string): string =>
+		url
+			.trim()
+			.replace(/^[a-z+]+:\/\//i, "")
+			.replace(/^git@/i, "")
+			.replace(/^[^@/]+@/, "")
+			.replace(/:/g, "/")
+			.replace(/\.git$/i, "")
+			.replace(/\/+$/, "")
+			.toLowerCase();
+	return normalize(a) === normalize(b);
 }
 
 /**
@@ -60,8 +96,12 @@ export async function handleRepository(
 		const repoName =
 			payload.repository_name || getRepoNameFromUrl(payload.repository_url);
 
-		// Construct path within repos directory (defaults to ~/.cyrus/repos, overridable via CYRUS_REPOS_DIR)
-		const reposDir = getDefaultReposDir(cyrusHome);
+		// Construct path within repos directory (defaults to ~/.cyrus/repos, overridable via CYRUS_REPOS_DIR).
+		// PON-115: scoped per Linear workspace when known, so two tenants with
+		// a repository of the same name get separate working copies.
+		const reposDir = payload.linear_workspace_id
+			? join(getDefaultReposDir(cyrusHome), payload.linear_workspace_id)
+			: getDefaultReposDir(cyrusHome);
 		const repoPath = join(reposDir, repoName);
 
 		// Ensure repos directory exists
@@ -81,6 +121,23 @@ export async function handleRepository(
 		if (existsSync(repoPath)) {
 			// Verify it's a git repository
 			if (isGitRepository(repoPath)) {
+				// PON-115: adopting on name alone is unsafe — two tenants can
+				// each have a repository called "api", and silently reusing the
+				// existing clone would give them one shared working copy and
+				// branch namespace. Only adopt when the origin remote is the
+				// repository actually being requested.
+				const existingOrigin = getOriginUrl(repoPath);
+				if (
+					existingOrigin &&
+					!sameRepository(existingOrigin, payload.repository_url)
+				) {
+					return {
+						success: false,
+						error: "Repository path already in use by a different repository",
+						details: `${repoPath} is a clone of ${existingOrigin}, not ${payload.repository_url}. Refusing to reuse it. Supply linear_workspace_id so each workspace gets its own directory, or choose a different repository name.`,
+					};
+				}
+
 				return {
 					success: true,
 					message: "Repository already exists",

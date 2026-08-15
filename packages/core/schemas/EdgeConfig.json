@@ -509,6 +509,12 @@
 					},
 					"laneSerialization": {
 						"type": "boolean"
+					},
+					"appUserId": {
+						"type": "string"
+					},
+					"installedAt": {
+						"type": "string"
 					}
 				},
 				"required": ["linearToken"],

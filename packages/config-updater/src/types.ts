@@ -10,6 +10,13 @@ export interface RepositoryPayload {
 	repository_name: string; // Repository name (required)
 	githubUrl?: string; // GitHub repository URL (e.g., "https://github.com/org/repo") - used for Linear select signal
 	gitlabUrl?: string; // GitLab repository URL (e.g., "https://gitlab.com/group/project") - used for Linear select signal
+	/**
+	 * Linear workspace this repository belongs to (PON-115). When supplied,
+	 * the clone is placed under a per-workspace directory so two tenants with
+	 * a same-named repository never share one working copy. Optional for
+	 * backward compatibility with senders that predate multi-tenancy.
+	 */
+	linear_workspace_id?: string;
 }
 
 /**
