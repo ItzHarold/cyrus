@@ -204,6 +204,56 @@ describe("EdgeWorker tenant revocation (PON-115)", () => {
 		expect(worker.isKnownWorkspace(WS_B)).toBe(true);
 	});
 
+	// A full uninstall produces NO webhook — Linear stops delivering to an app
+	// it has cut off — so the only signal is a 401 that a refresh cannot fix.
+	describe("access loss without a webhook (uninstall)", () => {
+		it("deactivates the tenant when its credentials die", async () => {
+			await worker.handleTenantAccessLost(WS_A, new Error("401 Unauthorized"));
+
+			const ws = readWs();
+			expect(ws[WS_A].active).toBe(false);
+			expect(ws[WS_A].revokedAt).toBeTruthy();
+			expect(ws[WS_B].active).toBeUndefined();
+		});
+
+		it("stops the dead tenant's sessions and frees its lane", async () => {
+			worker.laneManager.acquire(WS_A, "s-a");
+			worker.laneManager.acquire(WS_B, "s-b");
+
+			await worker.handleTenantAccessLost(WS_A, new Error("401"));
+
+			expect(stoppedSessions).toEqual(["s-a"]);
+			expect(worker.laneManager.activeSessionOf(WS_A)).toBe(null);
+			expect(worker.laneManager.activeSessionOf(WS_B)).toBe("s-b");
+		});
+
+		it("does not re-probe — the caller already proved the token is dead", async () => {
+			await worker.handleTenantAccessLost(WS_A, new Error("401"));
+
+			expect(trackerA.fetchTeams).not.toHaveBeenCalled();
+			expect(trackerA.fetchCurrentUser).not.toHaveBeenCalled();
+		});
+
+		it("collapses repeated failures from in-flight requests into one teardown", async () => {
+			await Promise.all([
+				worker.handleTenantAccessLost(WS_A, new Error("401")),
+				worker.handleTenantAccessLost(WS_A, new Error("401")),
+				worker.handleTenantAccessLost(WS_A, new Error("401")),
+			]);
+
+			expect(stoppedSessions).toEqual(["s-a"]);
+		});
+
+		it("ignores access loss for an unconfigured workspace", async () => {
+			await worker.handleTenantAccessLost(
+				"workspace-unknown",
+				new Error("401"),
+			);
+
+			expect(stoppedSessions).toEqual([]);
+		});
+	});
+
 	it("is idempotent — a repeat revocation does not re-stop sessions", async () => {
 		trackerA.fetchTeams.mockResolvedValue({ nodes: [] });
 		await worker.handlePermissionChange(permissionChange(WS_A));
