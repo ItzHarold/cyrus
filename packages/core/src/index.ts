@@ -113,6 +113,7 @@ export {
 	DEFAULT_PROXY_URL,
 	DEFAULT_REPOS_DIR,
 	DEFAULT_WORKTREES_DIR,
+	getAttachmentsDir,
 	getDefaultReposDir,
 	getDefaultWorktreesDir,
 } from "./constants.js";

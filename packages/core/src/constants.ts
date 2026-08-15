@@ -29,6 +29,27 @@ export function getDefaultReposDir(cyrusHome: string): string {
 }
 
 /**
+ * Directory holding an issue's downloaded attachments (PON-115).
+ *
+ * Namespaced by Linear workspace, because issue identifiers are unique only
+ * within a workspace: two tenants can each have `ENG-1`, and an un-namespaced
+ * directory would let one tenant's attachments be served into the other's
+ * session. Repositories with no Linear workspace keep the flat layout.
+ *
+ * Single source of truth — several call sites need this path and must agree,
+ * or a session's readable directory diverges from where files were written.
+ */
+export function getAttachmentsDir(
+	cyrusHome: string,
+	workspaceFolderName: string,
+	linearWorkspaceId?: string,
+): string {
+	return linearWorkspaceId
+		? join(cyrusHome, linearWorkspaceId, workspaceFolderName, "attachments")
+		: join(cyrusHome, workspaceFolderName, "attachments");
+}
+
+/**
  * Resolves the worktrees directory, preferring CYRUS_WORKTREES_DIR env var over the default.
  */
 export function getDefaultWorktreesDir(cyrusHome: string): string {

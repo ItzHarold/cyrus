@@ -56,6 +56,7 @@ import {
 	CLIRPCServer,
 	createLogger,
 	DEFAULT_PROXY_URL,
+	getAttachmentsDir,
 	getPinnedModel,
 	isAgentSessionCreatedWebhook,
 	isAgentSessionPromptedWebhook,
@@ -3725,10 +3726,10 @@ ${taskSection}`;
 				return;
 			}
 			const workspaceFolderName = basename(firstSession.workspace.path);
-			const attachmentsDir = join(
+			const attachmentsDir = getAttachmentsDir(
 				this.cyrusHome,
 				workspaceFolderName,
-				"attachments",
+				webhook.organizationId,
 			);
 
 			try {
@@ -4280,10 +4281,10 @@ ${taskSection}`;
 
 		// Pre-create attachments directory even if no attachments exist yet
 		const workspaceFolderName = basename(workspace.path);
-		const attachmentsDir = join(
+		const attachmentsDir = getAttachmentsDir(
 			this.cyrusHome,
 			workspaceFolderName,
-			"attachments",
+			linearWorkspaceId,
 		);
 		await mkdir(attachmentsDir, { recursive: true });
 
@@ -5512,10 +5513,10 @@ ${taskSection}`;
 
 		// Always set up attachments directory, even if no attachments in current comment
 		const workspaceFolderName = basename(session.workspace.path);
-		const attachmentsDir = join(
+		const attachmentsDir = getAttachmentsDir(
 			this.cyrusHome,
 			workspaceFolderName,
-			"attachments",
+			linearWorkspaceId,
 		);
 		// Ensure directory exists
 		await mkdir(attachmentsDir, { recursive: true });
@@ -7953,10 +7954,10 @@ ${input.userComment}
 
 		// Set up attachments directory
 		const workspaceFolderName = basename(session.workspace.path);
-		const attachmentsDir = join(
+		const attachmentsDir = getAttachmentsDir(
 			this.cyrusHome,
 			workspaceFolderName,
-			"attachments",
+			resolvedWorkspaceId,
 		);
 		await mkdir(attachmentsDir, { recursive: true });
 

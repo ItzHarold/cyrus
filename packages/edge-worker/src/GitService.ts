@@ -627,7 +627,12 @@ export class GitService {
 		}
 
 		// N repos: parent folder with per-repo subdirectories
-		const baseDir = overrideBaseDir ?? repositories[0]!.workspaceBaseDir;
+		const baseDir =
+			overrideBaseDir ??
+			this.tenantScopedBaseDir(
+				repositories[0]!.workspaceBaseDir,
+				repositories[0],
+			);
 		const parentPath = join(baseDir, issue.identifier);
 		mkdirSync(parentPath, { recursive: true });
 		this.logger.info(
@@ -731,15 +736,16 @@ export class GitService {
 					.replace(/\s+/g, "-")
 					.substring(0, 30)}`;
 			const branchName = this.sanitizeBranchName(rawBranchName);
+			const scopedBaseDir = this.tenantScopedBaseDir(
+				repository.workspaceBaseDir,
+				repository,
+			);
 			const workspacePath =
-				workspacePathOverride ??
-				join(repository.workspaceBaseDir, issue.identifier);
+				workspacePathOverride ?? join(scopedBaseDir, issue.identifier);
 
 			// Ensure workspace directory's parent exists
 			mkdirSync(
-				workspacePathOverride
-					? join(workspacePath, "..")
-					: repository.workspaceBaseDir,
+				workspacePathOverride ? join(workspacePath, "..") : scopedBaseDir,
 				{ recursive: true },
 			);
 
@@ -1024,6 +1030,25 @@ export class GitService {
 	}
 
 	/**
+	 * Insert the owning tenant as a path segment under a worktrees base dir
+	 * (PON-115).
+	 *
+	 * Issue identifiers are unique only *within* a Linear workspace: two
+	 * tenants can each have `ENG-1`. Without a tenant segment they resolve to
+	 * the same directory and the same branch name, so one tenant's session
+	 * would check out over another's. Repositories with no Linear workspace
+	 * (GitHub- or Slack-only) keep the flat layout — there is no tenant to
+	 * scope by, and they cannot collide with a Linear tenant's namespaced path.
+	 */
+	private tenantScopedBaseDir(
+		baseDir: string,
+		repository?: RepositoryConfig,
+	): string {
+		const workspaceId = repository?.linearWorkspaceId;
+		return workspaceId ? join(baseDir, workspaceId) : baseDir;
+	}
+
+	/**
 	 * Resolve which workspace directories to delete for an issue.
 	 *
 	 * The path must come from the repositories' configured `workspaceBaseDir`,
@@ -1053,17 +1078,31 @@ export class GitService {
 			}
 		};
 
+		// Primary: the tenant-scoped path this repo would create today.
 		for (const repo of repositories ?? []) {
 			if (repo.workspaceBaseDir) {
-				add(join(repo.workspaceBaseDir, issueIdentifier));
+				add(
+					join(
+						this.tenantScopedBaseDir(repo.workspaceBaseDir, repo),
+						issueIdentifier,
+					),
+				);
 			}
 		}
 
-		const legacyPath = join(
-			getDefaultWorktreesDir(this.cyrusHome),
-			issueIdentifier,
-		);
-		if (!seen.has(legacyPath) && existsSync(legacyPath)) {
+		// Legacy: paths from before tenant scoping — the repo's un-scoped base
+		// dir, and the global default. Both may hold another tenant's worktree,
+		// so each is deleted only when it provably belongs to these repos.
+		const legacyCandidates = [
+			...(repositories ?? [])
+				.map((repo) => repo.workspaceBaseDir)
+				.filter((dir): dir is string => Boolean(dir))
+				.map((dir) => join(dir, issueIdentifier)),
+			join(getDefaultWorktreesDir(this.cyrusHome), issueIdentifier),
+		];
+
+		for (const legacyPath of legacyCandidates) {
+			if (seen.has(legacyPath) || !existsSync(legacyPath)) continue;
 			// With no repositories supplied there is no better information than
 			// the default; that is the pre-PON-115 behavior and the only option.
 			if (!repositories || repositories.length === 0) {

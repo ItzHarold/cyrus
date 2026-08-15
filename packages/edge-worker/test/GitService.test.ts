@@ -904,6 +904,87 @@ describe("GitService", () => {
 		});
 	});
 
+	describe("worktree path tenant namespacing (PON-115)", () => {
+		const linearRepo = {
+			id: "repo-a",
+			name: "repo-a",
+			repositoryPath: "/home/user/repos/tenant-a",
+			workspaceBaseDir: "/home/user/.cyrus/worktrees",
+			linearWorkspaceId: "ws-aaa",
+			baseBranch: "main",
+		} as any;
+
+		const otherTenantRepo = {
+			...linearRepo,
+			id: "repo-b",
+			name: "repo-b",
+			repositoryPath: "/home/user/repos/tenant-b",
+			linearWorkspaceId: "ws-bbb",
+		} as any;
+
+		const nonLinearRepo = {
+			id: "repo-c",
+			name: "repo-c",
+			repositoryPath: "/home/user/repos/gh-only",
+			workspaceBaseDir: "/home/user/.cyrus/worktrees",
+			baseBranch: "main",
+		} as any;
+
+		const issue = { id: "i1", identifier: "ENG-1", title: "t" } as any;
+
+		it("puts a Linear repo's worktree under its workspace id", async () => {
+			mockExistsSync.mockReturnValue(false);
+			mockExecSync.mockReturnValue(Buffer.from(""));
+
+			const ws = await gitService.createGitWorktree(issue, [linearRepo]);
+
+			expect(ws.path).toBe("/home/user/.cyrus/worktrees/ws-aaa/ENG-1");
+		});
+
+		it("gives two tenants with the SAME identifier different paths", async () => {
+			mockExistsSync.mockReturnValue(false);
+			mockExecSync.mockReturnValue(Buffer.from(""));
+
+			const a = await gitService.createGitWorktree(issue, [linearRepo]);
+			const b = await gitService.createGitWorktree(issue, [otherTenantRepo]);
+
+			expect(a.path).not.toBe(b.path);
+			expect(a.path).toContain("ws-aaa");
+			expect(b.path).toContain("ws-bbb");
+		});
+
+		it("leaves non-Linear repos on the flat layout", async () => {
+			mockExistsSync.mockReturnValue(false);
+			mockExecSync.mockReturnValue(Buffer.from(""));
+
+			const ws = await gitService.createGitWorktree(issue, [nonLinearRepo]);
+
+			expect(ws.path).toBe("/home/user/.cyrus/worktrees/ENG-1");
+		});
+
+		it("deletes the tenant-scoped path for a Linear repo", async () => {
+			mockExistsSync.mockImplementation((p: any) => {
+				const s = String(p);
+				if (s === "/home/user/.cyrus/worktrees/ws-aaa/ENG-1") return true;
+				if (s === "/home/user/.cyrus/worktrees/ws-aaa/ENG-1/.git") return true;
+				if (s === "/home/user/repos/tenant-a") return true;
+				return false;
+			});
+			mockStatSync.mockReturnValue({ isFile: () => true } as any);
+			mockReadFileSync.mockReturnValue(
+				"gitdir: /home/user/repos/tenant-a/.git/worktrees/ENG-1",
+			);
+			mockExecSync.mockReturnValue(Buffer.from(""));
+
+			await gitService.deleteWorktree("ENG-1", { repositories: [linearRepo] });
+
+			expect(mockRmSync).toHaveBeenCalledWith(
+				"/home/user/.cyrus/worktrees/ws-aaa/ENG-1",
+				expect.anything(),
+			);
+		});
+	});
+
 	describe("deleteWorktree tenant scoping (PON-115)", () => {
 		const tenantA = {
 			id: "repo-a",
