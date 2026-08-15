@@ -765,7 +765,7 @@ Issue: {{issue_identifier}}`;
 			expect(capturedRunnerType).toBe("claude");
 			expect(ClaudeRunner).toHaveBeenCalled();
 			expect(GeminiRunner).not.toHaveBeenCalled();
-			expect(capturedRunnerConfig.model).toBe("opus");
+			expect(capturedRunnerConfig.model).toBe("claude-opus-5");
 		});
 	});
 
@@ -1054,7 +1054,10 @@ Issue: {{issue_identifier}}`;
 
 			// Assert
 			expect(runnerSelection.runnerType).toBe("claude");
-			expect(runnerSelection.modelOverride).toBe("opus");
+			// PON-110: labels may select the Claude runner but never a Claude
+			// model — the model always comes from CYRUS_MODEL, so no override.
+			expect(runnerSelection.modelOverride).toBeUndefined();
+			expect(runnerSelection.fallbackModelOverride).toBeUndefined();
 
 			// The validation logic in resumeAgentSession will detect this mismatch
 			// and prevent applying "opus" to a Gemini session
@@ -1105,7 +1108,7 @@ Issue: {{issue_identifier}}`;
 			]);
 
 			expect(runnerSelection.runnerType).toBe("claude");
-			expect(runnerSelection.modelOverride).toBe("opus");
+			expect(runnerSelection.modelOverride).toBeUndefined();
 		});
 	});
 

@@ -253,6 +253,10 @@ export {
 	PERSISTENCE_VERSION,
 	PersistenceManager,
 } from "./PersistenceManager.js";
+// Platform-agnostic webhook type aliases - exported from issue-tracker
+// These are now defined in issue-tracker/types.ts as aliases to Linear SDK webhook types
+// EdgeWorker and other high-level code should use these generic names via issue-tracker exports
+export * from "./PinnedModel.js";
 export { StreamingPrompt } from "./StreamingPrompt.js";
 export type {
 	WebhookIpValidatorOptions,
@@ -274,6 +278,3 @@ export type {
 	ISimpleAgentRunner,
 	ISimpleAgentRunnerConfig,
 } from "./simple-agent-runner-types.js";
-// Platform-agnostic webhook type aliases - exported from issue-tracker
-// These are now defined in issue-tracker/types.ts as aliases to Linear SDK webhook types
-// EdgeWorker and other high-level code should use these generic names via issue-tracker exports

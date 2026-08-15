@@ -205,16 +205,6 @@ export class ConfigManager extends EventEmitter {
 					parsedConfig.ngrokAuthToken || this.config.ngrokAuthToken,
 				linearWorkspaces:
 					parsedConfig.linearWorkspaces || this.config.linearWorkspaces,
-				claudeDefaultModel:
-					parsedConfig.claudeDefaultModel ||
-					parsedConfig.defaultModel ||
-					this.config.claudeDefaultModel ||
-					this.config.defaultModel,
-				claudeDefaultFallbackModel:
-					parsedConfig.claudeDefaultFallbackModel ||
-					parsedConfig.defaultFallbackModel ||
-					this.config.claudeDefaultFallbackModel ||
-					this.config.defaultFallbackModel,
 				geminiDefaultModel:
 					parsedConfig.geminiDefaultModel || this.config.geminiDefaultModel,
 				codexDefaultModel:
@@ -338,8 +328,6 @@ export class ConfigManager extends EventEmitter {
 	private detectGlobalConfigChanges(newConfig: EdgeWorkerConfig): boolean {
 		const globalKeys: Array<keyof EdgeWorkerConfig> = [
 			"defaultRunner",
-			"claudeDefaultModel",
-			"claudeDefaultFallbackModel",
 			"geminiDefaultModel",
 			"codexDefaultModel",
 			"cursorDefaultModel",

@@ -56,6 +56,7 @@ import {
 	CLIRPCServer,
 	createLogger,
 	DEFAULT_PROXY_URL,
+	getPinnedModel,
 	isAgentSessionCreatedWebhook,
 	isAgentSessionPromptedWebhook,
 	isContentUpdateMessage,
@@ -1098,7 +1099,10 @@ export class EdgeWorker extends EventEmitter {
 					return this.createRunnerForType(runnerType, {
 						...config,
 						model: this.getDefaultModelForRunner(runnerType),
-						fallbackModel: this.getDefaultFallbackModelForRunner(runnerType),
+						fallbackModel:
+							runnerType === "claude"
+								? undefined
+								: this.getDefaultFallbackModelForRunner(runnerType), // PON-110
 					});
 				},
 				// Live read so hot-reloaded config (`setConfig`) picks up new
@@ -6803,12 +6807,7 @@ ${input.userComment}
 						}
 					}
 
-					const repoConfig = repo as unknown as Record<string, unknown>;
-					const model =
-						(session.metadata?.model as string | undefined) ||
-						(repoConfig.claudeDefaultModel as string | undefined) ||
-						(repoConfig.model as string | undefined) ||
-						"claude-opus-4-6";
+					const model = getPinnedModel(); // PON-110
 
 					// Build allowed/disallowed tools — same as what buildAgentRunnerConfig() uses.
 					// Without these, startup() inherits the user's defaultMode ("default"),

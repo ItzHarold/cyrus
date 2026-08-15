@@ -41,12 +41,14 @@ describe("AgentSessionManager - Model Notification", () => {
 	});
 
 	it("should post model notification when system init message is received", async () => {
-		// Create a system init message with model information
+		// Create a system init message reporting the pinned model (set in
+		// test/setup.ts) — a non-pinned model would trip the PON-110 drift
+		// assertion instead of the plain notification under test here.
 		const systemMessage: SDKSystemMessage = {
 			type: "system",
 			subtype: "init",
 			session_id: "claude-session-123",
-			model: "claude-3-opus-20240229",
+			model: "claude-opus-5",
 			tools: ["bash", "grep", "edit"],
 			permissionMode: "allowed_tools",
 			apiKeySource: "claude_desktop",
@@ -66,7 +68,7 @@ describe("AgentSessionManager - Model Notification", () => {
 		expect(modelNotificationCall[0]).toBe(sessionId);
 		expect(modelNotificationCall[1]).toEqual({
 			type: "thought",
-			body: "Using model: claude-3-opus-20240229",
+			body: "Using model: claude-opus-5",
 		});
 	});
 

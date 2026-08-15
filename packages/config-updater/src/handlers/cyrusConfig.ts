@@ -63,20 +63,19 @@ export async function handleCyrusConfig(
 			},
 		);
 
-		// Backwards compatibility: migrate legacy global model keys to Claude-specific keys
+		// PON-110: the Claude model is pinned via CYRUS_MODEL env - never persist Claude model keys.
 		const normalizedEdgeConfig = {
 			...edgeConfig,
-			claudeDefaultModel:
-				edgeConfig.claudeDefaultModel || edgeConfig.defaultModel,
-			claudeDefaultFallbackModel:
-				edgeConfig.claudeDefaultFallbackModel ||
-				edgeConfig.defaultFallbackModel,
 		} as EdgeConfig & {
 			defaultModel?: string;
 			defaultFallbackModel?: string;
+			claudeDefaultModel?: string;
+			claudeDefaultFallbackModel?: string;
 		};
 		delete normalizedEdgeConfig.defaultModel;
 		delete normalizedEdgeConfig.defaultFallbackModel;
+		delete normalizedEdgeConfig.claudeDefaultModel;
+		delete normalizedEdgeConfig.claudeDefaultFallbackModel;
 
 		// Build complete config by spreading EdgeConfig fields and overriding repositories
 		const config: EdgeConfig = {
