@@ -650,6 +650,53 @@ describe("EdgeWorker - Serialized lanes (PON-112)", () => {
 		expect(spies.init).not.toHaveBeenCalled();
 	});
 
+	it("cancelling the active issue releases the lane and starts the next", async () => {
+		const spies = mockStartFlow();
+		const repos = [mockRepository];
+		await (edgeWorker as any).handleWebhook(createdWebhook("s1"), repos);
+		await (edgeWorker as any).handleWebhook(createdWebhook("s2"), repos);
+
+		// Terminal state (Done/Canceled) arrives on the message bus, not the
+		// legacy webhook path.
+		mockAgentSessionManager.getSessionsByIssueId.mockReturnValue([
+			{ id: "s1", agentRunner: { stop: vi.fn() } },
+		]);
+		await (edgeWorker as any).handleIssueStateChangeMessage({
+			source: "linear",
+			action: "issue_state_change",
+			workItemId: "issue-s1",
+			workItemIdentifier: "TEST-s1",
+		});
+		await settle();
+
+		expect((edgeWorker as any).laneManager.activeSessionOf(LANE_WS)).toBe("s2");
+		expect(spies.init).toHaveBeenCalledTimes(2);
+	});
+
+	it("cancelling a QUEUED issue removes it and reposts shifted positions", async () => {
+		const spies = mockStartFlow();
+		const repos = [mockRepository];
+		await (edgeWorker as any).handleWebhook(createdWebhook("s1"), repos);
+		await (edgeWorker as any).handleWebhook(createdWebhook("s2"), repos);
+		await (edgeWorker as any).handleWebhook(createdWebhook("s3"), repos);
+
+		mockAgentSessionManager.getSessionsByIssueId.mockReturnValue([]);
+		await (edgeWorker as any).handleIssueStateChangeMessage({
+			source: "linear",
+			action: "issue_state_change",
+			workItemId: "issue-s2",
+			workItemIdentifier: "TEST-s2",
+		});
+		await settle();
+
+		// s2 dropped from the queue; s3 moved up and was told
+		expect((edgeWorker as any).laneManager.isQueued("s2")).toBe(false);
+		expect((edgeWorker as any).laneManager.positionOf("s3")).toBe(1);
+		expect(spies.positionUpdate).toHaveBeenCalledWith("s3", LANE_WS, 1);
+		// the active session is untouched
+		expect((edgeWorker as any).laneManager.activeSessionOf(LANE_WS)).toBe("s1");
+	});
+
 	it("boot recovery drains a lane left free with queued work", async () => {
 		const spies = mockStartFlow();
 		const repos = [mockRepository];
