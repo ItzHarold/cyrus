@@ -82,7 +82,8 @@ export class ActivityPoster {
 				agentSessionId: sessionId,
 				content: {
 					type: "thought",
-					body: "I've received your request and I'm starting to work on it. Let me analyze the issue and prepare my approach.",
+					// Keep short and direct — final per-queue-state wording lands with PON-112
+					body: "Got it. Looking at this now.",
 				},
 			},
 			"instant acknowledgment",
@@ -357,9 +358,10 @@ export class ActivityPoster {
 			return;
 		}
 
+		// Keep short and direct — final per-queue-state wording lands with PON-112
 		const message = isStreaming
-			? "I've queued up your message as guidance"
-			: "Getting started on that...";
+			? "Got it — feeding this into the run in progress."
+			: "Got it. Looking at this now.";
 
 		await this.postActivityDirect(
 			issueTracker,

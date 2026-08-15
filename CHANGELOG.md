@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Changed
+- Agent sessions now acknowledge instantly in Linear: a brief thought ("Got it. Looking at this now.") is posted as soon as a delegation or prompt arrives, before repository routing, dependency checks, or any repository setup. Previously the first activity waited on several Linear API round-trips and could exceed Linear's 10-second responsiveness window, showing sessions as unresponsive. The webhook HTTP response is also sent before any processing begins. ([PON-111](https://linear.app/pontedigital/issue/PON-111), [#1](https://github.com/ItzHarold/cyrus/pull/1))
 - Model labels (`fable`, `opus`, `sonnet`, `haiku`) now route issues to exact model ids (`claude-fable-5`, `claude-opus-5`, `claude-sonnet-5`, `claude-haiku-4-5`) instead of SDK aliases, so the model an issue runs on no longer depends on which release the bundled SDK resolves an alias to.
 
 ### Fixed
