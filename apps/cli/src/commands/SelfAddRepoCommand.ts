@@ -1,6 +1,6 @@
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import * as readline from "node:readline";
 import {
@@ -272,7 +272,13 @@ export class SelfAddRepoCommand extends BaseCommand {
 
 			config.repositories.push(repoConfig);
 
-			writeFileSync(configPath, JSON.stringify(config, null, "\t"), "utf-8");
+			// 0600: this file holds per-workspace Linear OAuth tokens.
+			writeFileSync(configPath, JSON.stringify(config, null, "\t"), {
+				encoding: "utf-8",
+				mode: 0o600,
+			});
+			// mode only applies on create, so tighten pre-existing configs too.
+			chmodSync(configPath, 0o600);
 
 			console.log(`\nAdded: ${repoName}`);
 			console.log(`  ID: ${id}`);

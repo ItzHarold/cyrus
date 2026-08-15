@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("node:fs", () => ({
 	readFileSync: mocks.mockReadFileSync,
 	writeFileSync: mocks.mockWriteFileSync,
+	chmodSync: vi.fn(),
 }));
 
 // Mock Fastify

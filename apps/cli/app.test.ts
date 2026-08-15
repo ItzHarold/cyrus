@@ -25,6 +25,7 @@ vi.mock("node:fs", () => ({
 	readFileSync: mockReadFileSync,
 	writeFileSync: mockWriteFileSync,
 	copyFileSync: vi.fn(),
+	chmodSync: vi.fn(),
 }));
 
 // Mock path

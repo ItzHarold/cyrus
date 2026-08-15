@@ -1,4 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	writeFileSync,
+} from "node:fs";
 import { dirname, resolve } from "node:path";
 import { migrateEdgeConfig } from "cyrus-core";
 import type { EdgeConfig } from "../config/types.js";
@@ -135,7 +141,12 @@ export class ConfigService {
 			mkdirSync(configDir, { recursive: true });
 		}
 
-		writeFileSync(this.configPath, JSON.stringify(config, null, 2));
+		// 0600: this file holds per-workspace Linear OAuth tokens.
+		writeFileSync(this.configPath, JSON.stringify(config, null, 2), {
+			mode: 0o600,
+		});
+		// mode only applies on create, so tighten pre-existing configs too.
+		chmodSync(this.configPath, 0o600);
 	}
 
 	/**

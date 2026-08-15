@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { LinearClient } from "@linear/sdk";
 import {
@@ -106,7 +106,13 @@ export class SelfAuthCommand extends BaseCommand {
 				linearWorkspaceName: workspace.name,
 				linearWorkspaceSlug: workspace.slug,
 			};
-			writeFileSync(configPath, JSON.stringify(config, null, "\t"), "utf-8");
+			// 0600: this file holds per-workspace Linear OAuth tokens.
+			writeFileSync(configPath, JSON.stringify(config, null, "\t"), {
+				encoding: "utf-8",
+				mode: 0o600,
+			});
+			// mode only applies on create, so tighten pre-existing configs too.
+			chmodSync(configPath, 0o600);
 
 			this.logSuccess(`Saved credentials for workspace: ${workspace.name}`);
 			if (!config.repositories || config.repositories.length === 0) {
@@ -247,7 +253,7 @@ export class SelfAuthCommand extends BaseCommand {
 			refresh_token?: string;
 		};
 
-		if (!data.access_token || !data.access_token.startsWith("lin_oauth_")) {
+		if (!data.access_token?.startsWith("lin_oauth_")) {
 			throw new Error("Invalid access token received");
 		}
 

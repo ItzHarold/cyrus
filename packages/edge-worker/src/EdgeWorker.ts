@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { execSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { LinearClient } from "@linear/sdk";
 import type {
@@ -8182,32 +8182,33 @@ ${input.userComment}
 				config.linearWorkspaces = {};
 			}
 
-			// Update workspace-level token storage
+			// Update workspace-level token storage.
+			//
+			// Merge onto the existing entry rather than rebuilding it: this
+			// object carries per-workspace settings beyond credentials
+			// (laneSerialization, linearWorkspaceSlug, and anything added
+			// later). Rebuilding dropped every field not explicitly copied, so
+			// a routine token refresh silently turned a tenant's serialized
+			// lane back off (PON-112 regression).
+			const existingWorkspace =
+				config.linearWorkspaces[tokens.linearWorkspaceId] ?? {};
 			config.linearWorkspaces[tokens.linearWorkspaceId] = {
+				...existingWorkspace,
 				linearToken: tokens.linearToken,
 				...(tokens.linearRefreshToken
 					? { linearRefreshToken: tokens.linearRefreshToken }
-					: config.linearWorkspaces[tokens.linearWorkspaceId]
-								?.linearRefreshToken
-						? {
-								linearRefreshToken:
-									config.linearWorkspaces[tokens.linearWorkspaceId]
-										.linearRefreshToken,
-							}
-						: {}),
+					: {}),
 				...(tokens.linearWorkspaceName
 					? { linearWorkspaceName: tokens.linearWorkspaceName }
-					: config.linearWorkspaces[tokens.linearWorkspaceId]
-								?.linearWorkspaceName
-						? {
-								linearWorkspaceName:
-									config.linearWorkspaces[tokens.linearWorkspaceId]
-										.linearWorkspaceName,
-							}
-						: {}),
+					: {}),
 			};
 
-			await writeFile(this.configPath, JSON.stringify(config, null, "\t"));
+			await writeFile(this.configPath, JSON.stringify(config, null, "\t"), {
+				mode: 0o600,
+			});
+			// writeFile's mode only applies when creating the file, so tighten
+			// existing configs explicitly — this file holds tenant OAuth tokens.
+			await chmod(this.configPath, 0o600);
 			this.logger.debug(
 				`OAuth tokens saved to config for workspace ${tokens.linearWorkspaceId}`,
 			);

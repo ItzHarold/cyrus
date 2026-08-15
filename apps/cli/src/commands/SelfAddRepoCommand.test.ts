@@ -24,6 +24,7 @@ vi.mock("node:fs", () => ({
 	existsSync: mocks.mockExistsSync,
 	readFileSync: mocks.mockReadFileSync,
 	writeFileSync: mocks.mockWriteFileSync,
+	chmodSync: vi.fn(),
 }));
 
 vi.mock("node:path", async (importOriginal) => {
