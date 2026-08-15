@@ -154,6 +154,7 @@ export type {
 	IssueWithChildren,
 	Label,
 	PaginationOptions,
+	PermissionChangeWebhook,
 	Team,
 	User,
 	Webhook,
@@ -186,6 +187,7 @@ export {
 	isIssueUnassignedEvent,
 	isIssueUnassignedWebhook,
 	isNewCommentEvent,
+	isPermissionChangeWebhook,
 } from "./issue-tracker/index.js";
 // Internal Message Bus
 export type {

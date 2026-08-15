@@ -279,6 +279,15 @@ export const LinearWorkspaceConfigSchema = z.object({
 	appUserId: z.string().optional(),
 	/** ISO timestamp of when this workspace installed the app. */
 	installedAt: z.string().optional(),
+	/**
+	 * Whether this tenant is currently served. Set to false when Linear
+	 * reports the app's access has been revoked (PON-115); processing stops
+	 * for the workspace and the flag persists across restarts. Cleared when
+	 * the workspace re-authorizes. Absent means active.
+	 */
+	active: z.boolean().optional(),
+	/** ISO timestamp of when access was observed to be revoked. */
+	revokedAt: z.string().optional(),
 });
 
 /**

@@ -509,6 +509,12 @@
 					},
 					"installedAt": {
 						"type": "string"
+					},
+					"active": {
+						"type": "boolean"
+					},
+					"revokedAt": {
+						"type": "string"
 					}
 				},
 				"required": ["linearToken"],

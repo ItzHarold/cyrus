@@ -831,10 +831,36 @@ export type IssueStateChangeWebhook =
  * Platform-agnostic union of all webhook types.
  * Maps to Linear SDK's webhook payload union types.
  */
+/**
+ * Permission-change webhook (PON-115).
+ *
+ * Linear sends this when a workspace admin changes what the app can reach:
+ * teams added or removed, or the blanket public-team grant toggled. It is
+ * NOT an explicit "uninstalled" event — a full revocation shows up as access
+ * being removed, which is why the handler confirms with the tenant's own
+ * token rather than inferring from the payload alone.
+ */
+export type PermissionChangeWebhook = {
+	type: "PermissionChange";
+	action: string;
+	organizationId: string;
+	/** The app user this concerns — distinct per installation. */
+	appUserId: string;
+	oauthClientId: string;
+	addedTeamIds: string[];
+	removedTeamIds: string[];
+	canAccessAllPublicTeams: boolean;
+	createdAt: string;
+};
+
 export type Webhook =
 	| LinearSDK.LinearDocument.AgentSessionEventWebhookPayload
 	| LinearSDK.LinearDocument.AppUserNotificationWebhookPayload
-	| LinearSDK.LinearDocument.EntityWebhookPayload;
+	| LinearSDK.LinearDocument.EntityWebhookPayload
+	// Team-access changes for this app (PON-115). The SDK models this as
+	// AppUserTeamAccessChangedWebhookPayload; declared locally so the guard
+	// below narrows without depending on that export name.
+	| PermissionChangeWebhook;
 
 /**
  * Platform-agnostic guidance rule type.
@@ -969,6 +995,15 @@ export function isIssueStateIdUpdateWebhook(
 	}
 
 	return "stateId" in updatedFrom;
+}
+
+/**
+ * Type guard for permission/access changes to the app in a workspace.
+ */
+export function isPermissionChangeWebhook(
+	webhook: Webhook,
+): webhook is PermissionChangeWebhook {
+	return (webhook as { type?: string }).type === "PermissionChange";
 }
 
 /**
