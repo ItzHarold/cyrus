@@ -4712,6 +4712,36 @@ ${taskSection}`;
 	}
 
 	/**
+	 * React to a tenant's credentials failing conclusively (PON-115).
+	 *
+	 * Deliberately does NOT re-probe: the caller already proved the token is
+	 * dead by getting a 401 that a refresh could not repair, and a probe would
+	 * use the same dead credentials. Deactivation is idempotent, so repeated
+	 * failures from in-flight requests collapse into one teardown.
+	 */
+	private async handleTenantAccessLost(
+		workspaceId: string,
+		error: unknown,
+	): Promise<void> {
+		const wsConfig = this.config.linearWorkspaces?.[workspaceId];
+		if (!wsConfig || wsConfig.active === false) return;
+
+		this.logger.event("tenant_access_lost", {
+			workspaceId,
+			error: error instanceof Error ? error.message : String(error),
+		});
+
+		try {
+			await this.deactivateTenant(workspaceId, "access_lost");
+		} catch (deactivateError) {
+			this.logger.error(
+				`Failed to deactivate tenant ${workspaceId} after access loss:`,
+				deactivateError,
+			);
+		}
+	}
+
+	/**
 	 * Probe whether we can still act in a workspace, using that tenant's own
 	 * token. Returns true on any inconclusive error so a transient API blip
 	 * never deactivates a paying tenant — revocation is confirmed by a clear
@@ -8368,6 +8398,13 @@ ${input.userComment}
 					linearWorkspaceId: linearWorkspaceId,
 					linearWorkspaceName: workspaceName,
 				});
+			},
+			// PON-115: a 401 that a refresh cannot fix means this workspace's
+			// access is gone. Uninstalling produces no webhook — Linear stops
+			// delivering to an app it has cut off — so this is the only signal
+			// that a tenant has left.
+			onAccessLost: (workspaceId, error) => {
+				void this.handleTenantAccessLost(workspaceId, error);
 			},
 		};
 	}

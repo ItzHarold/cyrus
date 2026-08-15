@@ -24,6 +24,17 @@ export interface LinearOAuthConfig {
 		accessToken: string;
 		refreshToken: string;
 	}) => void | Promise<void>;
+	/**
+	 * Called when this workspace's credentials are conclusively dead: a request
+	 * returned 401 AND the refresh that would have fixed it also failed
+	 * (PON-115).
+	 *
+	 * This is the only signal available when a workspace uninstalls the app.
+	 * Linear delivers no webhook in that case — it stops delivering to an app
+	 * it has just cut off — so a revoked tenant is otherwise invisible and its
+	 * sessions keep running against a dead token forever.
+	 */
+	onAccessLost?: (workspaceId: string, error: unknown) => void;
 }
 
 import type {
@@ -170,6 +181,18 @@ export class LinearIssueTrackerService implements IIssueTrackerService {
 							true, // isRetry flag
 						)) as Data;
 					} catch (_refreshError) {
+						// Request was unauthorized and the refresh could not fix
+						// it: this tenant's access is gone (uninstalled, or its
+						// grant revoked). Announce it once so the caller can stop
+						// serving the workspace instead of 401-looping forever.
+						try {
+							this.oauthConfig?.onAccessLost?.(
+								this.oauthConfig.workspaceId,
+								error,
+							);
+						} catch (notifyError) {
+							this.logger.error("onAccessLost handler threw:", notifyError);
+						}
 						// If refresh failed, throw the original 401 error for clarity
 						throw error;
 					}
