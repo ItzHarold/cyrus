@@ -64,6 +64,34 @@ export interface SerializableEdgeWorkerState {
 	// Issue to repository mapping (for caching user repository selections)
 	// v4.1: string[] (multi-repo). Migration: old Record<string, string> auto-converts.
 	issueRepositoryCache?: Record<string, string[]>;
+	// Per-workspace serialized-lane state (v4.2, PON-112). Absent for state
+	// saved by older versions and for installs with no lane-enabled workspace.
+	lanes?: Record<string, SerializedLaneState>;
+}
+
+/**
+ * Serialized state of one workspace lane (PON-112).
+ * The queue entry's `webhook` is the raw AgentSessionCreatedWebhook payload,
+ * stored verbatim at enqueue time and replayed through the normal session
+ * start path when the entry reaches the front of the queue.
+ */
+export interface SerializedLaneState {
+	activeSessionId: string | null;
+	queue: Array<{
+		sessionId: string;
+		issueId?: string;
+		issueIdentifier?: string;
+		enqueuedAt: string;
+		webhook: unknown;
+		contextPrompts: string[];
+		/**
+		 * "created": webhook is an AgentSessionCreatedWebhook, replayed through
+		 * the created flow. "resume": webhook is an AgentSessionPromptedWebhook
+		 * for an existing (delivered) session, replayed through the prompted
+		 * flow. Absent in pre-4.2 state — treated as "created".
+		 */
+		kind?: "created" | "resume";
+	}>;
 }
 
 /**

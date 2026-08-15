@@ -347,6 +347,119 @@ export class ActivityPoster {
 		);
 	}
 
+	/**
+	 * Lane-busy acknowledgment for a newly created session (PON-112). Posted
+	 * as the ONE first activity instead of the normal instant acknowledgment.
+	 */
+	async postQueuedAcknowledgment(
+		sessionId: string,
+		workspaceId: string,
+		position: number,
+	): Promise<void> {
+		await this.postLaneThought(
+			sessionId,
+			workspaceId,
+			`Queued — position #${position}. One issue is worked at a time; reorder anytime by telling me which issue should be next.`,
+			"queued acknowledgment",
+		);
+	}
+
+	/** Position update for a queued session whose position actually changed. */
+	async postQueuePositionUpdate(
+		sessionId: string,
+		workspaceId: string,
+		position: number,
+	): Promise<void> {
+		await this.postLaneThought(
+			sessionId,
+			workspaceId,
+			position === 1
+				? "Queue update — now position #1. This issue is next."
+				: `Queue update — now position #${position}.`,
+			"queue position update",
+		);
+	}
+
+	/** Confirmation on the session that was moved to the front of the queue. */
+	async postQueueReorderConfirmation(
+		sessionId: string,
+		workspaceId: string,
+		alreadyFirst: boolean,
+	): Promise<void> {
+		await this.postLaneThought(
+			sessionId,
+			workspaceId,
+			alreadyFirst
+				? "This issue is already next in the queue."
+				: "Done — this issue is now next in the queue.",
+			"queue reorder confirmation",
+		);
+	}
+
+	/** Ack for a non-reorder prompt on a queued session; position unchanged. */
+	async postQueueContextAcknowledgment(
+		sessionId: string,
+		workspaceId: string,
+		position: number,
+	): Promise<void> {
+		await this.postLaneThought(
+			sessionId,
+			workspaceId,
+			`Got it — noted for when this issue starts. Still position #${position}.`,
+			"queue context acknowledgment",
+		);
+	}
+
+	/** Posted on a queued session that was removed (stop, unassign, cancel). */
+	async postQueueRemovedNotice(
+		sessionId: string,
+		workspaceId: string,
+	): Promise<void> {
+		await this.postLaneThought(
+			sessionId,
+			workspaceId,
+			"Removed from the queue.",
+			"queue removal notice",
+		);
+	}
+
+	/**
+	 * Posted on a session that held the lane across a restart and was not
+	 * resumed within the boot grace window (PON-112).
+	 */
+	async postLaneGraceReleaseNotice(
+		sessionId: string,
+		workspaceId: string,
+	): Promise<void> {
+		await this.postLaneThought(
+			sessionId,
+			workspaceId,
+			"The service restarted while this issue was active and nothing resumed it within 10 minutes, so the lane was released to let queued work continue. Comment here to resume this session.",
+			"lane grace release notice",
+		);
+	}
+
+	private async postLaneThought(
+		sessionId: string,
+		workspaceId: string,
+		body: string,
+		label: string,
+	): Promise<void> {
+		const issueTracker = this.issueTrackers.get(workspaceId);
+		if (!issueTracker) {
+			this.logger.warn(`No issue tracker found for workspace ${workspaceId}`);
+			return;
+		}
+		await this.postActivityDirect(
+			issueTracker,
+			{
+				agentSessionId: sessionId,
+				content: { type: "thought", body },
+			},
+			label,
+		);
+	}
+
 	async postInstantPromptedAcknowledgment(
 		sessionId: string,
 		workspaceId: string,

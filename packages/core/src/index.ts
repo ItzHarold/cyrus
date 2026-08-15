@@ -247,6 +247,7 @@ export type {
 	SerializableEdgeWorkerState,
 	SerializedCyrusAgentSession,
 	SerializedCyrusAgentSessionEntry,
+	SerializedLaneState,
 	V3SerializableEdgeWorkerState,
 } from "./PersistenceManager.js";
 export {
