@@ -69,4 +69,53 @@ describe("ActivityPoster", () => {
 		expect(result).not.toContain("sudo privileges");
 		expect(result).not.toContain("/settings/packages");
 	});
+
+	// PON-112: Linear only delivers `prompted` webhooks for sessions where the
+	// agent has yielded its turn. A queued session that posts a thought and
+	// then goes silent holds its turn forever, so client replies — including
+	// the reorder the acknowledgment explicitly invites — are recorded by
+	// Linear but never pushed to us. Every lane message on a session that
+	// STAYS queued must therefore be an elicitation (status: awaitingInput).
+	describe("lane messages keep queued sessions able to receive replies (PON-112)", () => {
+		const contentOf = () => createAgentActivity.mock.calls[0]![0].content;
+
+		it("posts the queued acknowledgment as an elicitation, not a thought", async () => {
+			await poster.postQueuedAcknowledgment("session-1", "workspace-1", 2);
+			expect(contentOf().type).toBe("elicitation");
+			expect(contentOf().body).toContain("position #2");
+		});
+
+		it("posts queue position updates as elicitations", async () => {
+			await poster.postQueuePositionUpdate("session-1", "workspace-1", 1);
+			expect(contentOf().type).toBe("elicitation");
+		});
+
+		it("posts reorder confirmations as elicitations", async () => {
+			await poster.postQueueReorderConfirmation(
+				"session-1",
+				"workspace-1",
+				false,
+			);
+			expect(contentOf().type).toBe("elicitation");
+		});
+
+		it("posts queued-context acknowledgments as elicitations", async () => {
+			await poster.postQueueContextAcknowledgment(
+				"session-1",
+				"workspace-1",
+				3,
+			);
+			expect(contentOf().type).toBe("elicitation");
+		});
+
+		it("posts the grace-release notice as an elicitation (it invites a reply)", async () => {
+			await poster.postLaneGraceReleaseNotice("session-1", "workspace-1");
+			expect(contentOf().type).toBe("elicitation");
+		});
+
+		it("posts the removal notice as a response — the session leaves the queue", async () => {
+			await poster.postQueueRemovedNotice("session-1", "workspace-1");
+			expect(contentOf().type).toBe("response");
+		});
+	});
 });

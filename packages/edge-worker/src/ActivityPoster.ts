@@ -356,7 +356,7 @@ export class ActivityPoster {
 		workspaceId: string,
 		position: number,
 	): Promise<void> {
-		await this.postLaneThought(
+		await this.postLaneElicitation(
 			sessionId,
 			workspaceId,
 			`Queued — position #${position}. One issue is worked at a time; reorder anytime by telling me which issue should be next.`,
@@ -370,7 +370,7 @@ export class ActivityPoster {
 		workspaceId: string,
 		position: number,
 	): Promise<void> {
-		await this.postLaneThought(
+		await this.postLaneElicitation(
 			sessionId,
 			workspaceId,
 			position === 1
@@ -386,7 +386,7 @@ export class ActivityPoster {
 		workspaceId: string,
 		alreadyFirst: boolean,
 	): Promise<void> {
-		await this.postLaneThought(
+		await this.postLaneElicitation(
 			sessionId,
 			workspaceId,
 			alreadyFirst
@@ -402,7 +402,7 @@ export class ActivityPoster {
 		workspaceId: string,
 		position: number,
 	): Promise<void> {
-		await this.postLaneThought(
+		await this.postLaneElicitation(
 			sessionId,
 			workspaceId,
 			`Got it — noted for when this issue starts. Still position #${position}.`,
@@ -410,15 +410,26 @@ export class ActivityPoster {
 		);
 	}
 
-	/** Posted on a queued session that was removed (stop, unassign, cancel). */
+	/**
+	 * Posted on a queued session that was removed (stop, unassign, cancel).
+	 * A response, not an elicitation: the session is leaving the queue, so it
+	 * should end its turn cleanly rather than keep waiting on the user.
+	 */
 	async postQueueRemovedNotice(
 		sessionId: string,
 		workspaceId: string,
 	): Promise<void> {
-		await this.postLaneThought(
-			sessionId,
-			workspaceId,
-			"Removed from the queue.",
+		const issueTracker = this.issueTrackers.get(workspaceId);
+		if (!issueTracker) {
+			this.logger.warn(`No issue tracker found for workspace ${workspaceId}`);
+			return;
+		}
+		await this.postActivityDirect(
+			issueTracker,
+			{
+				agentSessionId: sessionId,
+				content: { type: "response", body: "Removed from the queue." },
+			},
 			"queue removal notice",
 		);
 	}
@@ -431,7 +442,7 @@ export class ActivityPoster {
 		sessionId: string,
 		workspaceId: string,
 	): Promise<void> {
-		await this.postLaneThought(
+		await this.postLaneElicitation(
 			sessionId,
 			workspaceId,
 			"The service restarted while this issue was active and nothing resumed it within 10 minutes, so the lane was released to let queued work continue. Comment here to resume this session.",
@@ -439,7 +450,22 @@ export class ActivityPoster {
 		);
 	}
 
-	private async postLaneThought(
+	/**
+	 * Post a lane message as an ELICITATION, not a thought (PON-112).
+	 *
+	 * Linear only delivers `prompted` webhooks for sessions where the agent has
+	 * yielded its turn — status `awaitingInput` or terminal. A queued session
+	 * that posts a thought and then goes silent keeps holding its turn, so
+	 * Linear records client replies on it but never pushes them to us: the
+	 * reorder the queued acknowledgment explicitly invites would silently
+	 * never arrive. An elicitation puts the session in `awaitingInput`, which
+	 * is both semantically accurate (a queued session IS waiting on the human)
+	 * and the state in which replies are delivered.
+	 *
+	 * Verified against the Linear API: posting a bare elicitation (no select
+	 * signal, free-form reply) transitions the session to `awaitingInput`.
+	 */
+	private async postLaneElicitation(
 		sessionId: string,
 		workspaceId: string,
 		body: string,
@@ -454,7 +480,7 @@ export class ActivityPoster {
 			issueTracker,
 			{
 				agentSessionId: sessionId,
-				content: { type: "thought", body },
+				content: { type: "elicitation", body },
 			},
 			label,
 		);
