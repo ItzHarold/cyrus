@@ -40,6 +40,7 @@ import type {
 	IssueStateChangeMessage,
 	IssueUnassignedWebhook,
 	IssueUpdateWebhook,
+	PermissionChangeWebhook,
 	RepositoryConfig,
 	RunnerType,
 	SerializableEdgeWorkerState,
@@ -70,6 +71,7 @@ import {
 	isIssueStateIdUpdateWebhook,
 	isIssueTitleOrDescriptionUpdateWebhook,
 	isIssueUnassignedWebhook,
+	isPermissionChangeWebhook,
 	isSessionStartMessage,
 	isStopSignalMessage,
 	isUnassignMessage,
@@ -3281,7 +3283,9 @@ ${taskSection}`;
 
 			// Route to specific webhook handlers based on webhook type
 			// NOTE: Traditional webhooks (assigned, comment) are disabled in favor of agent session events
-			if (isIssueAssignedWebhook(webhook)) {
+			if (isPermissionChangeWebhook(webhook)) {
+				await this.handlePermissionChange(webhook);
+			} else if (isIssueAssignedWebhook(webhook)) {
 				return;
 			} else if (isIssueCommentMentionWebhook(webhook)) {
 				return;
@@ -3645,7 +3649,7 @@ ${taskSection}`;
 		const issueId = issueData.id;
 		const issueIdentifier = issueData.identifier;
 		const updatedFrom = webhook.updatedFrom;
-		const webhookKey = `${webhook.createdAt}:${issueId}`;
+		const webhookKey = `${webhook.organizationId}:${webhook.createdAt}:${issueId}`;
 
 		if (!updatedFrom) {
 			this.logger.warn(
@@ -3662,14 +3666,7 @@ ${taskSection}`;
 			return;
 		}
 		this.processedIssueUpdateKeys.add(webhookKey);
-
-		// Prevent unbounded growth — prune old keys when the set gets large
-		if (this.processedIssueUpdateKeys.size > 500) {
-			const keys = [...this.processedIssueUpdateKeys];
-			for (const key of keys.slice(0, 250)) {
-				this.processedIssueUpdateKeys.delete(key);
-			}
-		}
+		this.pruneProcessedIssueUpdateKeys();
 
 		// Get cached repository, with fallback to searching sessions
 		let repository = this.getCachedRepository(issueId);
@@ -4625,6 +4622,185 @@ ${taskSection}`;
 	}
 
 	/**
+	 * Bound the issue-update dedupe cache PER TENANT (PON-115).
+	 *
+	 * A single global cap made this a cross-tenant interference channel: a
+	 * busy workspace could evict a quiet one's keys, and the quiet tenant
+	 * would then reprocess a duplicate webhook it had already handled. Keys
+	 * are workspace-prefixed, so pruning the largest tenant's oldest entries
+	 * keeps one tenant's volume from costing another its dedupe history.
+	 */
+	private pruneProcessedIssueUpdateKeys(): void {
+		const PER_TENANT_LIMIT = 250;
+		if (this.processedIssueUpdateKeys.size <= PER_TENANT_LIMIT) return;
+
+		const byTenant = new Map<string, string[]>();
+		for (const key of this.processedIssueUpdateKeys) {
+			const tenant = key.slice(0, key.indexOf(":"));
+			const bucket = byTenant.get(tenant);
+			if (bucket) bucket.push(key);
+			else byTenant.set(tenant, [key]);
+		}
+
+		for (const keys of byTenant.values()) {
+			if (keys.length <= PER_TENANT_LIMIT) continue;
+			// Insertion order is chronological, so the head is the oldest.
+			for (const key of keys.slice(0, keys.length - PER_TENANT_LIMIT)) {
+				this.processedIssueUpdateKeys.delete(key);
+			}
+		}
+	}
+
+	// ========================================================================
+	// TENANT REVOCATION (PON-115)
+	// ========================================================================
+
+	/**
+	 * Handle a permission/access change for this app in a workspace.
+	 *
+	 * Linear's PermissionChange payload reports team access being added or
+	 * removed — it is not an explicit "uninstalled" event, and the payload
+	 * alone cannot tell us whether ANY access remains (it lists the delta, not
+	 * the resulting set). So rather than inferring revocation from an empty
+	 * `addedTeamIds` or a false `canAccessAllPublicTeams`, we ask the only
+	 * authority that knows: we probe with that tenant's own token. An auth
+	 * failure, or a successful probe showing no reachable teams, means the
+	 * tenant can no longer be served.
+	 *
+	 * A partial scope change is logged and otherwise left alone: routing
+	 * already fails safely for a team we cannot read.
+	 */
+	private async handlePermissionChange(
+		webhook: PermissionChangeWebhook,
+	): Promise<void> {
+		const workspaceId = webhook.organizationId;
+		const wsConfig = this.config.linearWorkspaces?.[workspaceId];
+		if (!wsConfig) {
+			this.logger.event("webhook_unknown_workspace", {
+				action: webhook.action,
+				organizationId: workspaceId,
+			});
+			return;
+		}
+
+		// The payload names the app user it concerns. If we have one recorded
+		// and it differs, this is about a different installation.
+		if (wsConfig.appUserId && webhook.appUserId !== wsConfig.appUserId) {
+			this.logger.warn(
+				`Ignoring permission change for workspace ${workspaceId}: appUserId mismatch`,
+			);
+			return;
+		}
+
+		this.logger.event("permission_change_received", {
+			workspaceId,
+			action: webhook.action,
+			addedTeams: webhook.addedTeamIds?.length ?? 0,
+			removedTeams: webhook.removedTeamIds?.length ?? 0,
+			canAccessAllPublicTeams: webhook.canAccessAllPublicTeams,
+		});
+
+		const stillHasAccess = await this.tenantStillHasAccess(workspaceId);
+		if (stillHasAccess) {
+			this.logger.info(
+				`Permission change for workspace ${workspaceId}: access retained`,
+			);
+			return;
+		}
+
+		await this.deactivateTenant(workspaceId, "permission_revoked");
+	}
+
+	/**
+	 * Probe whether we can still act in a workspace, using that tenant's own
+	 * token. Returns true on any inconclusive error so a transient API blip
+	 * never deactivates a paying tenant — revocation is confirmed by a clear
+	 * signal (auth failure or zero reachable teams), not by absence of one.
+	 */
+	private async tenantStillHasAccess(workspaceId: string): Promise<boolean> {
+		const issueTracker = this.issueTrackers.get(workspaceId);
+		if (!issueTracker) return false;
+
+		try {
+			const teams = await issueTracker.fetchTeams?.();
+			if (teams && Array.isArray(teams.nodes)) {
+				return teams.nodes.length > 0;
+			}
+			// Tracker cannot enumerate teams — fall back to identity, which
+			// still fails hard on a revoked token.
+			await issueTracker.fetchCurrentUser();
+			return true;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			const isAuthFailure = /401|403|unauthor|forbidden|invalid.*token/i.test(
+				message,
+			);
+			if (isAuthFailure) return false;
+			this.logger.warn(
+				`Access probe for workspace ${workspaceId} was inconclusive; leaving tenant active:`,
+				error,
+			);
+			return true;
+		}
+	}
+
+	/**
+	 * Stop serving a tenant: persist the inactive flag, stop its sessions,
+	 * clear its lane, and drop its tracker and activity sinks. Persisted so a
+	 * restart does not silently resume work for a revoked workspace.
+	 */
+	private async deactivateTenant(
+		workspaceId: string,
+		reason: string,
+	): Promise<void> {
+		const wsConfig = this.config.linearWorkspaces?.[workspaceId];
+		if (!wsConfig || wsConfig.active === false) return;
+
+		wsConfig.active = false;
+		wsConfig.revokedAt = new Date().toISOString();
+		await this.persistWorkspaceConfig();
+
+		// Stop every session belonging to this tenant's repositories.
+		const repoIds = new Set(
+			Array.from(this.repositories.values())
+				.filter((repo) => repo.linearWorkspaceId === workspaceId)
+				.map((repo) => repo.id),
+		);
+		let stopped = 0;
+		for (const [sessionId, repoId] of this.sessionRepositories.entries()) {
+			if (!repoIds.has(repoId)) continue;
+			const session = this.agentSessionManager.getSession(sessionId);
+			this.agentSessionManager.requestSessionStop(sessionId);
+			session?.agentRunner?.stop();
+			stopped++;
+		}
+
+		// Free the lane and drop anything queued for this tenant; no further
+		// work should start on its behalf.
+		const activeSessionId = this.laneManager.activeSessionOf(workspaceId);
+		if (activeSessionId) {
+			this.laneManager.release(workspaceId, activeSessionId);
+		}
+		this.clearLaneGrace(workspaceId);
+		let dequeued = 0;
+		while (this.laneManager.takeNext(workspaceId)) {
+			const held = this.laneManager.activeSessionOf(workspaceId);
+			if (held) this.laneManager.release(workspaceId, held);
+			dequeued++;
+		}
+
+		this.issueTrackers.delete(workspaceId);
+
+		this.logger.event("tenant_deactivated", {
+			workspaceId,
+			reason,
+			sessionsStopped: stopped,
+			queuedDropped: dequeued,
+		});
+		await this.savePersistedState();
+	}
+
+	/**
 	 * Whether a webhook's workspace is one this instance serves: configured in
 	 * linearWorkspaces or referenced by a repository's linearWorkspaceId.
 	 * Fails open only when the config carries no workspace information at all
@@ -4643,11 +4819,23 @@ ${taskSection}`;
 	}
 
 	private isKnownWorkspace(workspaceId: string | undefined): boolean {
+		// A deactivated tenant (access revoked) is not served: its webhooks are
+		// dropped exactly like an unknown workspace's.
 		const known = new Set<string>(
-			Object.keys(this.config.linearWorkspaces ?? {}),
+			Object.entries(this.config.linearWorkspaces ?? {})
+				.filter(([, wsConfig]) => wsConfig.active !== false)
+				.map(([id]) => id),
 		);
 		for (const repo of this.repositories.values()) {
 			if (repo.linearWorkspaceId) known.add(repo.linearWorkspaceId);
+		}
+		// Repositories still reference a revoked tenant's workspace, so strip
+		// explicitly deactivated ones back out — otherwise the repo loop would
+		// silently re-admit a workspace whose access was just revoked.
+		for (const [id, wsConfig] of Object.entries(
+			this.config.linearWorkspaces ?? {},
+		)) {
+			if (wsConfig.active === false) known.delete(id);
 		}
 		if (known.size === 0) return true;
 		return workspaceId !== undefined && known.has(workspaceId);

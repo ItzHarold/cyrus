@@ -239,6 +239,29 @@ describe("EdgeWorker multi-tenant isolation (PON-115)", () => {
 		expect(lanes.activeSessionOf(WS_B)).toBe("s-b1");
 	});
 
+	it("keeps the issue-update dedupe cache per tenant (no noisy-neighbour eviction)", () => {
+		const worker = edgeWorker as any;
+
+		// One busy tenant floods the cache well past the per-tenant limit.
+		for (let i = 0; i < 400; i++) {
+			worker.processedIssueUpdateKeys.add(`${WS_A}:t${i}:issue-${i}`);
+			worker.pruneProcessedIssueUpdateKeys();
+		}
+		// A quiet tenant records a single key.
+		worker.processedIssueUpdateKeys.add(`${WS_B}:t0:issue-quiet`);
+		worker.pruneProcessedIssueUpdateKeys();
+
+		// The quiet tenant's dedupe history survives the noisy one entirely.
+		expect(worker.processedIssueUpdateKeys.has(`${WS_B}:t0:issue-quiet`)).toBe(
+			true,
+		);
+		// And the busy tenant is still bounded.
+		const tenantAKeys = [...worker.processedIssueUpdateKeys].filter(
+			(k: string) => k.startsWith(WS_A),
+		);
+		expect(tenantAKeys.length).toBeLessThanOrEqual(250);
+	});
+
 	it("posts activities through the tenant's own tracker", async () => {
 		const poster = (edgeWorker as any).activityPoster;
 
