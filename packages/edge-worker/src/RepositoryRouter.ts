@@ -155,13 +155,13 @@ export class RepositoryRouter {
 	): Promise<RepositoryRoutingResult> {
 		const workspaceId = webhook.organizationId;
 		if (!workspaceId) {
-			return repos[0]
-				? {
-						type: "selected",
-						repositories: [repos[0]],
-						routingMethod: "workspace-fallback",
-					}
-				: { type: "none" };
+			// PON-112 hardening: never fall back to repos[0] for a webhook
+			// without a workspace id. Linear always sends organizationId; a
+			// payload without one must not route into an arbitrary repository.
+			this.logger.warn(
+				"Webhook without organizationId — refusing to route to a repository",
+			);
+			return { type: "none" };
 		}
 
 		// Extract issue information
@@ -576,7 +576,7 @@ export class RepositoryRouter {
 
 				const fullIssue = await issueTracker.fetchIssue(issueId);
 				const project = await fullIssue?.project;
-				if (!project || !project.name) {
+				if (!project?.name) {
 					this.logger.debug(
 						`No project name found for issue ${issueId} in repository ${repo.name}`,
 					);

@@ -3251,6 +3251,23 @@ ${taskSection}`;
 		}
 
 		try {
+			// PON-112 hardening: with a public OAuth app, any workspace that
+			// installs it delivers webhooks here. Agent-session events for
+			// workspaces we do not serve are dropped as an ASSERTED property —
+			// not left to routing's workspace filter, which a refactor could
+			// quietly undo. Nothing is posted, started, or billed for them.
+			if (webhookType === "AgentSessionEvent") {
+				const organizationId = (webhook as { organizationId?: string })
+					.organizationId;
+				if (!this.isKnownWorkspace(organizationId)) {
+					this.logger.event("webhook_unknown_workspace", {
+						action: webhookAction,
+						organizationId: organizationId ?? "missing",
+					});
+					return;
+				}
+			}
+
 			// Route to specific webhook handlers based on webhook type
 			// NOTE: Traditional webhooks (assigned, comment) are disabled in favor of agent session events
 			if (isIssueAssignedWebhook(webhook)) {
@@ -4593,6 +4610,24 @@ ${taskSection}`;
 			baseBranchOverrides,
 			routingMethod,
 		);
+	}
+
+	/**
+	 * Whether a webhook's workspace is one this instance serves: configured in
+	 * linearWorkspaces or referenced by a repository's linearWorkspaceId.
+	 * Fails open only when the config carries no workspace information at all
+	 * (legacy setups predating both fields); on any configured instance an
+	 * unknown or missing workspace id is rejected.
+	 */
+	private isKnownWorkspace(workspaceId: string | undefined): boolean {
+		const known = new Set<string>(
+			Object.keys(this.config.linearWorkspaces ?? {}),
+		);
+		for (const repo of this.repositories.values()) {
+			if (repo.linearWorkspaceId) known.add(repo.linearWorkspaceId);
+		}
+		if (known.size === 0) return true;
+		return workspaceId !== undefined && known.has(workspaceId);
 	}
 
 	// ========================================================================

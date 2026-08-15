@@ -1410,7 +1410,7 @@ describe("RepositoryRouter", () => {
 				expectRouting(result).shouldSelectNothing();
 			});
 
-			it("should return workspace fallback when no workspace ID in webhook", async () => {
+			it("should refuse to route when no workspace ID in webhook (PON-112 hardening)", async () => {
 				// Given: Repository but no workspace ID
 				const repo = env.repository("repo-1", "Repo").build();
 
@@ -1422,11 +1422,9 @@ describe("RepositoryRouter", () => {
 					repo,
 				]);
 
-				// Then: Should fallback to first repo
-				expectRouting(result).shouldSelectRepositoryVia(
-					repo,
-					"workspace-fallback",
-				);
+				// Then: Must NOT fall back to repos[0] — a payload without a
+				// workspace id never routes into an arbitrary repository.
+				expectRouting(result).shouldSelectNothing();
 			});
 
 			it("should return none when repositories exist but in different workspace", async () => {

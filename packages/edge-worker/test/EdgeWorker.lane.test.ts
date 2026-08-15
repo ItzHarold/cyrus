@@ -615,6 +615,41 @@ describe("EdgeWorker - Serialized lanes (PON-112)", () => {
 		expect((edgeWorker as any).laneManager.isQueued("s2")).toBe(false);
 	});
 
+	it("agent-session webhooks from an unknown workspace are dropped entirely", async () => {
+		const spies = mockStartFlow();
+		const router = (edgeWorker as any).repositoryRouter;
+		const routeSpy = vi.spyOn(router, "determineRepositoryForWebhook");
+		const repos = [mockRepository];
+
+		await (edgeWorker as any).handleWebhook(
+			createdWebhook("intruder-1", "uninvited-workspace"),
+			repos,
+		);
+		await (edgeWorker as any).handleWebhook(
+			promptedWebhook("intruder-1", "do work", "uninvited-workspace"),
+			repos,
+		);
+
+		// Nothing acked, nothing routed, nothing started, nothing queued
+		expect(spies.instantAck).not.toHaveBeenCalled();
+		expect(spies.queuedAck).not.toHaveBeenCalled();
+		expect(spies.init).not.toHaveBeenCalled();
+		expect(routeSpy).not.toHaveBeenCalled();
+		expect((edgeWorker as any).laneManager.isQueued("intruder-1")).toBe(false);
+	});
+
+	it("agent-session webhooks with a missing organizationId are dropped", async () => {
+		const spies = mockStartFlow();
+		const repos = [mockRepository];
+		const webhook = createdWebhook("s1") as any;
+		webhook.organizationId = undefined;
+
+		await (edgeWorker as any).handleWebhook(webhook, repos);
+
+		expect(spies.instantAck).not.toHaveBeenCalled();
+		expect(spies.init).not.toHaveBeenCalled();
+	});
+
 	it("boot recovery drains a lane left free with queued work", async () => {
 		const spies = mockStartFlow();
 		const repos = [mockRepository];
