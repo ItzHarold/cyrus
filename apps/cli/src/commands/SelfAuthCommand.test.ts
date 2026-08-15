@@ -411,6 +411,80 @@ describe("SelfAuthCommand", () => {
 			process.env.CYRUS_BASE_URL = "https://example.com";
 		});
 
+		// PON-115: re-authorizing is how a client recovers after uninstalling
+		// and reinstalling the app. Settings must survive, but a previous
+		// deactivation must NOT — otherwise recovery stores a working token in
+		// a tenant the service still refuses to serve.
+		it("clears a previous deactivation on re-auth while preserving settings", async () => {
+			mocks.mockReadFileSync.mockReturnValue(
+				JSON.stringify({
+					repositories: [],
+					linearWorkspaces: {
+						"ws-123": {
+							linearToken: "dead-token",
+							laneSerialization: true,
+							appUserId: "app-123",
+							installedAt: "2026-01-01T00:00:00.000Z",
+							active: false,
+							revokedAt: "2026-08-15T23:00:00.000Z",
+						},
+					},
+				}),
+			);
+
+			let routeHandler: RouteHandler;
+			mocks.mockFastifyInstance.get.mockImplementation(
+				(_path: string, handler: RouteHandler) => {
+					routeHandler = handler;
+				},
+			);
+			mocks.mockFastifyInstance.listen.mockImplementation(async () => {
+				setTimeout(async () => {
+					await routeHandler(
+						{ query: { code: "code" } },
+						{
+							type: vi.fn().mockReturnThis(),
+							code: vi.fn().mockReturnThis(),
+							send: vi.fn().mockReturnThis(),
+						},
+					);
+				}, 10);
+			});
+
+			mocks.mockFetch.mockResolvedValueOnce({
+				ok: true,
+				json: () =>
+					Promise.resolve({
+						access_token: "lin_oauth_fresh",
+						refresh_token: "refresh_fresh",
+					}),
+			});
+
+			const { LinearClient } = await import("@linear/sdk");
+			(LinearClient as any).mockImplementation(function () {
+				return {
+					viewer: Promise.resolve({
+						id: "app-123",
+						organization: Promise.resolve({ id: "ws-123", name: "Workspace" }),
+					}),
+				};
+			});
+
+			await expect(command.execute([])).rejects.toThrow("process.exit called");
+
+			const written = JSON.parse(mocks.mockWriteFileSync.mock.calls[0][1]);
+			const ws = written.linearWorkspaces["ws-123"];
+
+			// Reactivated
+			expect(ws.active).toBeUndefined();
+			expect(ws.revokedAt).toBeUndefined();
+			// Fresh credentials
+			expect(ws.linearToken).toBe("lin_oauth_fresh");
+			// Settings preserved across the re-install
+			expect(ws.laneSerialization).toBe(true);
+			expect(ws.installedAt).toBe("2026-01-01T00:00:00.000Z");
+		});
+
 		it("should save workspace credentials without modifying repositories", async () => {
 			mocks.mockReadFileSync.mockReturnValue(
 				JSON.stringify({

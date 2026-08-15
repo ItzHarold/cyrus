@@ -8435,6 +8435,9 @@ ${input.userComment}
 		}> = [];
 
 		for (const [workspaceId, wsConfig] of Object.entries(workspaces)) {
+			// A deactivated tenant's token is dead; probing it on every boot
+			// would just 401 and re-trigger deactivation (PON-115).
+			if (wsConfig.active === false) continue;
 			const needsAppUserId = !wsConfig.appUserId;
 			const needsInstalledAt = !wsConfig.installedAt;
 			if (!needsAppUserId && !needsInstalledAt) continue;

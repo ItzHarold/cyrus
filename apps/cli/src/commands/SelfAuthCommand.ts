@@ -98,9 +98,25 @@ export class SelfAuthCommand extends BaseCommand {
 			if (!config.linearWorkspaces) {
 				(config as Record<string, unknown>).linearWorkspaces = {};
 			}
+			// Preserve per-workspace settings on re-auth, but NOT a previous
+			// deactivation: completing this flow is proof the workspace has
+			// granted access again (PON-115). Without this, re-installing
+			// after a revocation would store a working token in a tenant the
+			// service still refuses to serve — the recovery path a real client
+			// would take, silently doing nothing.
+			const existingWorkspace = config.linearWorkspaces![workspace.id] as
+				| (NonNullable<EdgeConfig["linearWorkspaces"]>[string] & {
+						active?: boolean;
+						revokedAt?: string;
+				  })
+				| undefined;
+			const {
+				active: _previouslyActive,
+				revokedAt: _previouslyRevokedAt,
+				...preservedSettings
+			} = existingWorkspace ?? ({} as NonNullable<typeof existingWorkspace>);
 			config.linearWorkspaces![workspace.id] = {
-				// Preserve any existing per-workspace settings on re-auth.
-				...(config.linearWorkspaces![workspace.id] ?? {}),
+				...preservedSettings,
 				linearToken: tokens.accessToken,
 				...(tokens.refreshToken
 					? { linearRefreshToken: tokens.refreshToken }
@@ -108,9 +124,7 @@ export class SelfAuthCommand extends BaseCommand {
 				linearWorkspaceName: workspace.name,
 				linearWorkspaceSlug: workspace.slug,
 				...(workspace.appUserId ? { appUserId: workspace.appUserId } : {}),
-				installedAt:
-					config.linearWorkspaces![workspace.id]?.installedAt ??
-					new Date().toISOString(),
+				installedAt: preservedSettings.installedAt ?? new Date().toISOString(),
 			};
 			// 0600: this file holds per-workspace Linear OAuth tokens.
 			writeFileSync(configPath, JSON.stringify(config, null, "\t"), {
