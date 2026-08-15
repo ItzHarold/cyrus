@@ -270,6 +270,15 @@ export const LinearWorkspaceConfigSchema = z.object({
 	 * lane frees up. Default off: sessions run concurrently as before.
 	 */
 	laneSerialization: z.boolean().optional(),
+	/**
+	 * The app's own user id *within this workspace* (`viewer { id }` queried
+	 * with this installation's token). Linear issues a distinct app-user id per
+	 * install, so this is how the agent recognizes its own activity in a given
+	 * tenant. Backfilled on boot for installs that predate this field.
+	 */
+	appUserId: z.string().optional(),
+	/** ISO timestamp of when this workspace installed the app. */
+	installedAt: z.string().optional(),
 });
 
 /**
