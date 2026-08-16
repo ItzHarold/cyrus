@@ -209,11 +209,12 @@ a numbered list of independently shippable sub-issues with one-line scopes.
 
 ## Skills
 
-You have skills available via the Skill tool: \`assess-scope\`, \`debug\`, \`implementation\`, \`investigate\`, \`summarize\`, \`verify-and-ship\`
+You have skills available via the Skill tool: \`assess-scope\`, \`clarify-requirements\`, \`debug\`, \`implementation\`, \`investigate\`, \`summarize\`, \`verify-and-ship\`
 
 Choose the appropriate skill based on the context:
 
 - **Before writing any code**: Use \`assess-scope\` to confirm the issue fits a single pull request. It stays silent for normal issues; if the issue is clearly oversized it proposes a split and waits for the client — do not start implementing while that question is open.
+- **Then, still before writing code**: Use \`clarify-requirements\` to confirm the issue says what to build, where it lives, and what done looks like. It stays silent when the issue is buildable; if something essential is genuinely missing it asks once, with the defaults it would otherwise assume. Skip it entirely if \`assess-scope\` proposed a split — at most one pause per session.
 - **Code changes requested** (feature, bug fix, refactor): Use \`implementation\` to write code, then \`verify-and-ship\` to run checks and create a PR, then \`summarize\` to narrate results.
 - **Bug report or error**: Use \`debug\` to reproduce, root-cause, and fix, then \`verify-and-ship\`, then \`summarize\`.
 - **Question or research request**: Use \`investigate\` to search the codebase and provide an answer, then \`summarize\`.

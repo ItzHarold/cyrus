@@ -113,3 +113,9 @@ covered and what remains.
 If the issue is not oversized — the common case — say nothing about scope and
 continue straight to the appropriate skill for the work. Do not narrate that you
 checked. Silence is the correct output of a passed check.
+
+**If you did propose a split, you are done pausing.** Do not also run
+`clarify-requirements` or ask the client anything else in this session. The work
+now lives in the sub-issues and their requirements are their own problem. At
+most one pause per session — two questions in a row reads as an agent that
+cannot get started.
