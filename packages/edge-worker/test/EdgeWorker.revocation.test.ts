@@ -86,8 +86,15 @@ describe("EdgeWorker tenant revocation (PON-115)", () => {
 		]);
 		worker.laneManager = new LaneManager(() => true);
 		worker.laneGraceTimers = new Map();
+		// s-a is running; s-old is a finished session still present in the
+		// session→repo map, as happens for every session this process has seen.
+		worker.sessionRepositories.set("s-old", "repo-a");
 		worker.agentSessionManager = {
-			getSession: vi.fn().mockReturnValue({ agentRunner: { stop: vi.fn() } }),
+			getSession: vi.fn((id: string) =>
+				id === "s-old"
+					? { agentRunner: { isRunning: () => false, stop: vi.fn() } }
+					: { agentRunner: { isRunning: () => true, stop: vi.fn() } },
+			),
 			requestSessionStop: vi.fn((id: string) => stoppedSessions.push(id)),
 		};
 		worker.logger = {

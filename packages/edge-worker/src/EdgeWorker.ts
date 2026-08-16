@@ -4800,8 +4800,13 @@ ${taskSection}`;
 		for (const [sessionId, repoId] of this.sessionRepositories.entries()) {
 			if (!repoIds.has(repoId)) continue;
 			const session = this.agentSessionManager.getSession(sessionId);
+			// Only sessions that are actually running. sessionRepositories
+			// retains every session this process has seen, so stopping all of
+			// them would flag long-finished sessions as stopped and report a
+			// session count that has nothing to do with what was interrupted.
+			if (!session?.agentRunner?.isRunning?.()) continue;
 			this.agentSessionManager.requestSessionStop(sessionId);
-			session?.agentRunner?.stop();
+			session.agentRunner.stop();
 			stopped++;
 		}
 
