@@ -697,6 +697,118 @@ describe("EdgeWorker - Serialized lanes (PON-112)", () => {
 		expect((edgeWorker as any).laneManager.activeSessionOf(LANE_WS)).toBe("s1");
 	});
 
+	// PON-113: a session parked on a question is not working. It gives the
+	// lane back so the client's other issues proceed, and re-enters when the
+	// answer arrives — otherwise an unanswered split proposal freezes the
+	// client's entire queue for as long as they take to reply.
+	describe("lane handover while awaiting user input (PON-113)", () => {
+		it("frees the lane when a session asks a question, starting the next issue", async () => {
+			const spies = mockStartFlow();
+			const repos = [mockRepository];
+			await (edgeWorker as any).handleWebhook(createdWebhook("s1"), repos);
+			await (edgeWorker as any).handleWebhook(createdWebhook("s2"), repos);
+			expect((edgeWorker as any).laneManager.activeSessionOf(LANE_WS)).toBe(
+				"s1",
+			);
+
+			(edgeWorker as any).releaseLaneWhileAwaitingInput("s1");
+			await settle();
+
+			// s2 took over instead of waiting on a human
+			expect((edgeWorker as any).laneManager.activeSessionOf(LANE_WS)).toBe(
+				"s2",
+			);
+			expect(spies.init).toHaveBeenCalledTimes(2);
+		});
+
+		it("resumes immediately when the lane is free on answer", async () => {
+			mockStartFlow();
+			const admitted = await (edgeWorker as any).admitAnsweredSessionToLane(
+				promptedWebhook("s1", "Proceed with this split"),
+				Date.now(),
+			);
+
+			expect(admitted).toBe(true);
+			expect((edgeWorker as any).laneManager.activeSessionOf(LANE_WS)).toBe(
+				"s1",
+			);
+		});
+
+		it("queues the answer when another issue holds the lane", async () => {
+			const spies = mockStartFlow();
+			const repos = [mockRepository];
+			await (edgeWorker as any).handleWebhook(createdWebhook("s2"), repos);
+
+			const admitted = await (edgeWorker as any).admitAnsweredSessionToLane(
+				promptedWebhook("s1", "Proceed with this split"),
+				Date.now(),
+			);
+
+			expect(admitted).toBe(false);
+			expect((edgeWorker as any).laneManager.isQueued("s1")).toBe(true);
+			expect(spies.queuedAck).toHaveBeenCalledWith("s1", LANE_WS, 1);
+			// s2 keeps working; the answered session did NOT jump in
+			expect((edgeWorker as any).laneManager.activeSessionOf(LANE_WS)).toBe(
+				"s2",
+			);
+		});
+
+		it("admits the answered session once it reaches the front of the queue", async () => {
+			mockStartFlow();
+			const repos = [mockRepository];
+			// The session really is parked on a question, so the replayed
+			// webhook takes the AskUserQuestion branch rather than the normal
+			// continuation branch.
+			const handler = (edgeWorker as any).askUserQuestionHandler;
+			vi.spyOn(handler, "hasPendingQuestion").mockReturnValue(true);
+			const resolveSpy = vi
+				.spyOn(edgeWorker as any, "handleAskUserQuestionResponse")
+				.mockResolvedValue(undefined);
+
+			await (edgeWorker as any).handleWebhook(createdWebhook("s2"), repos);
+			await (edgeWorker as any).admitAnsweredSessionToLane(
+				promptedWebhook("s1", "Proceed"),
+				Date.now(),
+			);
+			expect((edgeWorker as any).laneManager.isQueued("s1")).toBe(true);
+
+			// s2 finishes; the queued answer is dequeued, takes the lane, and
+			// the pending question finally resolves.
+			(edgeWorker as any).handleLaneSessionEnded("s2", "result");
+			await settle();
+
+			expect((edgeWorker as any).laneManager.activeSessionOf(LANE_WS)).toBe(
+				"s1",
+			);
+			expect(resolveSpy).toHaveBeenCalled();
+		});
+
+		it("does not enqueue twice on a duplicate answer delivery", async () => {
+			const spies = mockStartFlow();
+			const repos = [mockRepository];
+			await (edgeWorker as any).handleWebhook(createdWebhook("s2"), repos);
+			const webhook = promptedWebhook("s1", "Proceed");
+
+			await (edgeWorker as any).admitAnsweredSessionToLane(webhook, Date.now());
+			await (edgeWorker as any).admitAnsweredSessionToLane(webhook, Date.now());
+
+			expect((edgeWorker as any).laneManager.queueLength(LANE_WS)).toBe(1);
+			expect(spies.queuedAck).toHaveBeenCalledTimes(2);
+			expect(spies.queuedAck).toHaveBeenLastCalledWith("s1", LANE_WS, 1);
+		});
+
+		it("is a no-op for workspaces without lane serialization", async () => {
+			mockStartFlow();
+			const admitted = await (edgeWorker as any).admitAnsweredSessionToLane(
+				promptedWebhook("f1", "Proceed", FREE_WS),
+				Date.now(),
+			);
+
+			expect(admitted).toBe(true);
+			expect((edgeWorker as any).laneManager.isQueued("f1")).toBe(false);
+		});
+	});
+
 	it("boot recovery drains a lane left free with queued work", async () => {
 		const spies = mockStartFlow();
 		const repos = [mockRepository];

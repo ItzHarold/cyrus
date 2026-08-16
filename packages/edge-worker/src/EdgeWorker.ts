@@ -4712,6 +4712,91 @@ ${taskSection}`;
 	}
 
 	/**
+	 * Free the lane while a session waits on a human (PON-113).
+	 *
+	 * A session parked on a question is not working, and holding a serialized
+	 * lane on an unanswered question blocks every other issue the client has
+	 * queued — for as long as they take to reply. The answer re-enters through
+	 * `admitAnsweredSessionToLane`, so the one-active-session guarantee still
+	 * holds; the lane is simply not held during the wait.
+	 */
+	private releaseLaneWhileAwaitingInput(sessionId: string): void {
+		const workspaceId = this.laneManager.workspaceOf(sessionId);
+		if (!workspaceId || !this.laneManager.isActive(sessionId)) return;
+		this.releaseLaneAndContinue(workspaceId, sessionId, "awaiting_user_input");
+	}
+
+	/**
+	 * Re-admit a session whose question has just been answered (PON-113).
+	 *
+	 * Returns true when the session may resume immediately. Returns false when
+	 * the lane is busy: the answer webhook is queued as a resume entry and
+	 * replayed once the lane frees, at which point this returns true and the
+	 * pending question resolves.
+	 */
+	private async admitAnsweredSessionToLane(
+		webhook: AgentSessionPromptedWebhook,
+		receivedAt: number,
+	): Promise<boolean> {
+		const sessionId = webhook.agentSession.id;
+		const workspaceId = webhook.organizationId;
+		if (!this.laneManager.isEnabled(workspaceId)) return true;
+		if (this.globalSessionRegistry.getParentSessionId(sessionId)) return true;
+
+		const holder = this.laneManager.activeSessionOf(workspaceId);
+		if (holder === sessionId) return true;
+		if (holder === null) {
+			this.laneManager.acquire(workspaceId, sessionId);
+			return true;
+		}
+
+		// Already queued (a duplicate delivery) — restate position, do not
+		// enqueue twice.
+		const existingPosition = this.laneManager.positionOf(sessionId);
+		if (existingPosition !== null) {
+			await this.activityPoster.postQueuedAcknowledgment(
+				sessionId,
+				workspaceId,
+				existingPosition,
+			);
+			return false;
+		}
+
+		const position = this.laneManager.enqueue(workspaceId, {
+			sessionId,
+			issueId: webhook.agentSession.issue?.id,
+			issueIdentifier: webhook.agentSession.issue?.identifier,
+			enqueuedAt: new Date().toISOString(),
+			webhook,
+			kind: "resume",
+		});
+		try {
+			await this.savePersistedStateStrict();
+		} catch (error) {
+			this.laneManager.removeQueued(sessionId);
+			this.logger.event("lane_enqueue_persist_failed", {
+				workspaceId,
+				sessionId,
+			});
+			throw error;
+		}
+		await this.activityPoster.postQueuedAcknowledgment(
+			sessionId,
+			workspaceId,
+			position,
+		);
+		this.logger.event("session_ack_posted", {
+			kind: "prompted",
+			queued: true,
+			answeredQuestion: true,
+			position,
+			sessionId,
+			elapsedMs: Date.now() - receivedAt,
+		});
+		return false;
+	}
+
+	/**
 	 * React to a tenant's credentials failing conclusively (PON-115).
 	 *
 	 * Deliberately does NOT re-probe: the caller already proved the token is
@@ -5903,6 +5988,15 @@ ${taskSection}`;
 		// This handles responses to questions posed via the AskUserQuestion tool.
 		// The response is passed to the pending promise resolver.
 		if (this.askUserQuestionHandler.hasPendingQuestion(agentSessionId)) {
+			// PON-113: the session gave up its lane when it asked, so another
+			// issue may be running now. Re-enter the lane before resuming;
+			// when it is busy this enqueues and replays on dequeue, so two
+			// sessions never work at once.
+			const admitted = await this.admitAnsweredSessionToLane(
+				webhook,
+				receivedAt,
+			);
+			if (!admitted) return;
 			await this.handleAskUserQuestionResponse(webhook);
 			return;
 		}
@@ -7485,6 +7579,11 @@ ${input.userComment}
 		organizationId: string,
 	): AgentRunnerConfig["onAskUserQuestion"] {
 		return async (input, _sessionId, signal) => {
+			// PON-113: hand back the lane before blocking on the human. The
+			// answer re-enters through lane admission, so this widens nothing
+			// — it only stops an unanswered question from freezing the
+			// client's whole queue.
+			this.releaseLaneWhileAwaitingInput(linearAgentSessionId);
 			// Note: We use linearAgentSessionId (from closure) instead of the passed sessionId
 			// because the passed sessionId is the Claude session ID, not the Linear agent session ID
 			return this.askUserQuestionHandler.handleAskUserQuestion(

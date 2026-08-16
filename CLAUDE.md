@@ -23,13 +23,9 @@ When a Linear issue is assigned to Cyrus, the following sequence occurs:
 
 2. **Workspace Isolation**: A dedicated Git worktree is created for each issue (e.g., `worktrees/DEF-1/`) with a sanitized branch name derived from the issue identifier. This ensures complete isolation between concurrent tasks.
 
-3. **AI Classification**: The issue content is analyzed to determine its type (`code`, `question`, `research`, etc.) and the appropriate procedure is selected (e.g., `full-development` for coding tasks).
+3. **Skill Selection**: The session's system prompt carries a guidance block listing the available skills and when to use each (`SkillsPluginResolver.buildSkillsGuidance`). **The model chooses** — there is no code-side classifier. Skills ship as `SKILL.md` files under `skills/`, are bundled into `packages/edge-worker/cyrus-skills-plugin/skills/`, and are deployed to `~/.cyrus/cyrus-skills-plugin/` on first run.
 
-4. **Subroutine Execution**: For development tasks, Claude executes a sequence of subroutines:
-   - **coding-activity**: Implements the requested feature/fix
-   - **verifications**: Runs tests, type checks, and linting
-   - **git-gh**: Commits changes and creates pull requests
-   - **concise-summary**: Generates a final summary for Linear
+4. **Skill Execution**: The default guidance maps work to skills: code changes → `implementation` → `verify-and-ship` → `summarize`; bugs → `debug` → `verify-and-ship` → `summarize`; questions/research → `investigate` → `summarize`. A skill's visibility can be narrowed per repository, Linear team, or label via a `scope.json` sidecar; hidden skills are omitted from the guidance list entirely.
 
 5. **Mid-Implementation Prompting**: Users can add comments to the Linear issue while Claude is working. These comments are streamed into the active session, allowing real-time guidance (e.g., "Also add a modulo method while you're at it").
 
@@ -42,13 +38,12 @@ A typical session flow:
 [GitService] Fetching latest changes from remote...
 [GitService] Creating git worktree at .../worktrees/DEF-1 from origin/main
 [EdgeWorker] Workspace created at: .../worktrees/DEF-1
-[EdgeWorker] AI routing decision: Classification: code, Procedure: full-development
+[RepositoryRouter] Repository selected: my-repo (team-based routing)
 [ClaudeRunner] Session ID assigned by Claude: c5c1fc00-...
 [AgentSessionManager] Created thought activity activity-6
 [AgentSessionManager] Created action activity activity-7
-... (Claude implements the feature)
+... (Claude invokes the `implementation` skill and writes the feature)
 [ClaudeRunner] Session completed with 84 messages
-[AgentSessionManager] Subroutine completed, advancing to next: verifications
 ```
 
 ### Test Drives
@@ -56,7 +51,7 @@ A typical session flow:
 To see Cyrus in action, refer to the test drives in `apps/f1/test-drives/`. These documents showcase real interactions demonstrating:
 - How issues are processed end-to-end
 - Mid-implementation prompting in action
-- Subroutine transitions and activity logging
+- Skill selection and activity logging
 - Final repository state after completion
 
 The F1 (Formula 1) testing framework provides a controlled environment to test Cyrus without affecting production Linear workspaces.
@@ -150,7 +145,7 @@ When implementing a new runner/harness (for example Codex, Gemini, OpenCode, or 
 - Validate `tools`, `allowedTools`, and `disallowedTools` semantics for the SDK.
 - Validate approval/sandbox behavior for tool execution.
 - Verify tool calls produce both start and completion signals.
-- For providers that rely on static/project config files (for example Cursor CLI), implement a permission translation layer from Cyrus/Claude tool names to provider-native permission tokens and write that config before session start. This must support subroutine-time updates when allowed/disallowed tools change. For Cursor MCP servers, pre-enable them before session start (`agent mcp list` + `agent mcp enable <server>` per server) so tools are available in headless runs. When using Cursor in Cyrus, only MCP servers configured in `.cursor/mcp.json` should be treated as project MCP config; use Cursor's MCP config-location and file-format docs as the source of truth: https://cursor.com/docs/context/mcp#configuration-locations. For broad file permissions, map wildcard `Read(**)` / `Write(**)` to workspace-scoped patterns (for example `Read(./**)` / `Write(./**)`) to avoid unintentionally permitting absolute system paths. Reference: https://cursor.com/docs/cli/reference/permissions
+- For providers that rely on static/project config files (for example Cursor CLI), implement a permission translation layer from Cyrus/Claude tool names to provider-native permission tokens and write that config before session start. This must support mid-session updates when allowed/disallowed tools change (for example between skill invocations). For Cursor MCP servers, pre-enable them before session start (`agent mcp list` + `agent mcp enable <server>` per server) so tools are available in headless runs. When using Cursor in Cyrus, only MCP servers configured in `.cursor/mcp.json` should be treated as project MCP config; use Cursor's MCP config-location and file-format docs as the source of truth: https://cursor.com/docs/context/mcp#configuration-locations. For broad file permissions, map wildcard `Read(**)` / `Write(**)` to workspace-scoped patterns (for example `Read(./**)` / `Write(./**)`) to avoid unintentionally permitting absolute system paths. Reference: https://cursor.com/docs/cli/reference/permissions
 
 ### 6) Prompt Streaming Input
 
@@ -205,7 +200,7 @@ Codex emitted tool activity at `item.started`/`item.completed` events, but those
 
 ### Cursor Integration Lesson Learned
 
-Cursor CLI permissions are enforced from config (`~/.cursor/cli-config.json` or `<project>/.cursor/cli.json`) instead of dynamic per-request tool allowlists. For Cursor-like providers, do not rely on dynamic SDK tool constraints alone—add a translation layer (for example `mcp__server__tool` -> `Mcp(server:tool)`, `Bash(...)` -> `Shell(...)`) and sync project permissions before each run and between subroutines. Also pre-enable MCP servers via `agent mcp list` + `agent mcp enable <server>` using both project-listed and runner-configured server names so headless sessions can invoke MCP tools immediately. In Cyrus Cursor runs, treat `.cursor/mcp.json` as the project MCP source and follow Cursor's configuration-location and file-syntax docs (these differ from Claude's MCP interpretation): https://cursor.com/docs/context/mcp#configuration-locations. Use workspace-scoped wildcard file permissions (`Read(./**)`, `Write(./**)`) rather than unscoped `Read(**)` / `Write(**)` in translation defaults. Reference: https://cursor.com/docs/cli/reference/permissions
+Cursor CLI permissions are enforced from config (`~/.cursor/cli-config.json` or `<project>/.cursor/cli.json`) instead of dynamic per-request tool allowlists. For Cursor-like providers, do not rely on dynamic SDK tool constraints alone—add a translation layer (for example `mcp__server__tool` -> `Mcp(server:tool)`, `Bash(...)` -> `Shell(...)`) and sync project permissions before each run and whenever the allowed-tool set changes mid-session. Also pre-enable MCP servers via `agent mcp list` + `agent mcp enable <server>` using both project-listed and runner-configured server names so headless sessions can invoke MCP tools immediately. In Cyrus Cursor runs, treat `.cursor/mcp.json` as the project MCP source and follow Cursor's configuration-location and file-syntax docs (these differ from Claude's MCP interpretation): https://cursor.com/docs/context/mcp#configuration-locations. Use workspace-scoped wildcard file permissions (`Read(./**)`, `Write(./**)`) rather than unscoped `Read(**)` / `Write(**)` in translation defaults. Reference: https://cursor.com/docs/cli/reference/permissions
 
 ## Navigating GitHub Repositories
 
