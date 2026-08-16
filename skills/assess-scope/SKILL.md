@@ -63,16 +63,39 @@ The first is the more common failure, so weight against proposing.
 **Approved** — create the sub-issues, then close the loop:
 
 - Create each one with `mcp__linear__save_issue`: omit `id` to create, set
-  `parentId` to the original issue, `team` to the original's team, and
-  `assignee` to the same assignee as the original so the agent picks them up.
-- Create them in execution order. They enter the queue in the order created.
+  `parentId` to the original issue, and `team` to the original's team.
+- Create them in execution order.
 - Give each a description that stands alone: what to build, the acceptance
   criteria, and any context from the original that the sub-issue needs.
-- Post a final response on the original issue listing the sub-issues that were
-  created, in order, with their identifiers.
+
+- **Hand over the first sub-issue only.** Set `delegate` on it to the original
+  issue's **`delegate`** — not its `assignee`.
+
+  Linear routes agent work through delegation. An issue handed to an agent
+  reads `assignee: null` and `delegate: <agent>`, so copying `assignee` copies
+  nothing: the sub-issues land in the backlog and no work ever starts.
+
+  Leave the rest undelegated. Only one issue is worked at a time, and
+  delegating every piece at once queues sessions in an order the client never
+  chose.
+
+  If the original has no `delegate` — a person was going to do this work —
+  delegate nothing. Just create the issues.
+
+- Post a final response on the original issue. It must say, in this order:
+  **which sub-issue is now underway**; that the others start when the client
+  delegates them; and the recommended order, with identifiers. A client who
+  reads "three sub-issues created" and then finds two untouched in the backlog
+  concludes we dropped them.
+
 - **Leave the original issue open.** Say in the response that the work now lives
   in the sub-issues and the original can be closed. Closing it is the client's
   action — the same as merging. Do not close it yourself.
+
+  This is not politeness. Linear does not notify an app of its own actions: an
+  agent-side close sends only `Issue/update`, never the terminal-state webhook
+  that drives worktree teardown, so every split would leak a worktree while
+  looking clean.
 
 **Adjusted** — take the client's changes, re-propose **once** with the same
 one-question format. Do not negotiate further after that.
