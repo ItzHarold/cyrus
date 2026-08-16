@@ -337,10 +337,19 @@ export class SkillsPluginResolver {
 
 		const skillsList = availableSkills.map((s) => `\`${s}\``).join(", ");
 
+		// Only reference the scope check when it is actually visible to this
+		// session — scope.json sidecars can hide a skill per repository, team,
+		// or label, and pointing at a skill the model cannot invoke is worse
+		// than not mentioning it.
+		const scopeGuidance = availableSkills.includes("assess-scope")
+			? "- **Before writing any code**: Use `assess-scope` to confirm the issue fits a single pull request. It stays silent for normal issues; if the issue is clearly oversized it proposes a split and waits for the client — do not start implementing while that question is open.\n"
+			: "";
+
 		return (
 			"\n\n## Skills\n\n" +
 			`You have skills available via the Skill tool: ${skillsList}\n\n` +
 			"Choose the appropriate skill based on the context:\n\n" +
+			scopeGuidance +
 			"- **Code changes requested** (feature, bug fix, refactor): Use `implementation` to write code, then `verify-and-ship` to run checks and create a PR, then `summarize` to narrate results.\n" +
 			"- **Bug report or error**: Use `debug` to reproduce, root-cause, and fix, then `verify-and-ship`, then `summarize`.\n" +
 			"- **Question or research request**: Use `investigate` to search the codebase and provide an answer, then `summarize`.\n" +
