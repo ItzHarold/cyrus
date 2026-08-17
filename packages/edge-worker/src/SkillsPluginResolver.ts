@@ -349,9 +349,9 @@ export class SkillsPluginResolver {
 		// checks can pause the session, and two pauses in one session is two
 		// round trips for the client.
 		const clarifyGuidance = availableSkills.includes("clarify-requirements")
-			? `- **Then, still before writing code**: Use \`clarify-requirements\` to confirm the issue says what to build, where it lives, and what done looks like. It stays silent when the issue is buildable; if something essential is genuinely missing it asks once, with the defaults it would otherwise assume.${
+			? `- **Then, still before writing code**: Use \`clarify-requirements\` to work out whether the issue can be read more than one way, and to put the reading you are building to on the record. It never asks the client anything and never waits — it stays silent unless a genuinely two-way reading would change what gets built.${
 					availableSkills.includes("assess-scope")
-						? " Skip it entirely if `assess-scope` proposed a split — at most one pause per session."
+						? " Skip it entirely if `assess-scope` proposed a split."
 						: ""
 				}\n`
 			: "";

@@ -110,9 +110,14 @@ covered and what remains.
 
 ## After the assessment
 
-If the issue is not oversized — the common case — say nothing about scope and
-continue straight to the appropriate skill for the work. Do not narrate that you
-checked. Silence is the correct output of a passed check.
+If the issue is not oversized — the common case — say nothing about scope. Do
+not narrate that you checked. Silence is the correct output of a passed check.
+
+Then **hand off to `clarify-requirements`** if it is available, before starting
+any work. Scope and sufficiency are different questions: an issue can be exactly
+one PR's worth of work and still not say enough to build the right thing. Only
+if `clarify-requirements` is not available do you continue straight to the skill
+for the work.
 
 **If you did propose a split, you are done pausing.** Do not also run
 `clarify-requirements` or ask the client anything else in this session. The work

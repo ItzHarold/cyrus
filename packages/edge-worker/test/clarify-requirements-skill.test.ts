@@ -15,86 +15,88 @@ describe("clarify-requirements skill", () => {
 		skill = await readFile(skillPath("clarify-requirements"), "utf8");
 	});
 
-	// The runner denies an AskUserQuestion carrying more than one question
-	// (ClaudeRunner.ts) and Linear renders one body with one option list. A
-	// model told to "ask three questions" gets denied and is instructed to ask
-	// separately — three elicitations, three round trips, which is the failure
-	// this skill exists to prevent. The one-call rule has to be explicit.
-	it("states that only one question is permitted", () => {
-		expect(skill).toMatch(/exactly one question/i);
-		expect(skill).toMatch(/AskUserQuestion/);
-	});
-
-	it("caps the questions in that one call at three", () => {
-		expect(skill).toMatch(/at most.{0,10}three/i);
-	});
-
-	it("requires a proposed default beside each question", () => {
-		expect(skill).toMatch(/the answer you\s+will assume/i);
-	});
-
-	it("makes 'Use these defaults' the primary option", () => {
-		expect(skill).toMatch(/\*\*"Use these defaults"\*\* — the primary/);
-	});
-
-	// A client can reply with free text without clicking anything, so the
-	// second option must read as an affordance rather than a required step.
-	it("does not turn the inline-answer option into an extra round trip", () => {
-		expect(skill).toMatch(/affordance, not a step/i);
-		expect(skill).toMatch(/Do not\s+turn it into an extra round trip/i);
-	});
-
-	it("bars a second round unless the answer genuinely contradicts", () => {
-		expect(skill).toMatch(/\*\*Do not ask again\.\*\*/);
-	});
-
-	it("proceeds and records the interpretation on 'use your judgment'", () => {
-		expect(skill).toMatch(/judgment/i);
-		expect(skill).toMatch(/`thought` activity/);
-	});
-
-	it("stays silent when the issue is buildable", () => {
-		expect(skill).toMatch(/Silence is the correct output of a passed\s+check/);
-	});
-
-	describe("calibration — over-asking is the failure that matters", () => {
-		it("sets the bar at producing the wrong artefact", () => {
-			expect(skill).toMatch(/wrong artefact/i);
+	// The asking version was measured against 18 real client issues on
+	// reconstructed pre-merge trees, under two different framings, and never
+	// fired once — including on issues whose original sessions cost rework.
+	// Shipping a never-fired question path would put an unpredictable
+	// interruption into client work with no evidence it triggers correctly, so
+	// the ask is disabled until invocation is reliable and calibration is
+	// measured where vague issues actually occur.
+	describe("does not ask", () => {
+		it("forbids the question tools outright", () => {
+			expect(skill).toMatch(/Do not call AskUserQuestion/);
+			expect(skill).toMatch(/Do not emit an elicitation/);
+			expect(skill).toMatch(/Do not wait/);
 		});
 
-		it("refuses to ask what the repo already answers", () => {
-			expect(skill).toMatch(/The answer is in the repo/i);
+		it("records the reading instead of asking", () => {
+			expect(skill).toMatch(/post \*\*one short\s+`thought` activity\*\*/);
+			expect(skill).toMatch(/Do not wait for a reply/);
 		});
 
-		it("prefers a stated assumption over a question", () => {
-			expect(skill).toMatch(/A stated assumption is cheaper/i);
-		});
-
-		// Measured on ten real client issues: the noisiest thread in the sample
-		// was eight rounds of live third-party API debugging, none of it
-		// knowable in advance. Length and follow-up volume are not ambiguity.
-		it("excludes runtime behaviour that no question could answer", () => {
-			expect(skill).toMatch(/runtime behaviour you cannot know until you run/i);
-		});
-
-		it("tells the model that description length is not the signal", () => {
-			expect(skill).toMatch(/\*\*Length is not the signal\.\*\*/);
-		});
-
-		it("breaks ties toward building", () => {
+		it("states the two preconditions for enabling the ask path", () => {
+			expect(skill).toMatch(/Invocation is reliable/);
 			expect(skill).toMatch(
-				/When you are unsure whether to ask, \*\*don't\*\*/,
+				/Calibration is measured where the phenomenon lives/,
 			);
 		});
 	});
 
-	// Both pre-flight checks can park the session. Two pauses in one session is
-	// two round trips, so the ordering is stated in both skills rather than
-	// left to be inferred from the guidance block alone.
-	describe("one pause per session", () => {
-		it("clarify-requirements defers to a split proposal", () => {
-			expect(skill).toMatch(/At most one pause per session/i);
-			expect(skill).toMatch(/stop — do not also ask/i);
+	describe("how it reads an issue", () => {
+		it("enumerates alternative readings rather than hunting for gaps", () => {
+			expect(skill).toMatch(
+				/what it could mean other\s+than what you first assumed/i,
+			);
+			expect(skill).toMatch(/ones with two/i);
+		});
+
+		// The failures this targets live in filled-in fields, not empty ones.
+		it("covers what the issue says, not only what it omits", () => {
+			expect(skill).toMatch(
+				/what the issue \*\*says\*\*, not only to what it omits/i,
+			);
+			expect(skill).toMatch(
+				/A filled-in field is a place\s+where guessing happens/i,
+			);
+		});
+
+		it("treats neither length nor specificity as the signal", () => {
+			expect(skill).toMatch(/Length and specificity are not the signal/i);
+			expect(skill).toMatch(/its very specificity is what stops you looking/i);
+		});
+
+		it("treats the repo as an answer", () => {
+			expect(skill).toMatch(/\*\*The repo is an answer\.\*\*/);
+		});
+
+		it("keeps the recorded note to forks that change the artefact", () => {
+			expect(skill).toMatch(/A list of every assumption\s+you made is noise/i);
+		});
+
+		it("stays silent when nothing is genuinely two-way", () => {
+			expect(skill).toMatch(
+				/Silence is the correct output of\s+a passed\s+check/,
+			);
+		});
+	});
+
+	// Both pre-flight checks run before implementation, and assess-scope is the
+	// only one that can still pause a session.
+	describe("ordering with assess-scope", () => {
+		it("is skipped when a split was proposed", () => {
+			expect(skill).toMatch(/after assess-scope/i);
+		});
+
+		// Regression: assess-scope's pass path said "continue straight to the
+		// appropriate skill for the work", which routes to `implementation` and
+		// skipped this skill entirely — observed live on a 398-message session
+		// where clarify-requirements was never invoked.
+		it("assess-scope hands off to clarify-requirements when it passes", async () => {
+			const scope = await readFile(skillPath("assess-scope"), "utf8");
+			expect(scope).toMatch(
+				/hand off to `clarify-requirements`\*\* if it is available/i,
+			);
+			expect(scope).toMatch(/before starting\s+any work/i);
 		});
 
 		it("assess-scope stops pausing once it has proposed a split", async () => {

@@ -1,110 +1,93 @@
 ---
 name: clarify-requirements
-description: Check whether an issue contains enough to build the right thing, and ask once — with proposed defaults — if it genuinely does not. Use after assess-scope, before starting work on an issue that asks for code changes.
+description: Work out how this issue could be read, pick the reading you will build to, and put it on the record before starting. Does not ask the client anything. Use after assess-scope, before starting work on an issue that asks for code changes.
 ---
 
 # Clarify Requirements
 
-An issue needs three things to be buildable: **what** to build, **where** it
-lives, and what **done** looks like. When one is genuinely missing, asking costs
-a round trip. Guessing wrong costs the whole build, plus the client's time
-reading a PR that does the wrong thing.
+An issue can be complete and still be read two ways. When that happens you build
+one of them, and the client discovers which from a finished pull request.
 
-Asking is the exception. Most issues are buildable.
+This check makes the reading explicit **before** the work, so a wrong reading is
+visible in the first minute rather than at review.
 
-## Run this after assess-scope, and only one of you may stop
+## This skill does not ask the client anything
 
-`assess-scope` runs first. If it proposed a split, **stop — do not also ask
-clarifying questions.** The work now belongs to the sub-issues and their
-requirements are their own problem. Two questions in one session is two round
-trips, and it reads as an agent that cannot get started.
+**Do not call AskUserQuestion. Do not emit an elicitation. Do not wait.** State
+your reading and get on with it.
 
-**At most one pause per session.** If you have already asked something, you do
-not get to ask again.
+That is a deliberate constraint, not an oversight — see *Why this does not ask*
+at the end. Everything below is about deciding what to record, not about
+whether to interrupt.
 
-## The bar
+## Work out the readings
 
-Ask only when a wrong guess produces **the wrong artefact** — something that
-must be thrown away or rebuilt, not something that needs a tweak in review.
+Go through the issue and, for each instruction, ask what it could mean other
+than what you first assumed. Most instructions have one plausible reading. You
+are looking for the ones with two.
 
-**Ask when:**
+This applies to what the issue **says**, not only to what it omits. A specified
+detail can still be ambiguous — a value whose format is assumed, a table cell
+whose notation is not spelled out, an instruction that reads as an example to
+some people and as an exhaustive list to others. A filled-in field is a place
+where guessing happens, and "the issue told me" is not the same as "the issue
+told me unambiguously".
 
-- The issue names an outcome but not which of several existing surfaces it
-  applies to, and the choice changes what gets built.
-- Something is required-or-optional in a way that changes the user's flow, and
-  the issue does not say which.
-- Two statements in the issue contradict each other.
-- A term is used that means more than one thing in this codebase, and the two
-  readings lead to different work.
-- "Done" is unstated *and* unguessable — not merely unstated.
+Forks worth noticing:
 
-**Do not ask when:**
+- One instruction, two readings, and the two produce different artefacts.
+- A notation, format or convention you are inferring rather than reading.
+- Something required-or-optional in a way that changes the user's flow.
+- An instruction that could be the whole list or one example of a list.
+- Two statements that contradict each other.
+- A term that means more than one thing in this codebase.
 
-- The answer is in the repo. Read it. An existing pattern, a neighbouring
-  component, or a convention in the codebase is an answer, not an ambiguity.
-- A sensible default exists. Choose it, build it, and say plainly in your
-  final response which way you went and why. A stated assumption is cheaper
-  for the client than a question.
-- The detail is cosmetic, or is the kind of thing review catches — copy,
-  spacing, ordering, naming.
-- The uncertainty is about **runtime behaviour you cannot know until you run
-  it** — a third-party API's real responses, credential shapes, live data. No
-  question answers that. Build, run, and report what you find.
-- You are merely uncomfortable with how large or unfamiliar the work is. That
-  is not ambiguity.
+**Length and specificity are not the signal.** A long, detailed,
+confident-sounding issue can turn on one instruction that reads two ways, and
+its very specificity is what stops you looking.
 
-**Length is not the signal.** A long description can be ambiguous on the one
-point that matters, and a short one can be perfectly clear. Judge whether you
-could build the wrong thing, not how much text you were given.
+**The repo is an answer.** An existing pattern, a neighbouring component, or a
+convention in the codebase resolves a fork — read it rather than treating the
+fork as open.
 
-When you are unsure whether to ask, **don't**. Build, state your assumption,
-and let review correct it.
+## Record the reading, then build
 
-## How to ask
+If you found nothing genuinely two-way — the common case — say nothing and
+continue to the appropriate skill for the work. Silence is the correct output of
+a passed check.
 
-You get **exactly one question**. This is a hard limit — the runner rejects a
-call carrying more than one, and Linear renders one message with one set of
-options. So the whole thing goes in a single **AskUserQuestion** call.
+If you did find a fork that would change what gets built, post **one short
+`thought` activity** before starting, containing:
 
-Put **at most three** questions in the body, and next to each, **the answer you
-will assume if they say nothing**. This is the point of the pattern: the client
-can approve everything with one click, and only has to type about the parts they
-disagree with.
+- the fork, in one line;
+- the reading you are building to;
+- why that reading (repo convention, the more common case, the smaller
+  reversible option).
 
-Structure the body like this:
+Then build it. Do not wait for a reply. If the client disagrees they will say
+so, and it is on the record from the first minute rather than discovered at
+review — which is the whole point.
 
-- One sentence on what you are about to build.
-- The questions, numbered, each with the default you would take. Be concrete —
-  name files, routes, components, states. Never "can you provide more details".
-- Nothing else. The client is making a decision, not reading a document.
+Keep it to the forks that would change the artefact. A list of every assumption
+you made is noise.
 
-Offer these options:
+## Why this does not ask
 
-- **"Use these defaults"** — the primary. Say plainly that this starts the work
-  immediately.
-- **"I'll answer inline"** — an affordance, not a step. Linear accepts a free-text
-  reply whether or not this is clicked, so make the label read as "I'm going to
-  type instead", never as a button they must press before answering. Do not
-  turn it into an extra round trip.
+The asking version of this check was built and measured against 18 real client
+issues on reconstructed pre-merge trees. It never once asked — under two
+different framings — including on issues whose original sessions demonstrably
+cost rework. Shipping a question path that has never fired would add an
+unpredictable interruption to client work with no evidence it fires when it
+should.
 
-Then **wait**. Do not start building while the question is open.
+Two things must be true before the ask path is enabled:
 
-## After they answer
+1. **Invocation is reliable.** This skill is currently skipped in roughly a
+   third of sessions despite explicit routing, so its decisions cannot be
+   measured.
+2. **Calibration is measured where the phenomenon lives** — a new client's first
+   week. Issues written by people who know the codebase sit at or below the
+   floor of detectable ambiguity, so they cannot validate it.
 
-**"Use these defaults", or no objection** — build exactly what you proposed.
-
-**They answered some or all of it** — take their answers, keep your stated
-defaults for anything they did not mention, and build. **Do not ask again.**
-Only a genuine contradiction — where their answer makes the work impossible or
-conflicts with something else in the issue — justifies a second question, and
-even then prefer to state the conflict and your resolution in your response.
-
-**"Just use your judgment" or similar** — proceed immediately. State the
-interpretation you chose in a `thought` activity so the choice is on the record,
-then build.
-
-## When the issue is fine
-
-Say nothing about clarity and continue to the appropriate skill for the work.
-Do not narrate that you checked. Silence is the correct output of a passed
-check.
+Recording the reading is the part that pays for itself now: it costs nothing,
+never interrupts, and puts the interpretation somewhere the client can see it.
