@@ -345,11 +345,23 @@ export class SkillsPluginResolver {
 			? "- **Before writing any code**: Use `assess-scope` to confirm the issue fits a single pull request. It stays silent for normal issues; if the issue is clearly oversized it proposes a split and waits for the client — do not start implementing while that question is open.\n"
 			: "";
 
+		// Ordering matters and is stated rather than implied: both pre-flight
+		// checks can pause the session, and two pauses in one session is two
+		// round trips for the client.
+		const clarifyGuidance = availableSkills.includes("clarify-requirements")
+			? `- **Then, still before writing code**: Use \`clarify-requirements\` to work out whether the issue can be read more than one way, and to put the reading you are building to on the record. It never asks the client anything and never waits — it stays silent unless a genuinely two-way reading would change what gets built.${
+					availableSkills.includes("assess-scope")
+						? " Skip it entirely if `assess-scope` proposed a split."
+						: ""
+				}\n`
+			: "";
+
 		return (
 			"\n\n## Skills\n\n" +
 			`You have skills available via the Skill tool: ${skillsList}\n\n` +
 			"Choose the appropriate skill based on the context:\n\n" +
 			scopeGuidance +
+			clarifyGuidance +
 			"- **Code changes requested** (feature, bug fix, refactor): Use `implementation` to write code, then `verify-and-ship` to run checks and create a PR, then `summarize` to narrate results.\n" +
 			"- **Bug report or error**: Use `debug` to reproduce, root-cause, and fix, then `verify-and-ship`, then `summarize`.\n" +
 			"- **Question or research request**: Use `investigate` to search the codebase and provide an answer, then `summarize`.\n" +
