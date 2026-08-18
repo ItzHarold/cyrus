@@ -74,8 +74,12 @@ export class SelfAuthCommand extends BaseCommand {
 				);
 			}
 
-			// Start temporary server to receive OAuth callback
-			const authCode = await this.waitForCallback(clientId);
+			// Prefer the running service's relay so authorising a workspace does
+			// not require an outage (PON-126). Falls back to binding the port
+			// ourselves when no service is up — which is the fresh-VM case.
+			const authCode =
+				(await this.viaRunningService(clientId)) ??
+				(await this.waitForCallback(clientId));
 
 			// Exchange code for tokens
 			console.log("Exchanging code for tokens...");
@@ -153,6 +157,68 @@ export class SelfAuthCommand extends BaseCommand {
 			// One of the key guarantees of finally — it runs regardless of how the try block exits (return, throw, or normal completion).
 			await this.cleanup();
 		}
+	}
+
+	/**
+	 * Authorise through the already-running service.
+	 *
+	 * The old flow bound CYRUS_SERVER_PORT to catch the redirect — the very
+	 * port the service listens on — so onboarding a client meant stopping the
+	 * service. With several lanes on one box, authorising one client would
+	 * pause every other client's work.
+	 *
+	 * Here the running service catches the redirect and holds the code for us
+	 * to collect. The token exchange and the config write stay in this command:
+	 * the service never sees the client secret and never persists a credential.
+	 *
+	 * Returns null when there is no service to relay through, so the caller can
+	 * fall back to the standalone flow.
+	 */
+	private async viaRunningService(clientId: string): Promise<string | null> {
+		const baseUrl = process.env.CYRUS_BASE_URL;
+		if (!baseUrl) return null;
+		const local = `http://127.0.0.1:${this.callbackPort}`;
+
+		let flow: { flowId: string; state: string };
+		try {
+			const res = await fetch(`${local}/admin/oauth/begin`, { method: "POST" });
+			if (!res.ok) return null;
+			flow = (await res.json()) as { flowId: string; state: string };
+		} catch {
+			return null; // nothing listening — fresh box, use the standalone flow
+		}
+
+		const redirectUri = `${baseUrl}/callback`;
+		const oauthUrl =
+			`https://linear.app/oauth/authorize?client_id=${clientId}` +
+			`&redirect_uri=${encodeURIComponent(redirectUri)}` +
+			`&response_type=code&scope=write,app:assignable,app:mentionable&actor=app` +
+			`&state=${encodeURIComponent(flow.state)}`;
+
+		console.log("Service is running — authorising without stopping it.");
+		console.log();
+		console.log("Visit:");
+		console.log(oauthUrl);
+		console.log();
+		open(oauthUrl).catch(() => {
+			console.log("Could not open browser automatically.");
+		});
+
+		const deadline = Date.now() + 5 * 60 * 1000;
+		while (Date.now() < deadline) {
+			await new Promise((r) => setTimeout(r, 2000));
+			try {
+				const res = await fetch(
+					`${local}/admin/oauth/result?flowId=${encodeURIComponent(flow.flowId)}`,
+				);
+				if (!res.ok) continue;
+				const body = (await res.json()) as { code?: string; pending?: boolean };
+				if (body.code) return body.code;
+			} catch {
+				// Transient — the service may be mid-restart. Keep waiting.
+			}
+		}
+		throw new Error("Timed out waiting for authorization");
 	}
 
 	private async waitForCallback(clientId: string): Promise<string> {
