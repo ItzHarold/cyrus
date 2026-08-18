@@ -43,6 +43,8 @@ import type {
 	AgentEventTransportConfig,
 	AgentSessionCreateOnCommentInput,
 	AgentSessionCreateOnIssueInput,
+	AgentSessionPlanStep,
+	AgentSessionUpdateFields,
 	Comment,
 	CommentCreateInput,
 	CommentWithAttachments,
@@ -841,6 +843,77 @@ export class LinearIssueTrackerService implements IIssueTrackerService {
 		input: AgentActivityCreateInput,
 	): Promise<AgentActivityPayload> {
 		return await this.linearClient.createAgentActivity(input);
+	}
+
+	/**
+	 * Update an agent session's plan and/or external links.
+	 *
+	 * Issued as raw GraphQL rather than through the SDK: `@linear/sdk@60` has no
+	 * `agentSessionUpdate` — its only neighbour is `agentSessionUpdateExternalUrl`,
+	 * which sets a single agent-hosted page and is a different feature. The API
+	 * itself supports plans and labelled link buttons, so the SDK is simply
+	 * behind. This method is the seam: when the SDK catches up, only its body
+	 * changes.
+	 *
+	 * Two contracts worth keeping in view:
+	 *
+	 * - `plan` REPLACES the whole checklist. The caller sends every step, every
+	 *   time; there is no merge.
+	 * - `plan` is typed `JSONObject` server-side, so a malformed step is accepted
+	 *   and then silently ignored. Steps are validated here rather than trusting
+	 *   the API to reject them.
+	 *
+	 * Never throws. These are cosmetic updates sitting on the critical path of
+	 * real client work, and a checklist that fails to render must not take down
+	 * a session that is otherwise delivering.
+	 */
+	async updateAgentSession(
+		sessionId: string,
+		input: AgentSessionUpdateFields,
+	): Promise<boolean> {
+		const variables: Record<string, unknown> = {};
+
+		if (input.plan) {
+			const valid = input.plan.every(
+				(step: AgentSessionPlanStep) =>
+					typeof step?.label === "string" &&
+					step.label.length > 0 &&
+					["pending", "inProgress", "completed"].includes(step?.status),
+			);
+			if (!valid) {
+				this.logger.error(
+					`Refusing to send malformed plan for session ${sessionId}`,
+				);
+				return false;
+			}
+			variables.plan = { steps: input.plan };
+		}
+
+		if (input.addedExternalUrls?.length) {
+			variables.addedExternalUrls = input.addedExternalUrls;
+		}
+
+		if (Object.keys(variables).length === 0) return false;
+
+		try {
+			const res = await this.linearClient.client.rawRequest<
+				{ agentSessionUpdate?: { success?: boolean } },
+				Record<string, unknown>
+			>(
+				`mutation AgentSessionUpdate($id: String!, $input: AgentSessionUpdateInput!) {
+					agentSessionUpdate(id: $id, input: $input) { success }
+				}`,
+				{ id: sessionId, input: variables },
+			);
+			return res.data?.agentSessionUpdate?.success === true;
+		} catch (error) {
+			this.logger.error(
+				`Failed to update agent session ${sessionId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+			return false;
+		}
 	}
 
 	// ========================================================================

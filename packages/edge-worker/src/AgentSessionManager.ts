@@ -14,6 +14,7 @@ import {
 	type AgentPendingWork,
 	AgentSessionStatus,
 	AgentSessionType,
+	type AgentSessionUpdateFields,
 	type CyrusAgentSession,
 	type CyrusAgentSessionEntry,
 	createLogger,
@@ -33,6 +34,7 @@ import {
 	formatScheduleWakeupResponse,
 	tryParseScheduleWakeupInput,
 } from "./PendingWorkFormatter.js";
+import { SessionLinkTracker, SessionPlanTracker } from "./SessionSurface.js";
 import type {
 	ActivityPostOptions,
 	ActivitySignal,
@@ -82,6 +84,17 @@ export class AgentSessionManager extends EventEmitter {
 		new Map(); // One-behind buffer: holds last assistant entry until next message or result
 	private taskSubjectsByToolUseId: Map<string, string> = new Map(); // Cache TaskCreate subjects by toolUseId until result arrives with task ID
 	private taskSubjectsById: Map<string, string> = new Map(); // Cache task subjects by task ID (e.g., "1" → "Fix login bug")
+	// PON-116 session surface. Plans and links are tracked independently on
+	// purpose: measured demand says the links matter more (three of ten real
+	// client issues had the client asking for a preview or merge button;
+	// nobody asked for a plan), so a plan that cannot be published must never
+	// take the links down with it.
+	private readonly updateSessionSurface?: (
+		sessionId: string,
+		fields: AgentSessionUpdateFields,
+	) => Promise<boolean>;
+	private planTrackers: Map<string, SessionPlanTracker> = new Map();
+	private linkTrackers: Map<string, SessionLinkTracker> = new Map();
 	private activeStatusActivitiesBySession: Map<string, string> = new Map(); // Maps session ID to active compacting status activity ID
 	private stopRequestedSessions: Set<string> = new Set(); // Sessions explicitly stopped by user signal
 	// Per-session serialization queue for handleClaudeMessage. The EdgeWorker's
@@ -116,8 +129,13 @@ export class AgentSessionManager extends EventEmitter {
 		logger?: ILogger,
 		onSessionEnded?: (sessionId: string) => void,
 		getWorkspaceIdForSession?: (sessionId: string) => string | undefined,
+		updateSessionSurface?: (
+			sessionId: string,
+			fields: AgentSessionUpdateFields,
+		) => Promise<boolean>,
 	) {
 		super();
+		this.updateSessionSurface = updateSessionSurface;
 		this.logger = logger ?? createLogger({ component: "AgentSessionManager" });
 		this.getParentSessionId = getParentSessionId;
 		this.resumeParentSession = resumeParentSession;
@@ -131,6 +149,64 @@ export class AgentSessionManager extends EventEmitter {
 	 */
 	setActivitySink(sessionId: string, sink: IActivitySink): void {
 		this.activitySinks.set(sessionId, sink);
+		if (!this.planTrackers.has(sessionId)) {
+			this.planTrackers.set(sessionId, new SessionPlanTracker());
+			// The identifier is what attributes a preview URL to this session.
+			// Without it the link tracker emits no preview at all, which is the
+			// intended conservative behaviour rather than a degradation.
+			this.linkTrackers.set(
+				sessionId,
+				new SessionLinkTracker(
+					this.sessions.get(sessionId)?.issueContext?.issueIdentifier,
+				),
+			);
+		}
+	}
+
+	/**
+	 * Publish the session plan, if there is an honest one to publish.
+	 *
+	 * Silent by design when there is nothing to show: `snapshot()` returns null
+	 * rather than an empty list, so a session with no task list simply has no
+	 * checklist. A missing checklist reads as "this agent doesn't show plans";
+	 * an empty or half-filled one reads as broken.
+	 *
+	 * A failed publish disables the plan for this session — never the links.
+	 */
+	private async publishPlan(sessionId: string): Promise<void> {
+		if (!this.updateSessionSurface) return;
+		const tracker = this.planTrackers.get(sessionId);
+		const plan = tracker?.snapshot();
+		if (!tracker || !plan) return;
+
+		try {
+			const ok = await this.updateSessionSurface(sessionId, { plan });
+			if (!ok) tracker.disable();
+		} catch {
+			tracker.disable();
+		}
+	}
+
+	/**
+	 * Surface any PR or preview link this text reveals.
+	 *
+	 * Independent of the plan on purpose: measured demand says the links matter
+	 * more than the checklist, so a plan failure must never suppress them.
+	 */
+	private async publishLinks(
+		sessionId: string,
+		text: string | undefined,
+	): Promise<void> {
+		if (!this.updateSessionSurface || !text) return;
+		const tracker = this.linkTrackers.get(sessionId);
+		const found = tracker?.scan(text);
+		if (!found?.length) return;
+
+		try {
+			await this.updateSessionSurface(sessionId, { addedExternalUrls: found });
+		} catch {
+			// Cosmetic. A link that fails to attach must not disturb the session.
+		}
 	}
 
 	/**
@@ -596,6 +672,9 @@ export class AgentSessionManager extends EventEmitter {
 					// assistant prose, so addResultEntry never posts raw tool JSON as the
 					// final "response" when a turn ends on a tool call (CYPACK-1177).
 					if (assistantEntry.content) {
+						// PON-116: PR and preview URLs only ever appear in the
+						// agent's own output, so this is where they surface.
+						void this.publishLinks(sessionId, assistantEntry.content);
 						this.lastAssistantBodyBySession.set(
 							sessionId,
 							assistantEntry.content,
@@ -1026,6 +1105,11 @@ export class AgentSessionManager extends EventEmitter {
 									const taskIdMatch = toolResult.content?.match(/Task #(\d+)/);
 									if (taskIdMatch?.[1]) {
 										this.taskSubjectsById.set(taskIdMatch[1], cachedSubject);
+										// PON-116: the plan mirrors the real task list.
+										this.planTrackers
+											.get(sessionId)
+											?.addTask(taskIdMatch[1], cachedSubject);
+										void this.publishPlan(sessionId);
 									}
 									this.taskSubjectsByToolUseId.delete(
 										entry.metadata.toolUseId!,
@@ -1034,6 +1118,15 @@ export class AgentSessionManager extends EventEmitter {
 							}
 
 							// Handle TaskUpdate/TaskGet results: post enriched thought with subject
+							if (baseToolName === "TaskUpdate") {
+								// PON-116: keep the plan in step with the task list.
+								const taskId = String(toolInput?.taskId ?? "");
+								const status = String(toolInput?.status ?? "");
+								if (taskId && status) {
+									this.planTrackers.get(sessionId)?.updateTask(taskId, status);
+									void this.publishPlan(sessionId);
+								}
+							}
 							if (baseToolName === "TaskUpdate" || baseToolName === "TaskGet") {
 								const formatter = session.agentRunner?.getFormatter();
 								if (!formatter) {

@@ -130,6 +130,30 @@ import type {
  * console.log(`Issue ${issue.identifier} is ${state?.name}`);
  * ```
  */
+
+/**
+ * A single step in a session-level plan checklist.
+ *
+ * The platform types `plan` as an untyped JSON object, so nothing validates
+ * this shape at the API boundary — a malformed step fails silently rather than
+ * erroring. Implementations validate before sending.
+ */
+export interface AgentSessionPlanStep {
+	label: string;
+	status: "pending" | "inProgress" | "completed";
+}
+
+/**
+ * Fields updatable on an agent session.
+ *
+ * `plan` REPLACES the entire checklist — the platform does not merge, so
+ * callers always send the full list of steps, never a delta.
+ */
+export interface AgentSessionUpdateFields {
+	plan?: AgentSessionPlanStep[];
+	addedExternalUrls?: Array<{ url: string; label: string }>;
+}
+
 export interface IIssueTrackerService {
 	// ========================================================================
 	// ISSUE OPERATIONS
@@ -706,6 +730,24 @@ export interface IIssueTrackerService {
 	createAgentActivity(
 		input: AgentActivityCreateInput,
 	): Promise<AgentActivityPayload>;
+
+	/**
+	 * Update an agent session's plan and/or external links.
+	 *
+	 * Optional: platforms without session-level plans or link buttons omit it,
+	 * and callers must treat absence as "not supported" rather than an error.
+	 *
+	 * Cosmetic by nature — a failure here must never interrupt work that is
+	 * otherwise succeeding, so implementations resolve rather than throw.
+	 *
+	 * @param sessionId - The agent session to update
+	 * @param input - Plan steps and/or external URLs to add
+	 * @returns Promise resolving to true when the update was applied
+	 */
+	updateAgentSession?(
+		sessionId: string,
+		input: AgentSessionUpdateFields,
+	): Promise<boolean>;
 
 	// ========================================================================
 	// FILE OPERATIONS
