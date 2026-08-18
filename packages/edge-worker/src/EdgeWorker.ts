@@ -984,7 +984,11 @@ export class EdgeWorker extends EventEmitter {
 	 */
 	private registerOAuthRelayEndpoints(): void {
 		const fastify = this.sharedApplicationServer.getFastifyInstance();
-		const TTL_MS = 10 * 60 * 1000;
+		// A consent screen is a human step: log in, pick the workspace, read the
+		// scopes, approve. Measured at 7m03s the first time it was run for real.
+		// Must stay >= the CLI's polling deadline, or the service discards a code
+		// the CLI is still waiting for.
+		const TTL_MS = 15 * 60 * 1000;
 
 		// Same guard as /admin/lanes: loopback AND no proxy-forwarding headers.
 		// Caddy proxies public traffic from loopback, so an IP check alone would

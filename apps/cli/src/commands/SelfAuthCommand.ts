@@ -204,9 +204,22 @@ export class SelfAuthCommand extends BaseCommand {
 			console.log("Could not open browser automatically.");
 		});
 
-		const deadline = Date.now() + 5 * 60 * 1000;
+		// Matches the service's flow TTL. The first real run of this flow took
+		// 7m03s to approve and the deadline was five minutes, so the CLI gave up
+		// while the service was still holding a perfectly good code. Anything
+		// shorter than the TTL strands approvals that arrive in between.
+		const WINDOW_MS = 15 * 60 * 1000;
+		const started = Date.now();
+		const deadline = started + WINDOW_MS;
+		let nextHeartbeat = started + 60_000;
+
 		while (Date.now() < deadline) {
 			await new Promise((r) => setTimeout(r, 2000));
+			if (Date.now() >= nextHeartbeat) {
+				const minutesLeft = Math.ceil((deadline - Date.now()) / 60_000);
+				console.log(`Still waiting for approval... (${minutesLeft} min left)`);
+				nextHeartbeat += 60_000;
+			}
 			try {
 				const res = await fetch(
 					`${local}/admin/oauth/result?flowId=${encodeURIComponent(flow.flowId)}`,
@@ -218,7 +231,15 @@ export class SelfAuthCommand extends BaseCommand {
 				// Transient — the service may be mid-restart. Keep waiting.
 			}
 		}
-		throw new Error("Timed out waiting for authorization");
+		// An approval landing just after the deadline used to be unrecoverable:
+		// re-running mints a fresh state, so the held code could never be claimed
+		// and the whole authorisation had to be redone. Name the flow so a late
+		// approval can still be collected.
+		throw new Error(
+			`Timed out waiting for authorization after ${WINDOW_MS / 60_000} minutes.\n` +
+				`   If you approved just now, the service may still hold the code briefly:\n` +
+				`   curl -s "${local}/admin/oauth/result?flowId=${flow.flowId}"`,
+		);
 	}
 
 	private async waitForCallback(clientId: string): Promise<string> {
