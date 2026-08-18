@@ -516,6 +516,18 @@ export class EdgeWorker extends EventEmitter {
 			(sessionId: string) => this.handleLaneSessionEnded(sessionId, "result"),
 			// PON-115: tag every session log line with its owning tenant.
 			(sessionId: string) => this.resolveWorkspaceIdForSession(sessionId),
+			// PON-116: publish the session plan and PR/preview links. Resolved
+			// here because EdgeWorker owns the session -> issue-tracker mapping.
+			// Platforms without session plans simply omit updateAgentSession, and
+			// a false return is treated as "not published" rather than an error:
+			// these are cosmetic surfaces and must never disturb the session.
+			async (sessionId, fields) => {
+				const workspaceId = this.resolveWorkspaceIdForSession(sessionId);
+				if (!workspaceId) return false;
+				const tracker = this.issueTrackers.get(workspaceId);
+				if (!tracker?.updateAgentSession) return false;
+				return await tracker.updateAgentSession(sessionId, fields);
+			},
 		);
 
 		// Initialize repositories with path resolution
