@@ -110,8 +110,14 @@ covered and what remains.
 
 ## After the assessment
 
-If the issue is not oversized — the common case — say nothing about scope. Do
-not narrate that you checked. Silence is the correct output of a passed check.
+If the issue is not oversized — the common case — you have already stated the
+one-line scope result the system prompt asks for. That line is the whole output:
+`Scope: single PR — <what the work is>.` Do not expand it into a report, do not
+justify it, do not list what you considered.
+
+One line, not silence. A scope read that leaves no trace cannot be told apart
+from one that never happened — which is exactly how this check went unmeasured
+for two cycles.
 
 Then **hand off to `clarify-requirements`** if it is available, before starting
 any work. Scope and sufficiency are different questions: an issue can be exactly
