@@ -30,7 +30,7 @@
 # reports the variable name and the length of its value.
 #
 # Usage:
-#   ./provision-production.sh --host cyrus.pontedigital.co --ssh-prefix 161.51.0.0/16
+#   ./provision-production.sh --host agent.pontedigital.co --ssh-prefix 161.51.0.0/16
 #   ./provision-production.sh --host ... --ssh-prefix ... --dry-run
 #
 # Exit codes: 0 ready (or already provisioned), 1 usage/precondition, 2 step failed.
@@ -105,10 +105,10 @@ usage() {
 provision-production.sh — Cyrus production box, from fresh Ubuntu to running service
 
 Required:
-  --host <fqdn>          Public hostname, e.g. cyrus.pontedigital.co
-                         Must already resolve to this box (see runbook step 3).
+  --host <fqdn>          Public hostname, e.g. agent.pontedigital.co
+                         Must already resolve to this box (see runbook step 4).
   --ssh-prefix <cidr>    Network prefix to exempt from fail2ban, e.g. 161.51.0.0/16
-                         Use a PREFIX, never a single /32 — see runbook step 2.
+                         Use a PREFIX, never a single /32 — see runbook step 3.
 
 Optional:
   --repo <url>           Default: https://github.com/ItzHarold/cyrus.git
@@ -163,7 +163,7 @@ ok "$( (. /etc/os-release && echo "$PRETTY_NAME") 2>/dev/null || echo "unknown U
 # a wrong hostname costs seconds, not a full run.
 resolved="$(getent ahostsv4 "$HOST" 2>/dev/null | awk 'NR==1{print $1}' || true)"
 if [ -z "$resolved" ]; then
-	die "$HOST does not resolve. Point DNS at this box first (runbook step 3)."
+	die "$HOST does not resolve. Point DNS at this box first (runbook step 4)."
 fi
 ok "$HOST resolves to $resolved"
 
@@ -178,7 +178,7 @@ fi
 step "Base packages"
 
 missing=""
-for p in curl ca-certificates gnupg git fail2ban debian-keyring debian-archive-keyring apt-transport-https; do
+for p in curl ca-certificates gnupg git fail2ban socat bubblewrap; do
 	dpkg -s "$p" >/dev/null 2>&1 || missing="$missing $p"
 done
 if [ -z "$missing" ]; then
@@ -239,9 +239,18 @@ if systemctl is-active --quiet fail2ban && \
    grep -qF "$SSH_PREFIX" /etc/fail2ban/jail.local; then
 	skip "sshd jail active with the right prefix"
 else
+	# `enable --now` starts it; a restart chained straight after races the
+	# socket, and a status query in the same breath reports "Failed to access
+	# socket path" on a perfectly healthy system. Start once, then wait for it
+	# to be ready before anything queries it.
 	doing "enabling fail2ban"
 	run systemctl enable --now fail2ban
-	run systemctl restart fail2ban
+	if [ "$DRY_RUN" -eq 0 ]; then
+		for _ in 1 2 3 4 5 6 7 8 9 10; do
+			fail2ban-client ping >/dev/null 2>&1 && break
+			sleep 1
+		done
+	fi
 	ok "sshd jail active"
 fi
 
@@ -304,10 +313,10 @@ step "Caddy and TLS"
 if command -v caddy >/dev/null 2>&1; then
 	skip "caddy present"
 else
-	doing "adding caddy repository"
-	run sh -c "curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg"
-	run sh -c "curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' > /etc/apt/sources.list.d/caddy-stable.list"
-	run apt-get update -qq
+	# Ubuntu archive package, not Caddy's Cloudsmith repo. The production box
+	# runs 2.6.2-14 from resolute/universe with no third-party list, and on
+	# 26.04 Cloudsmith may have no matching build at all.
+	doing "installing caddy from the Ubuntu archive"
 	run apt-get install -y -qq caddy || die "caddy install failed"
 	ok "caddy installed"
 fi
@@ -413,7 +422,7 @@ ensure_key() {
 	fi
 	doing "adding $key"
 	[ "$DRY_RUN" -eq 0 ] && printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
-	[ -z "$value" ] && warn "$key is blank — you must fill it in (runbook step 9b)"
+	[ -z "$value" ] && warn "$key is blank — you must fill it in (runbook step 12)"
 	return 0
 }
 
@@ -434,17 +443,36 @@ ensure_key LINEAR_CLIENT_ID       ""
 ensure_key LINEAR_CLIENT_SECRET   ""
 ensure_key LINEAR_WEBHOOK_SECRET  ""
 ensure_key ANTHROPIC_API_KEY      ""
+ensure_key GITHUB_APP_ID          ""
+ensure_key GITHUB_APP_INSTALLATION_ID ""
+
+# The App private key path is derived from cyrusHome by the code and is not
+# configurable — EdgeWorker builds it as join(cyrusHome, "github-app.pem").
+# Without it the agent clones public repos and can do nothing else: no private
+# client repo, no branch push, no pull request.
+if [ -f "$CYRUS_HOME/github-app.pem" ]; then
+	if head -1 "$CYRUS_HOME/github-app.pem" | grep -q "BEGIN.*PRIVATE KEY"; then
+		ok "github-app.pem present and looks like a PEM"
+		[ "$DRY_RUN" -eq 0 ] && chmod 600 "$CYRUS_HOME/github-app.pem"
+	else
+		warn "github-app.pem exists but does not start with a PEM header —"
+		warn "a mangled paste fails at JWT signing, not at startup."
+	fi
+else
+	warn "no $CYRUS_HOME/github-app.pem — GitHub App token minting is off."
+	warn "Private clones, pushes and PRs will fail. See runbook step 11."
+fi
 
 # The one mechanical check available on this page: only the webhook secret
 # carries a prefix. Client id and client secret are both 32 hex characters, so
-# no check can catch a swap between those two — see runbook step 9b.
+# no check can catch a swap between those two — see runbook step 12.
 if [ -f "$ENV_FILE" ] && grep -q '^LINEAR_WEBHOOK_SECRET=.' "$ENV_FILE" 2>/dev/null; then
 	if grep -q '^LINEAR_WEBHOOK_SECRET=lin_wh_' "$ENV_FILE"; then
 		ok "LINEAR_WEBHOOK_SECRET has the expected lin_wh_ prefix"
 	else
 		warn "LINEAR_WEBHOOK_SECRET does NOT start with lin_wh_ — almost certainly"
 		warn "the client secret pasted into the wrong field. Webhooks will be"
-		warn "silently dropped. See runbook step 9b."
+		warn "silently dropped. See runbook step 12."
 	fi
 fi
 
@@ -612,7 +640,7 @@ left=0
 if [ "$creds_ready" -eq 0 ]; then
 	left=$((left + 1))
 	printf '  %d. Fill in%s in %s\n' "$left" "$missing_creds" "$ENV_FILE"
-	printf '     The Linear values come from runbook step 9b. Then:\n'
+	printf '     The Linear values come from runbook step 12. Then:\n'
 	printf '     systemctl enable --now %s\n' "$SERVICE"
 fi
 
@@ -632,7 +660,7 @@ if [ -f "$CONFIG_FILE" ]; then
 fi
 if [ "$ws_now" -eq 0 ]; then
 	left=$((left + 1))
-	printf '  %d. Authorise a workspace (runbook step 12) — the service stays up:\n' "$left"
+	printf '  %d. Authorise a workspace (runbook step 15) — the service stays up:\n' "$left"
 	printf '     node %s/apps/cli/dist/src/app.js self-auth-linear \\\n' "$REPO_DIR"
 	printf '       --cyrus-home %s --env-file %s\n' "$CYRUS_HOME" "$ENV_FILE"
 fi
@@ -640,11 +668,11 @@ fi
 if ! grep -q '^CYRUS_HEARTBEAT_URL=.' /etc/default/cyrus-heartbeat 2>/dev/null; then
 	left=$((left + 1))
 	printf '  %d. Put a healthchecks.io ping URL in /etc/default/cyrus-heartbeat,\n' "$left"
-	printf '     then verify the alert fires by stopping the service (runbook step 16b)\n'
+	printf '     then verify the alert fires by stopping the service (runbook step 19c)\n'
 fi
 
 left=$((left + 1))
-printf '  %d. Enable Hetzner backups and test one restore (runbook step 15)\n' "$left"
+printf '  %d. Enable Hetzner backups and test one restore (runbook step 18)\n' "$left"
 
 if [ "$fail" -eq 0 ]; then
 	printf '\n%sProvisioning complete.%s Re-running this script is safe.\n\n' "$C_OK" "$C_R"
