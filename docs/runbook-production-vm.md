@@ -60,6 +60,20 @@ Two facts worth knowing before they surprise you:
 - **The webhook path is `/linear-webhook`.** `/webhook` still works as a
   deprecated alias but logs a warning. Use `/linear-webhook` in Linear.
 
+### The script, and when not to use it
+
+`scripts/provision-production.sh` does the mechanical steps — **4, 6, 7, 8, 10, 11, 16b** — so the rebuild is not 30 minutes of copy-paste:
+
+```bash
+./scripts/provision-production.sh --host cyrus.pontedigital.co --ssh-prefix 161.51.0.0/16
+```
+
+It is safe to re-run at any point, **including partway through a run that failed**. Every step decides what to do by inspecting the system rather than by consulting a "steps completed" file, because a marker file lies after a partial failure — it claims a step finished when the process was killed halfway through. It never overwrites a secret, and it will not touch a `config.json` that already holds an authorised workspace. Add `--dry-run` to see what it would change without changing anything.
+
+What it deliberately does **not** do: create the VM, the firewall, DNS, or the Linear app, and it does not approve anything in a browser. Those are steps 1, 2, 3, 9 and 12 — none can be made idempotent, and a script that half-creates a Linear app is worse than no script. It checks their preconditions instead and prints what is left for you.
+
+**Read the steps anyway the first time.** The script tells you *what* it did; this document tells you *why*, and the why is what you need when something does not work at 2am. If the script and this document ever disagree, the document is right and the script is a bug.
+
 > **Ubuntu version.** PON-126 specifies Ubuntu 24. The box this runbook was
 > captured from runs **Ubuntu 26.04 LTS**, so 26.04 is the version every config
 > here is known to work on. The package sources below (NodeSource, Caddy,
