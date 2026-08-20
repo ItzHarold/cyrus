@@ -74,8 +74,12 @@ export class SelfAuthCommand extends BaseCommand {
 				);
 			}
 
-			// Start temporary server to receive OAuth callback
-			const authCode = await this.waitForCallback(clientId);
+			// Prefer the running service's relay so authorising a workspace does
+			// not require an outage (PON-126). Falls back to binding the port
+			// ourselves when no service is up — which is the fresh-VM case.
+			const authCode =
+				(await this.viaRunningService(clientId)) ??
+				(await this.waitForCallback(clientId));
 
 			// Exchange code for tokens
 			console.log("Exchanging code for tokens...");
@@ -153,6 +157,89 @@ export class SelfAuthCommand extends BaseCommand {
 			// One of the key guarantees of finally — it runs regardless of how the try block exits (return, throw, or normal completion).
 			await this.cleanup();
 		}
+	}
+
+	/**
+	 * Authorise through the already-running service.
+	 *
+	 * The old flow bound CYRUS_SERVER_PORT to catch the redirect — the very
+	 * port the service listens on — so onboarding a client meant stopping the
+	 * service. With several lanes on one box, authorising one client would
+	 * pause every other client's work.
+	 *
+	 * Here the running service catches the redirect and holds the code for us
+	 * to collect. The token exchange and the config write stay in this command:
+	 * the service never sees the client secret and never persists a credential.
+	 *
+	 * Returns null when there is no service to relay through, so the caller can
+	 * fall back to the standalone flow.
+	 */
+	private async viaRunningService(clientId: string): Promise<string | null> {
+		const baseUrl = process.env.CYRUS_BASE_URL;
+		if (!baseUrl) return null;
+		const local = `http://127.0.0.1:${this.callbackPort}`;
+
+		let flow: { flowId: string; state: string };
+		try {
+			const res = await fetch(`${local}/admin/oauth/begin`, { method: "POST" });
+			if (!res.ok) return null;
+			flow = (await res.json()) as { flowId: string; state: string };
+		} catch {
+			return null; // nothing listening — fresh box, use the standalone flow
+		}
+
+		const redirectUri = `${baseUrl}/callback`;
+		const oauthUrl =
+			`https://linear.app/oauth/authorize?client_id=${clientId}` +
+			`&redirect_uri=${encodeURIComponent(redirectUri)}` +
+			`&response_type=code&scope=write,app:assignable,app:mentionable&actor=app` +
+			`&state=${encodeURIComponent(flow.state)}`;
+
+		console.log("Service is running — authorising without stopping it.");
+		console.log();
+		console.log("Visit:");
+		console.log(oauthUrl);
+		console.log();
+		open(oauthUrl).catch(() => {
+			console.log("Could not open browser automatically.");
+		});
+
+		// Matches the service's flow TTL. The first real run of this flow took
+		// 7m03s to approve and the deadline was five minutes, so the CLI gave up
+		// while the service was still holding a perfectly good code. Anything
+		// shorter than the TTL strands approvals that arrive in between.
+		const WINDOW_MS = 15 * 60 * 1000;
+		const started = Date.now();
+		const deadline = started + WINDOW_MS;
+		let nextHeartbeat = started + 60_000;
+
+		while (Date.now() < deadline) {
+			await new Promise((r) => setTimeout(r, 2000));
+			if (Date.now() >= nextHeartbeat) {
+				const minutesLeft = Math.ceil((deadline - Date.now()) / 60_000);
+				console.log(`Still waiting for approval... (${minutesLeft} min left)`);
+				nextHeartbeat += 60_000;
+			}
+			try {
+				const res = await fetch(
+					`${local}/admin/oauth/result?flowId=${encodeURIComponent(flow.flowId)}`,
+				);
+				if (!res.ok) continue;
+				const body = (await res.json()) as { code?: string; pending?: boolean };
+				if (body.code) return body.code;
+			} catch {
+				// Transient — the service may be mid-restart. Keep waiting.
+			}
+		}
+		// An approval landing just after the deadline used to be unrecoverable:
+		// re-running mints a fresh state, so the held code could never be claimed
+		// and the whole authorisation had to be redone. Name the flow so a late
+		// approval can still be collected.
+		throw new Error(
+			`Timed out waiting for authorization after ${WINDOW_MS / 60_000} minutes.\n` +
+				`   If you approved just now, the service may still hold the code briefly:\n` +
+				`   curl -s "${local}/admin/oauth/result?flowId=${flow.flowId}"`,
+		);
 	}
 
 	private async waitForCallback(clientId: string): Promise<string> {

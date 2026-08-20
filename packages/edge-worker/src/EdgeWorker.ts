@@ -165,6 +165,7 @@ interface LaneStartOptions {
 	queuedContextPrompts?: string[];
 }
 
+import { randomUUID } from "node:crypto";
 import { McpConfigService } from "./McpConfigService.js";
 import { PromptBuilder } from "./PromptBuilder.js";
 import type {
@@ -240,6 +241,14 @@ export class EdgeWorker extends EventEmitter {
 	private sharedApplicationServer: SharedApplicationServer;
 	private cyrusHome: string;
 	private globalSessionRegistry: GlobalSessionRegistry; // Centralized session storage across all repositories
+	/**
+	 * In-flight OAuth relays (PON-126). Short-lived: a state, and the code once
+	 * it arrives. Never a token — the CLI does the exchange.
+	 */
+	private readonly oauthRelayFlows = new Map<
+		string,
+		{ state: string; code?: string; createdAt: number }
+	>();
 	private laneManager: LaneManager; // Per-workspace serialized lanes (PON-112)
 	private laneGraceTimers: Map<string, NodeJS.Timeout> = new Map(); // workspaceId → boot-grace timer
 	/** Grace window for a restored lane holder with no live runner (PON-112). */
@@ -911,6 +920,9 @@ export class EdgeWorker extends EventEmitter {
 		// 6. Register localhost-only /admin/lanes endpoint (PON-112)
 		this.registerLanesEndpoint();
 
+		// 6b. OAuth relay so onboarding never needs an outage (PON-126)
+		this.registerOAuthRelayEndpoints();
+
 		// 7. Lane boot recovery (PON-112): grace window for a restored active
 		// session with no live runner; drain lanes left free with queued work.
 		// Runs last so transports, trackers, and endpoints are all live before
@@ -947,6 +959,126 @@ export class EdgeWorker extends EventEmitter {
 
 		this.logger.info("✅ Lanes endpoint registered (localhost only)");
 		this.logger.info("   Route: GET /admin/lanes");
+	}
+
+	/**
+	 * OAuth relay so a workspace can be authorised WITHOUT stopping the service
+	 * (PON-126).
+	 *
+	 * `self-auth-linear` used to bind CYRUS_SERVER_PORT itself to catch the
+	 * redirect — the same port this server listens on — so onboarding a client
+	 * required an outage by construction. With three lanes on one box that is
+	 * not acceptable: authorising a new client would pause every other client's
+	 * work.
+	 *
+	 * Instead the running service catches the redirect and holds the code for
+	 * the CLI to collect:
+	 *
+	 *   POST /admin/oauth/begin   -> { flowId, state }   (localhost only)
+	 *   GET  /callback            <- Linear redirects the browser here (public)
+	 *   GET  /admin/oauth/result  -> { code } once       (localhost only)
+	 *
+	 * The token exchange and config write stay in the CLI. This server never
+	 * sees the client secret and never persists a credential — it relays one
+	 * short-lived authorization code and forgets it.
+	 */
+	private registerOAuthRelayEndpoints(): void {
+		const fastify = this.sharedApplicationServer.getFastifyInstance();
+		// A consent screen is a human step: log in, pick the workspace, read the
+		// scopes, approve. Measured at 7m03s the first time it was run for real.
+		// Must stay >= the CLI's polling deadline, or the service discards a code
+		// the CLI is still waiting for.
+		const TTL_MS = 15 * 60 * 1000;
+
+		// Same guard as /admin/lanes: loopback AND no proxy-forwarding headers.
+		// Caddy proxies public traffic from loopback, so an IP check alone would
+		// expose these. 404 rather than 403 so the routes are not advertised.
+		const localOnly = (request: {
+			ip: string;
+			headers: Record<string, unknown>;
+		}): boolean => {
+			const forwarded = [
+				"x-forwarded-for",
+				"x-forwarded-proto",
+				"x-forwarded-host",
+				"x-real-ip",
+				"forwarded",
+			].some((header) => request.headers[header] !== undefined);
+			const loopback = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(
+				request.ip,
+			);
+			return loopback && !forwarded;
+		};
+
+		const sweep = (): void => {
+			const now = Date.now();
+			for (const [id, flow] of this.oauthRelayFlows) {
+				if (now - flow.createdAt > TTL_MS) this.oauthRelayFlows.delete(id);
+			}
+		};
+
+		fastify.post("/admin/oauth/begin", async (request, reply) => {
+			if (!localOnly(request)) {
+				return reply.status(404).send({ error: "Not found" });
+			}
+			sweep();
+			const flowId = randomUUID();
+			const state = randomUUID();
+			this.oauthRelayFlows.set(flowId, { state, createdAt: Date.now() });
+			this.logger.info(`[event:oauth_relay_begin] {"flowId":"${flowId}"}`);
+			return reply.status(200).send({ flowId, state });
+		});
+
+		fastify.get("/admin/oauth/result", async (request, reply) => {
+			if (!localOnly(request)) {
+				return reply.status(404).send({ error: "Not found" });
+			}
+			const flowId = (request.query as { flowId?: string })?.flowId;
+			const flow = flowId ? this.oauthRelayFlows.get(flowId) : undefined;
+			if (!flow) return reply.status(404).send({ error: "Unknown flow" });
+			if (!flow.code) return reply.status(200).send({ pending: true });
+			// Single use: the code is surrendered once and forgotten.
+			this.oauthRelayFlows.delete(flowId as string);
+			return reply.status(200).send({ code: flow.code });
+		});
+
+		// Public — Linear redirects the operator's browser here. Accepts a code
+		// only for a state issued by /admin/oauth/begin, so an arbitrary code
+		// posted by anyone is refused.
+		fastify.get("/callback", async (request, reply) => {
+			sweep();
+			const { code, state } = request.query as {
+				code?: string;
+				state?: string;
+			};
+			const entry = state
+				? [...this.oauthRelayFlows.entries()].find(([, f]) => f.state === state)
+				: undefined;
+
+			if (!code || !entry) {
+				this.logger.warn(
+					"OAuth callback received without a matching pending flow",
+				);
+				return reply
+					.type("text/html; charset=utf-8")
+					.status(400)
+					.send(
+						"<h2>No authorization in progress</h2><p>Start one with <code>cyrus self-auth-linear</code>.</p>",
+					);
+			}
+
+			entry[1].code = code;
+			this.logger.info(`[event:oauth_relay_received] {"flowId":"${entry[0]}"}`);
+			return reply
+				.type("text/html; charset=utf-8")
+				.status(200)
+				.send(
+					"<h2>Authorized</h2><p>You can close this tab — the terminal is finishing up.</p>",
+				);
+		});
+
+		this.logger.info("✅ OAuth relay registered (service stays up)");
+		this.logger.info("   Routes: POST /admin/oauth/begin, GET /callback");
 	}
 
 	/**
