@@ -10,6 +10,7 @@ import dotenv from "dotenv";
 import { Application } from "./Application.js";
 import { AuthCommand } from "./commands/AuthCommand.js";
 import { CheckTokensCommand } from "./commands/CheckTokensCommand.js";
+import { CheckWorkspaceAuthCommand } from "./commands/CheckWorkspaceAuthCommand.js";
 import { RefreshTokenCommand } from "./commands/RefreshTokenCommand.js";
 import { SelfAddRepoCommand } from "./commands/SelfAddRepoCommand.js";
 import { SelfAuthCommand } from "./commands/SelfAuthCommand.js";
@@ -110,6 +111,23 @@ program
 			errorReporter,
 		);
 		await new RefreshTokenCommand(app).execute([]);
+	});
+
+// Check workspace auth command - read-only per-workspace credential report
+program
+	.command("check-workspace-auth")
+	.description(
+		"Report how each Linear workspace authenticates to Anthropic. Read-only: no network, no sessions, no writes.",
+	)
+	.action(async () => {
+		const opts = program.opts();
+		const app = new Application(
+			opts.cyrusHome,
+			opts.envFile,
+			packageJson.version,
+			errorReporter,
+		);
+		await new CheckWorkspaceAuthCommand(app).execute([]);
 	});
 
 // Self-auth-linear command - Linear OAuth directly from CLI
