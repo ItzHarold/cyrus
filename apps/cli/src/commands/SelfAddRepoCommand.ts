@@ -9,6 +9,12 @@ import {
 	type EdgeConfig,
 	migrateEdgeConfig,
 } from "cyrus-core";
+import {
+	GIT_NO_AMBIENT_CREDENTIALS,
+	gitAuthEnv,
+	mintTokenForRepo,
+	parseGitHubRepoUrl,
+} from "cyrus-github-event-transport";
 import { getDefaultReposDir } from "../utils/getDefaultReposDir.js";
 import { getDefaultWorktreesDir } from "../utils/getDefaultWorktreesDir.js";
 import { BaseCommand } from "./ICommand.js";
@@ -235,9 +241,11 @@ export class SelfAddRepoCommand extends BaseCommand {
 			} else {
 				console.log(`Cloning ${url}...`);
 				try {
-					execSync(`git clone ${url} ${repositoryPath}`, { stdio: "inherit" });
-				} catch {
-					this.logError("Failed to clone repository");
+					await this.cloneRepository(url, repositoryPath);
+				} catch (error) {
+					this.logError(
+						`Failed to clone repository: ${(error as Error).message}`,
+					);
 					process.exit(1);
 				}
 			}
@@ -289,6 +297,76 @@ export class SelfAddRepoCommand extends BaseCommand {
 			process.exit(0);
 		} finally {
 			this.cleanup();
+		}
+	}
+
+	/**
+	 * Clone a repository, authenticating through the GitHub App when one is
+	 * configured.
+	 *
+	 * This used to be a bare `execSync("git clone ...")` with `stdio: "inherit"`.
+	 * On a box with an ambient credential helper it silently worked, using a
+	 * person's GitHub account. On a clean production box it stopped at
+	 * `Username for 'https://github.com':` and waited for a human who was not
+	 * there — the App was configured, and onboarding never consulted it.
+	 *
+	 * The token is minted for this repository's own installation and passed
+	 * through the environment for exactly this one git process. It is never
+	 * written to `.git/config`, never becomes part of the saved remote URL, and
+	 * never appears in argv, so the clone leaves nothing behind that could leak
+	 * into a log or outlive the token's hour.
+	 */
+	private async cloneRepository(
+		url: string,
+		repositoryPath: string,
+	): Promise<void> {
+		const appId = process.env.GITHUB_APP_ID;
+		const privateKeyPath = resolve(this.app.cyrusHome, "github-app.pem");
+		const ref = parseGitHubRepoUrl(url);
+
+		// Not in App mode, or not a GitHub remote: behave exactly as before.
+		// Absence of App configuration is a legitimate legacy/dev setup, not a
+		// misconfiguration — so it is not something to fail loudly about.
+		if (!appId || !existsSync(privateKeyPath) || !ref) {
+			if (appId && !ref) {
+				console.log(
+					"   Not a GitHub remote — cloning without GitHub App credentials.",
+				);
+			}
+			execSync(`git clone ${url} ${repositoryPath}`, { stdio: "inherit" });
+			return;
+		}
+
+		console.log(
+			`   Authenticating as the GitHub App for ${ref.owner}/${ref.repo}...`,
+		);
+
+		// Deliberately not caught: no installation covering this repository is a
+		// misconfiguration to surface, not to work around. Falling back to an
+		// ambient credential here is how a box ends up quietly cloning one
+		// tenant's repository with another tenant's access.
+		const token = await mintTokenForRepo({ appId, privateKeyPath }, ref);
+
+		execSync(
+			`git ${GIT_NO_AMBIENT_CREDENTIALS.join(" ")} clone ${url} ${repositoryPath}`,
+			{
+				stdio: "inherit",
+				env: { ...process.env, ...gitAuthEnv(token) },
+			},
+		);
+
+		// The saved remote is the plain URL — verified rather than assumed,
+		// because a credential embedded here would persist on disk for anyone
+		// who can read the repo, long after the token itself expired.
+		const savedRemote = execSync("git remote get-url origin", {
+			cwd: repositoryPath,
+			encoding: "utf-8",
+		}).trim();
+		if (savedRemote.includes("@github.com")) {
+			throw new Error(
+				"Refusing to continue: the saved remote URL contains credentials. " +
+					"This should be impossible — report it.",
+			);
 		}
 	}
 }

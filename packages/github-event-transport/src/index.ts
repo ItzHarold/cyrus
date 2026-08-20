@@ -1,3 +1,16 @@
+export type {
+	GitHubAppGitAuthConfig,
+	GitHubRepoRef,
+} from "./GitHubAppGitAuth.js";
+export {
+	askpassPath,
+	findInstallationForRepo,
+	GIT_NO_AMBIENT_CREDENTIALS,
+	gitAuthEnv,
+	mintTokenForRepo,
+	NoInstallationForRepositoryError,
+	parseGitHubRepoUrl,
+} from "./GitHubAppGitAuth.js";
 export type { GitHubAppTokenProviderConfig } from "./GitHubAppTokenProvider.js";
 export {
 	createAppJwt,

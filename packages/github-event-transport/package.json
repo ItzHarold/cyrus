@@ -14,7 +14,7 @@
 		"dist"
 	],
 	"scripts": {
-		"build": "tsc",
+		"build": "tsc && node -e \"const fs=require('node:fs');fs.copyFileSync('src/git-askpass.mjs','dist/git-askpass.mjs');fs.chmodSync('dist/git-askpass.mjs',0o755)\"",
 		"dev": "tsc --watch",
 		"typecheck": "tsc --noEmit",
 		"test": "vitest",
