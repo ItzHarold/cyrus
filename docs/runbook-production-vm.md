@@ -9,7 +9,7 @@ Target: **serving a real webhook in under 30 minutes.**
 
 > **Provenance.** Every step below has been executed on a fresh Hetzner box
 > twice — a throwaway on 2026-08-19 and the real production box on 2026-08-20 —
-> and corrected against what actually happened both times. Twenty-three defects
+> and corrected against what actually happened both times. Twenty-seven defects
 > were found that way, none of them by reading. Where a step says "expect", that
 > is observed output, not expected output, except where explicitly marked
 > unverified. See [What is proven, and what is not](#what-is-proven-and-what-is-not).
@@ -41,7 +41,7 @@ Target: **serving a real webhook in under 30 minutes.**
 | 18 | [Backups and a tested restore](#18-backups-and-a-tested-restore) | **OFF-BOX** Hetzner | 10 min |
 | 19 | [Health checks](#19-health-checks) | box + **OFF-BOX** | 15 min |
 | 20 | [The timed rebuild test](#20-the-timed-rebuild-test) | — | 30 min |
-| 21 | [Migration and the dev-box token purge](#21-migration-and-the-dev-box-token-purge) | both boxes | 10 min |
+| 21 | [Decommission and token purge](#21-decommission-and-token-purge) | both boxes + consoles | 15 min |
 | — | [When webhooks silently don't arrive](#when-webhooks-silently-dont-arrive) | — | — |
 | — | [What is proven, and what is not](#what-is-proven-and-what-is-not) | — | — |
 
@@ -112,7 +112,7 @@ ever disagree, the document is right and the script is a bug.
 
 | Field | Value |
 |---|---|
-| Location | Falkenstein or Nuremberg |
+| Location | Any EU location — Falkenstein, Nuremberg, Helsinki |
 | Image | Ubuntu 26.04 |
 | Type | **CPX31 or CX33** — 4 vCPU, 8 GB RAM |
 | Networking | Public IPv4 **on**, IPv6 on |
@@ -123,6 +123,12 @@ ever disagree, the document is right and the script is a bug.
 The workload is network-bound — Claude sessions, git worktrees, a webhook
 server. Builds and previews run on client Vercel. Sized for cleanliness, not
 compute; do not upsize reflexively.
+
+> **Location does not matter; stock does.** Falkenstein and Nuremberg were both
+> out of CX33 on 2026-08-20 and the production box was built in Helsinki with
+> the spec unchanged. Any EU location works, and **snapshots restore across
+> locations**, so the restore test at step 18 is unaffected by which one you
+> land in. Take whatever has stock rather than waiting.
 
 ```
 IPv4: ____________________
@@ -138,14 +144,23 @@ you never have a moment where exactly one door exists. Step 3 narrows SSH to a
 network prefix, which is a guess about your ISP's allocation; on a home
 connection that guess can expire with a router reboot.
 
+**OFF-BOX first — Tailscale admin → Settings → Keys → Generate auth key.**
+Reusable off, ephemeral off, 90-day expiry. Copy it.
+
 ```bash
 ssh root@<IPv4 from step 1>
 curl -fsSL https://tailscale.com/install.sh | sh
-tailscale up --ssh --hostname=pontedigital-prod
+tailscale up --ssh --hostname=pontedigital-prod --authkey=tskey-auth-XXXX
 ```
 
-It prints a URL. **Open it in a browser and approve** — a browser step in the
-middle of a terminal step.
+> **Use an auth key, not the interactive login.** `tailscale up` without
+> `--authkey` is supposed to print a URL to approve in a browser. On a fresh
+> Ubuntu 26.04 box it printed nothing and died with `context canceled`, leaving
+> no way to complete the handshake and no error explaining why. The auth-key
+> path has no browser handshake at all, which is what you want mid-provision:
+> a runbook step should not depend on an interactive round trip that can fail
+> silently. If you must use the interactive form, run `tailscale up` again after
+> a failure — the second attempt usually prints the URL.
 
 ```bash
 tailscale status
@@ -185,8 +200,12 @@ verified at step 7.
 First, from your **laptop**, get the address to derive the prefix from:
 
 ```bash
-curl -s https://api.ipify.org; echo
+curl -4 -s https://api.ipify.org; echo
 ```
+
+Force IPv4 with `-4`. On a box or connection that prefers IPv6 this otherwise
+prints a v6 address, which matches nothing in the rules you are about to write
+and reads as "my address changed" when it did not.
 
 Inbound rules — three, exactly:
 
@@ -285,6 +304,11 @@ Expect a wall of apt output ending with no `E:` lines. Two to four minutes.
 >
 > **Both variables are lost on reconnect.** Any new shell needs the `export`
 > line again before continuing.
+>
+> **Set both on one line, as written.** `NEEDRESTART_MODE=l` alone was not
+> enough on the 2026-08-20 Ubuntu build — needrestart still opened its dialog
+> unless `DEBIAN_FRONTEND=noninteractive` was also set. The combined export
+> works; either one alone may not.
 
 If the upgrade pulled a new kernel or deferred restarts:
 
@@ -455,16 +479,39 @@ corepack prepare pnpm@10.33.1 --activate
 pnpm -v
 ```
 
-Expect `v22.23.2` (or later 22.x), npm `10.x`, and pnpm exactly `10.33.1`.
+Expect `v22.23.2` (or later 22.x) and npm `10.x`.
 
-`pnpm -v` must match `packageManager` in the repo's `package.json`. A mismatch
-surfaces much later as a confusing install failure — check it here.
+`pnpm -v` should report whatever `corepack prepare` just activated. **The exact
+version does not matter and will drift** — 10.33.1 at the time of writing, 11.x
+observed on 2026-08-20. What matters is that `corepack prepare` succeeded;
+corepack then honours the repo's `packageManager` field per invocation
+regardless. Only investigate if that command itself failed.
 
 ---
 
 ## 9. Caddy and TLS
 
-**DNS from step 4 must already resolve.**
+### Gate: DNS must point at *this* box before you go further
+
+```bash
+dig +short agent.pontedigital.co
+curl -4 -s https://api.ipify.org; echo
+```
+
+**The two must print the same address. If they differ, stop here** — fix DNS and
+wait for propagation. Do not run the Caddy install.
+
+This gate exists because skipping it produces a failure that names the wrong
+problem. A stale A record pointing at a previous box gave:
+
+```
+tls: internal error
+```
+
+naming the **old** box's IP, with nothing about DNS anywhere in the message. ACME
+was validating against a host we no longer controlled. The error sends you into
+Caddy's TLS configuration, which is fine, while the actual fault is one `dig`
+away.
 
 ```bash
 apt-get install -y caddy
@@ -502,6 +549,14 @@ and is proxying to 3457 where nothing listens yet. Step 14 turns this into 200.
 ```bash
 journalctl -u caddy -n 30 --no-pager
 ```
+
+> **Ignore any ZeroSSL error you see in the log.** Caddy 2.6.2 tries Let's
+> Encrypt first and falls back to ZeroSSL; that fallback is dead — it fails with
+> `caddy_legacy_user_removed`, because the legacy shared account Caddy used was
+> retired upstream. **Let's Encrypt is the only working issuer on this version.**
+> A ZeroSSL failure in the log is noise unless Let's Encrypt also failed; read
+> the Let's Encrypt lines and ignore the rest, or you will spend an hour
+> configuring an issuer that cannot work.
 
 Almost always DNS not yet propagated, or **port 80 blocked** so the ACME
 challenge cannot complete. This is where the port-80 check belongs:
@@ -843,6 +898,28 @@ systemctl is-active cyrus-community
 Expect `active`. **Let it settle before querying** — the same race that bites
 fail2ban at step 7 applies to anything started and immediately inspected.
 
+### Confirm it is using the right config directory
+
+```bash
+systemctl cat cyrus-community | grep ExecStart
+ls -la /root/.cyrus /root/.cyrus-community 2>&1 | head -4
+```
+
+`ExecStart` **must** contain `--cyrus-home /root/.cyrus-community`, and
+`/root/.cyrus` **must not exist**.
+
+> **Dropping `--cyrus-home` produces a service that looks perfectly healthy.**
+> It happened on the 2026-08-20 build: the unit was written without the flag, so
+> the CLI fell back to its default `~/.cyrus`, scaffolded a brand-new config
+> directory there, started cleanly, reported `active`, and served `/status` as
+> `idle`. Nothing is wrong until you authorise — and then step 15 writes the
+> workspace token into the **wrong** `config.json`, which the running service
+> never reads. You get a successful-looking OAuth flow and an agent that ignores
+> every webhook.
+>
+> An idle service cannot tell you which config it loaded. Check the unit, and
+> check that the default directory was never created.
+
 ```bash
 journalctl -u cyrus-community --no-pager \
   | grep -iE "listening|registered post|relay registered|edge worker started" | tail -8
@@ -1160,36 +1237,90 @@ Rebuild tested on: ____________   Elapsed: ______
 
 ---
 
-## 21. Migration and the dev-box token purge
+## 21. Decommission and token purge
 
-Once production is serving, the old box becomes dev/staging and must stop
-holding anything belonging to a client.
+**This is not a migration.** An earlier version of this runbook assumed client
+work moves to the new box. It does not: the existing clients stay served from
+the original box, which keeps its own Linear app as the daily driver. Nothing is
+migrated. What happens here is that **every credential not in active use is
+destroyed** — on throwaway boxes, in retired instances, and in backup files.
 
-On the **old** box, confirm nothing is mid-flight first:
+### The rule this satisfies
+
+> **Every Linear token on every box belongs to a workspace that box actively
+> serves.** No retired instance, no backup file, and no torn-down test box holds
+> a tenant token. Token-bearing files are 0600.
+
+That replaces the original *"the dev box holds no tenant tokens"*, which became
+unsatisfiable once clients stayed there — that token is load-bearing.
+
+> **Consequence, accepted deliberately.** The original wording existed because
+> the dev box runs experimental fork-on-fork code, and you do not keep live
+> client credentials where you run experiments. That risk does not go away; it
+> is now permanent by choice. **Treat the dev box as production for credential
+> handling.** The session tool-permission boundary is the mitigation actually in
+> place, and it held under test.
+
+### Find what is orphaned
 
 ```bash
-curl -s localhost:3457/status      # expect {"status":"idle"}
-curl -s localhost:3457/admin/lanes # expect {"lanes":{}}
-systemctl stop cyrus-community && systemctl disable cyrus-community
+grep -rl "lin_oauth_" /root/.cyrus /root/.cyrus-community 2>/dev/null | sort > /tmp/token-files.txt
+wc -l < /tmp/token-files.txt
 ```
 
-**OFF-BOX — in Linear**, for each client workspace, revoke the old app's
-authorisation. This is the step that actually removes access; deleting local
-files does not.
+On the 2026-08-20 decommission this found **83 files**. Exactly one — the live
+`config.json` — was in use. The other 82 were a retired pm2 instance's config
+plus **75 timestamped backups**, at mode **0644**, going back two months
+(PON-148).
 
-Then remove the local credentials:
+### Purge
 
 ```bash
-shred -u /root/.cyrus-community/config.json /root/.cyrus-community/.env
-shred -u /root/.cyrus-community/github-app.pem 2>/dev/null
-grep -rl "lin_oauth_" /root/.cyrus-community/ 2>/dev/null | head
+pm2 list                                  # any retired instance must be stopped
+systemctl is-active cyrus-community       # the live one must be active
+
+grep -v "^/root/.cyrus-community/config.json$" /tmp/token-files.txt | xargs -r shred -u
+
+grep -rl "lin_oauth_" /root/.cyrus /root/.cyrus-community 2>/dev/null
 ```
 
-Expect **no output** from the last command. Anything listed still holds a tenant
-token.
+The last command must print **exactly one line**: the live config.
 
-The dev box keeps its own separate Linear app for fork-on-fork work and never
-shares credentials with production.
+```bash
+chmod 600 /root/.cyrus-community/config.json /root/.cyrus-community/.env
+pm2 delete cyrus && pm2 save --force
+```
+
+`pm2 delete` matters — a stopped process is one `pm2 start` away from
+resurrecting an instance whose credentials you just destroyed.
+
+### Decommission the test box
+
+**OFF-BOX — Hetzner:** delete the throwaway server *and* its snapshot. Deleting
+the VM destroys the disk and the token with it, so there is no shred step. Keep
+the production snapshot.
+
+**OFF-BOX — registrar:** delete the test A record.
+
+**OFF-BOX — Linear → OAuth applications:** delete the test app. That revokes its
+tokens in every workspace it was authorised in, which is what actually removes
+access — deleting local files does not. **Do not touch the production app or the
+daily-driver app.**
+
+**OFF-BOX — Anthropic Console:** revoke the key that lived on the test box.
+Revoke, not delete-the-file: the box is gone, the key is not.
+
+**OFF-BOX — GitHub:** delete or uninstall the test App.
+
+### Verify, on every box
+
+```bash
+grep -rl "lin_oauth_" /root/.cyrus /root/.cyrus-community 2>/dev/null
+stat -c '%a %n' /root/.cyrus-community/config.json /root/.cyrus-community/.env
+dig +short <test-hostname>
+```
+
+Expect one file, `600 600`, and an empty `dig`.
 
 ---
 
@@ -1259,9 +1390,10 @@ checked:
 
 - **2026-08-19** — `agent-rebuild.pontedigital.co`, a throwaway. Found and fixed
   19 defects in this document.
-- **2026-08-20** — `agent.pontedigital.co`, the real production box. Found 4
+- **2026-08-20** — `agent.pontedigital.co`, the real production box. Found 8
   more, plus a product defect that blocked it outright (PON-145: onboarding
-  never authenticated its clone).
+  never authenticated its clone) and a credential-hygiene defect found during
+  decommission (PON-148: 75 world-readable token backups).
 
 | PON-126 acceptance criterion | Status | Evidence |
 |---|---|---|
@@ -1270,8 +1402,13 @@ checked:
 | Snapshot restore tested | **PASS** | Snapshot restored to a new server; service came up unattended, `{"status":"idle"}`; stopped and deleted |
 | Health check alerts fire on simulated outage | **PASS** | Service stopped; alerts received from **both** healthchecks.io and UptimeRobot; recovered on restart |
 | Production sessions run from the new box | **PASS** | Production box built, authorised, private repository added, session run end to end |
-| **Rebuilt from the runbook in under 30 min** | **NOT VERIFIED** | *Both* runs measured debugging rather than following — 19 defects the first time, 4 more the second. **No clean timed pass over the corrected document has happened.** |
-| Dev box holds no tenant tokens | **NOT DONE** | Step 21 has not been run |
+| **Rebuilt from the runbook in under 30 min** | **NOT VERIFIED** | *Both* runs measured debugging rather than following — 19 defects the first time, 8 more the second. **No clean timed pass over the corrected document has happened.** |
+| Every token belongs to a workspace its box serves | **PASS** | Decommission run 2026-08-20: 82 orphaned token files shredded (75 of them mode 0644, from a retired instance), test box and its snapshot deleted, test Linear app deleted, test API key revoked. One token file remains per box, all 0600 |
+
+### The one criterion that is not met
+
+Six of seven pass with production evidence. The seventh does not, and it will
+not be met by more work on the runs already done.
 
 **Do not read the passes as a passing rebuild.** Every one of them was obtained
 while correcting the document, on a box built with help. The criterion that
