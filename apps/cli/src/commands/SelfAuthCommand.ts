@@ -183,7 +183,24 @@ export class SelfAuthCommand extends BaseCommand {
 		try {
 			const res = await fetch(`${local}/admin/oauth/begin`, { method: "POST" });
 			if (!res.ok) return null;
-			flow = (await res.json()) as { flowId: string; state: string };
+			const body = (await res.json()) as Partial<{
+				flowId: string;
+				state: string;
+			}>;
+			// A 200 is not enough. Something else entirely could be listening on
+			// this port and answering happily — and without this check we would
+			// take its response as a flow and then poll a stranger for fifteen
+			// minutes. Only a body that actually looks like our relay counts;
+			// anything else means "no relay here", so fall back.
+			if (
+				typeof body?.flowId !== "string" ||
+				typeof body?.state !== "string" ||
+				!body.flowId ||
+				!body.state
+			) {
+				return null;
+			}
+			flow = { flowId: body.flowId, state: body.state };
 		} catch {
 			return null; // nothing listening — fresh box, use the standalone flow
 		}

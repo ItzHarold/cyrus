@@ -72,6 +72,9 @@ importers:
       cyrus-edge-worker:
         specifier: workspace:*
         version: link:../../packages/edge-worker
+      cyrus-github-event-transport:
+        specifier: workspace:*
+        version: link:../../packages/github-event-transport
       cyrus-slack-event-transport:
         specifier: workspace:*
         version: link:../../packages/slack-event-transport

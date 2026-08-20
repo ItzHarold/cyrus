@@ -112,6 +112,19 @@ describe("SelfAuthCommand", () => {
 
 		// Setup global fetch mock
 		global.fetch = mocks.mockFetch;
+
+		// self-auth-linear first probes the running service's OAuth relay
+		// (POST /admin/oauth/begin) so a workspace can be authorised without an
+		// outage. In tests there is no service, so stage that probe's failure
+		// here — otherwise it consumes the mockResolvedValueOnce value each test
+		// stages for the token exchange, and the assertions read the wrong call.
+		// mockReset first: vi.clearAllMocks() clears call history but NOT queued
+		// `...Once` values, so a staged response left unconsumed by a test that
+		// exits early would shift the next test's queue by one.
+		mocks.mockFetch.mockReset();
+		mocks.mockFetch.mockRejectedValueOnce(
+			new Error("connect ECONNREFUSED 127.0.0.1"),
+		);
 	});
 
 	afterEach(() => {
@@ -359,7 +372,10 @@ describe("SelfAuthCommand", () => {
 				}),
 			);
 
-			const tokenCall = mocks.mockFetch.mock.calls[0];
+			const tokenCall = mocks.mockFetch.mock.calls.find((c) =>
+				String(c[0]).includes("oauth/token"),
+			);
+			if (!tokenCall) throw new Error("no token exchange call was made");
 			const body = tokenCall[1].body;
 			expect(body).toContain("code=auth-code-123");
 			expect(body).toContain("client_id=test-client-id");
