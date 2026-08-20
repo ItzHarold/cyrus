@@ -30,7 +30,20 @@ export class RunnerSelectionService {
 
 		// Auto-detect from environment: if exactly one runner's API key is set, use it
 		const available: Array<RunnerType> = [];
-		if (process.env.CLAUDE_CODE_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY) {
+		// Claude credentials are no longer necessarily in the process environment:
+		// a workspace may declare its own (PON-139), and a box serving only keyed
+		// workspaces legitimately has neither variable set. Inferring "no Claude
+		// here" from the box environment alone would then auto-select whichever
+		// other runner happened to have a key — a box-level guess about a
+		// per-workspace fact, which is the pattern that workstream removes.
+		const anyWorkspaceDeclaresClaude = Object.values(
+			this.config.linearWorkspaces ?? {},
+		).some((workspace) => workspace?.anthropicAuth !== undefined);
+		if (
+			process.env.CLAUDE_CODE_OAUTH_TOKEN ||
+			process.env.ANTHROPIC_API_KEY ||
+			anyWorkspaceDeclaresClaude
+		) {
 			available.push("claude");
 		}
 		if (process.env.GEMINI_API_KEY) {
