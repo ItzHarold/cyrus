@@ -1,3 +1,11 @@
+export type { WorkspaceAnthropicAuth } from "./WorkspaceAuth.js";
+export {
+	ANTHROPIC_AUTH_ENV_KEYS,
+	describeWorkspaceAuth,
+	resolveWorkspaceAuthEnv,
+	WorkspaceAuthNotDeclaredError,
+	WorkspaceAuthUnavailableError,
+} from "./WorkspaceAuth.js";
 // Logging
 
 // Error reporting

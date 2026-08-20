@@ -165,6 +165,69 @@ describe("EdgeWorker tenant revocation (PON-115)", () => {
 		expect(worker.laneManager.activeSessionOf(WS_B)).toBe("s-b");
 	});
 
+	it("frees EVERY holder of a multi-session lane, not just the first (PON-139)", async () => {
+		// The bug this guards: deactivateTenant read activeSessionOf(), which
+		// returns one holder. At a concurrency above 1 the others kept their
+		// slots after the tenant was revoked, and nothing would ever free them —
+		// the lane stayed permanently full for a tenant we had stopped serving.
+		//
+		// It passed every existing test because those all run one session per
+		// lane, where "the first holder" and "every holder" are the same thing.
+		worker.laneManager = new LaneManager(
+			() => true,
+			undefined,
+			() => 3,
+		);
+		trackerA.fetchTeams.mockResolvedValue({ nodes: [] });
+
+		worker.laneManager.acquire(WS_A, "s-a1");
+		worker.laneManager.acquire(WS_A, "s-a2");
+		worker.laneManager.acquire(WS_A, "s-a3");
+		worker.laneManager.enqueue(WS_A, {
+			sessionId: "s-a4",
+			enqueuedAt: new Date().toISOString(),
+			webhook: {},
+			kind: "created",
+		});
+		worker.laneManager.acquire(WS_B, "s-b");
+
+		await worker.handlePermissionChange(permissionChange(WS_A));
+
+		expect(worker.laneManager.activeSessionsOf(WS_A)).toEqual([]);
+		expect(worker.laneManager.queueLength(WS_A)).toBe(0);
+		// The untouched tenant keeps its holder.
+		expect(worker.laneManager.activeSessionsOf(WS_B)).toEqual(["s-b"]);
+	});
+
+	it("drains a multi-session queue without stranding the sessions it admits", async () => {
+		// The second half of the same bug: the drain loop released "whichever
+		// session is active" rather than the one takeNext had just admitted. With
+		// several holders that frees the wrong session and leaves the drained one
+		// holding a slot, so the loop can finish with the lane still occupied.
+		worker.laneManager = new LaneManager(
+			() => true,
+			undefined,
+			() => 2,
+		);
+		trackerA.fetchTeams.mockResolvedValue({ nodes: [] });
+
+		worker.laneManager.acquire(WS_A, "s-a1");
+		worker.laneManager.acquire(WS_A, "s-a2");
+		for (const sessionId of ["q1", "q2", "q3"]) {
+			worker.laneManager.enqueue(WS_A, {
+				sessionId,
+				enqueuedAt: new Date().toISOString(),
+				webhook: {},
+				kind: "created",
+			});
+		}
+
+		await worker.handlePermissionChange(permissionChange(WS_A));
+
+		expect(worker.laneManager.activeSessionsOf(WS_A)).toEqual([]);
+		expect(worker.laneManager.queueLength(WS_A)).toBe(0);
+	});
+
 	it("drops the revoked tenant's tracker so no further API calls are possible", async () => {
 		trackerA.fetchTeams.mockResolvedValue({ nodes: [] });
 

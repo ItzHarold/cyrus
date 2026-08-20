@@ -72,7 +72,17 @@ export interface ClaudeRunnerConfig {
 	outputFormat?: OutputFormatConfig; // Structured output format configuration
 	sandbox?: SandboxSettings; // Sandbox settings (enabled, network proxy ports, etc.)
 	/** Additional environment variables to pass to the Claude child process (merged after process.env) */
-	additionalEnv?: Record<string, string>;
+	/**
+	 * Extra environment for this session's subprocess, spread last so it wins.
+	 *
+	 * `undefined` **unsets** a variable that would otherwise be inherited from the
+	 * parent process. That is load-bearing for per-workspace credentials (PON-139):
+	 * a box started with a subscription token passes it to every child, so setting
+	 * an API key without removing the token would leave both present and let SDK
+	 * precedence decide which credential a tenant runs on. Replacing the whole auth
+	 * set means no precedence rule is load-bearing.
+	 */
+	additionalEnv?: Record<string, string | undefined>;
 	pathToClaudeCodeExecutable?: string; // Explicit path to Claude Code CLI executable (auto-resolved if not set)
 	/**
 	 * Override how the Claude Code process is spawned. Forwarded to the SDK's

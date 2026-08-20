@@ -504,6 +504,41 @@
 					"laneSerialization": {
 						"type": "boolean"
 					},
+					"laneConcurrency": {
+						"type": "integer",
+						"minimum": 1,
+						"maximum": 9007199254740991
+					},
+					"anthropicAuth": {
+						"oneOf": [
+							{
+								"type": "object",
+								"properties": {
+									"mode": {
+										"type": "string",
+										"const": "apiKey"
+									},
+									"apiKey": {
+										"type": "string",
+										"minLength": 1
+									}
+								},
+								"required": ["mode", "apiKey"],
+								"additionalProperties": false
+							},
+							{
+								"type": "object",
+								"properties": {
+									"mode": {
+										"type": "string",
+										"const": "subscription"
+									}
+								},
+								"required": ["mode"],
+								"additionalProperties": false
+							}
+						]
+					},
 					"appUserId": {
 						"type": "string"
 					},

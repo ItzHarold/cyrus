@@ -96,16 +96,19 @@ import {
 	extractRepoName,
 	extractRepoOwner,
 	extractSessionKey,
-	GitHubAppTokenProvider,
+	GIT_NO_AMBIENT_CREDENTIALS,
 	GitHubCommentService,
 	type GitHubCommentWebhookEvent,
 	GitHubEventTransport,
+	GitHubInstallationResolver,
 	type GitHubPushPayload,
 	type GitHubWebhookEvent,
+	gitAuthEnv,
 	isCommentOnPullRequest,
 	isIssueCommentPayload,
 	isPullRequestReviewCommentPayload,
 	isPullRequestReviewPayload,
+	parseGitHubRepoUrl,
 	stripMention,
 } from "cyrus-github-event-transport";
 import type { GitLabWebhookEvent } from "cyrus-gitlab-event-transport";
@@ -228,7 +231,12 @@ export class EdgeWorker extends EventEmitter {
 	private issueTrackers: Map<string, IIssueTrackerService> = new Map(); // one issue tracker per Linear workspace (keyed by linearWorkspaceId)
 	private linearEventTransport: LinearEventTransport | null = null; // Single event transport for webhook delivery
 	private gitHubEventTransport: GitHubEventTransport | null = null; // GitHub event transport for forwarded GitHub webhooks
-	private gitHubAppTokenProvider: GitHubAppTokenProvider | null = null; // Self-hosted GitHub App token minting
+	/**
+	 * Per-repository GitHub App installation resolution (PON-143). Replaces a
+	 * single process-wide installation id, which could only be correct for one
+	 * tenant and silently served every other one with the wrong credential.
+	 */
+	private gitHubInstallationResolver: GitHubInstallationResolver | null = null;
 	private gitLabEventTransport: GitLabEventTransport | null = null; // GitLab event transport for forwarded GitLab webhooks
 	private slackEventTransport: SlackEventTransport | null = null;
 	private chatSessionHandler: ChatSessionHandler<SlackWebhookEvent> | null =
@@ -410,9 +418,16 @@ export class EdgeWorker extends EventEmitter {
 		// Initialize global session registry (centralized session storage)
 		this.globalSessionRegistry = new GlobalSessionRegistry();
 		this.laneManager = new LaneManager(
+			// Serialized by default (PON-139). A newly authorised workspace is
+			// serialized before anyone thinks about it, rather than after — an
+			// unserialized lane has no cost regulator, so opt-out is the safe
+			// default and opt-in was not. Explicit `false` still disables it.
 			(workspaceId) =>
-				this.config.linearWorkspaces?.[workspaceId]?.laneSerialization === true,
+				this.config.linearWorkspaces?.[workspaceId]?.laneSerialization !==
+				false,
 			this.logger,
+			(workspaceId) =>
+				this.config.linearWorkspaces?.[workspaceId]?.laneConcurrency ?? 1,
 		);
 
 		// Initialize repository router with dependencies
@@ -455,7 +470,37 @@ export class EdgeWorker extends EventEmitter {
 			},
 		};
 		this.repositoryRouter = new RepositoryRouter(repositoryRouterDeps);
-		this.gitService = new GitService({ cyrusHome: this.cyrusHome });
+		this.gitService = new GitService({
+			cyrusHome: this.cyrusHome,
+			// PON-143: authenticate git against the repository's OWN installation,
+			// resolved from its origin remote. Routing decides where work happens;
+			// GitHub decides which credential covers a repository, and those two
+			// facts must not be able to disagree.
+			resolveGitAuth: async (repositoryPath, operation) => {
+				if (!this.gitHubInstallationResolver) return null;
+				let originUrl: string;
+				try {
+					originUrl = execSync("git remote get-url origin", {
+						cwd: repositoryPath,
+						stdio: "pipe",
+						encoding: "utf-8",
+					}).trim();
+				} catch {
+					return null; // no remote: nothing to authenticate against
+				}
+				const ref = parseGitHubRepoUrl(originUrl);
+				if (!ref) return null; // not GitHub: leave it alone
+
+				const token = await this.gitHubInstallationResolver.mintTokenForRef(
+					ref,
+					operation,
+				);
+				return {
+					env: gitAuthEnv(token),
+					args: [...GIT_NO_AMBIENT_CREDENTIALS],
+				};
+			},
+		});
 
 		// Initialize AskUserQuestion handler for elicitation via Linear select signal
 		this.askUserQuestionHandler = new AskUserQuestionHandler({
@@ -1182,18 +1227,31 @@ export class EdgeWorker extends EventEmitter {
 		// Register the /github-webhook endpoint
 		this.gitHubEventTransport.register();
 
-		// Initialize GitHub App token provider for self-hosted users
+		// PON-143: per-repository installation resolution for self-hosted users.
+		//
+		// GITHUB_APP_INSTALLATION_ID is deliberately no longer read. One process
+		// -wide installation id can only be correct for one tenant; for any other
+		// repository it did not fail, it minted a valid token scoped to the wrong
+		// org. The installation is now asked of GitHub per repository, so routing
+		// and credential coverage cannot disagree.
 		const appId = process.env.GITHUB_APP_ID;
-		const installationId = process.env.GITHUB_APP_INSTALLATION_ID;
-		if (appId && installationId) {
-			const pemPath = join(this.cyrusHome, "github-app.pem");
-			this.gitHubAppTokenProvider = new GitHubAppTokenProvider({
+		const pemPath = join(this.cyrusHome, "github-app.pem");
+		if (appId && existsSync(pemPath)) {
+			this.gitHubInstallationResolver = new GitHubInstallationResolver({
 				appId,
-				installationId,
 				privateKeyPath: pemPath,
 			});
 			this.logger.info(
-				"GitHub App token provider initialized (self-hosted mode)",
+				"GitHub App installation resolver initialized (per-repository, self-hosted mode)",
+			);
+			if (process.env.GITHUB_APP_INSTALLATION_ID) {
+				this.logger.warn(
+					"GITHUB_APP_INSTALLATION_ID is set but no longer used — installations are resolved per repository (PON-143). It can be removed from the env file.",
+				);
+			}
+		} else if (appId && !existsSync(pemPath)) {
+			this.logger.warn(
+				`GITHUB_APP_ID is set but ${pemPath} is missing — GitHub App auth is off. Private clones, pushes and PRs will fail.`,
 			);
 		}
 
@@ -1415,17 +1473,92 @@ export class EdgeWorker extends EventEmitter {
 		event: GitHubWebhookEvent,
 	): Promise<string | undefined> {
 		if (event.installationToken) return event.installationToken;
-		if (this.gitHubAppTokenProvider) {
-			try {
-				return await this.gitHubAppTokenProvider.getToken();
-			} catch (error) {
+
+		// PON-143: resolve the installation from the repository this event is
+		// about, not from a process-wide id. A single configured installation
+		// could only ever be right for one tenant — for any other repository it
+		// did not fail, it minted a perfectly valid token scoped to the wrong
+		// org, and nothing errored because nothing was wrong with the token.
+		if (this.gitHubInstallationResolver) {
+			const ref = {
+				owner: extractRepoOwner(event),
+				repo: extractRepoName(event),
+			};
+
+			// The resolution key comes from the payload, so it is only safe when
+			// the payload's origin is verified. Signature mode checks the source
+			// IP against GitHub's ranges and then HMAC-SHA256 over the body; proxy
+			// mode checks only a bearer token. A forged event naming another
+			// tenant's repository must never be able to direct a token mint, so
+			// event-derived resolution is gated on the stronger mode.
+			if (!this.gitHubWebhooksAreSignatureVerified()) {
 				this.logger.warn(
-					"Failed to mint GitHub App installation token, falling back to GITHUB_TOKEN",
+					`Refusing to resolve a GitHub App installation from an unverified payload for ${ref.owner}/${ref.repo}. ` +
+						"Set GITHUB_WEBHOOK_SECRET to enable signature verification (PON-143).",
+				);
+				return this.legacyGitHubToken("unverified-payload", ref);
+			}
+
+			try {
+				return await this.gitHubInstallationResolver.mintTokenForRef(
+					ref,
+					"github-api",
+				);
+			} catch (error) {
+				// Deliberately not falling back to another installation. A repo we
+				// cannot resolve is a repo we have no business acting on: serving
+				// it with a different tenant's credential is worse than refusing.
+				this.logger.error(
+					`No usable GitHub App installation for ${ref.owner}/${ref.repo}`,
 					error instanceof Error ? error : new Error(String(error)),
 				);
+				return undefined;
 			}
 		}
-		return process.env.GITHUB_TOKEN;
+
+		return this.legacyGitHubToken("no-app-configured");
+	}
+
+	/**
+	 * The legacy `GITHUB_TOKEN` tier, which survives only for installs that
+	 * predate the GitHub App.
+	 *
+	 * It is a **single ambient credential with no tenant scope** — exactly the
+	 * shape this workstream exists to remove. It is tolerable today only because
+	 * it is unset on both boxes and the App is created with webhooks off, so
+	 * nothing reaches it. That is a property of the current deployment, not of
+	 * the code, and properties of deployments change quietly.
+	 *
+	 * So it announces itself whenever it is actually used. A PAT must never
+	 * silently serve a tenant request: if this line appears in a journal, some
+	 * request was served with a credential that has no idea which client it
+	 * belongs to, and that is worth finding out about from a log rather than
+	 * from a bill.
+	 */
+	private legacyGitHubToken(
+		reason: string,
+		ref?: { owner: string; repo: string },
+	): string | undefined {
+		const token = process.env.GITHUB_TOKEN;
+		if (token) {
+			this.logger.warn(
+				`Falling back to the ambient GITHUB_TOKEN (reason: ${reason}` +
+					`${ref ? `, repo: ${ref.owner}/${ref.repo}` : ""}). ` +
+					"This credential has no tenant scope — configure a GitHub App installation covering this repository (PON-143).",
+			);
+		}
+		return token;
+	}
+
+	/**
+	 * Whether inbound GitHub webhooks are origin-verified (PON-143).
+	 *
+	 * Signature mode = source-IP allowlist plus HMAC over the body. Proxy mode
+	 * only checks a bearer token, which is not a statement about who *sent* the
+	 * payload, so its contents must not steer credential selection.
+	 */
+	private gitHubWebhooksAreSignatureVerified(): boolean {
+		return Boolean(process.env.GITHUB_WEBHOOK_SECRET);
 	}
 
 	private async handleGitHubWebhook(
@@ -4887,10 +5020,11 @@ ${taskSection}`;
 		if (!this.laneManager.isEnabled(workspaceId)) return true;
 		if (this.globalSessionRegistry.getParentSessionId(sessionId)) return true;
 
-		const holder = this.laneManager.activeSessionOf(workspaceId);
-		if (holder === sessionId) return true;
-		if (holder === null) {
-			this.laneManager.acquire(workspaceId, sessionId);
+		// Ask the lane whether it can admit, rather than comparing against a
+		// single holder: with a limit above 1 an occupied lane may still have a
+		// free slot, and `acquire` is the only thing that knows the limit.
+		if (this.laneManager.isActive(sessionId)) return true;
+		if (this.laneManager.acquire(workspaceId, sessionId)) {
 			return true;
 		}
 
@@ -5041,16 +5175,24 @@ ${taskSection}`;
 
 		// Free the lane and drop anything queued for this tenant; no further
 		// work should start on its behalf.
-		const activeSessionId = this.laneManager.activeSessionOf(workspaceId);
-		if (activeSessionId) {
-			this.laneManager.release(workspaceId, activeSessionId);
+		// Release every holder, not just the first: a lane may admit N (PON-139),
+		// and a deactivated tenant must not leave slots held by sessions that
+		// will never end.
+		for (const heldSessionId of this.laneManager.activeSessionsOf(
+			workspaceId,
+		)) {
+			this.laneManager.release(workspaceId, heldSessionId);
 		}
 		this.clearLaneGrace(workspaceId);
 		let dequeued = 0;
-		while (this.laneManager.takeNext(workspaceId)) {
-			const held = this.laneManager.activeSessionOf(workspaceId);
-			if (held) this.laneManager.release(workspaceId, held);
+		// Release exactly the session takeNext just admitted. Releasing "whichever
+		// is active" would, with more than one holder, free the wrong session and
+		// leave the drained one holding a slot.
+		let drained = this.laneManager.takeNext(workspaceId);
+		while (drained) {
+			this.laneManager.release(workspaceId, drained.sessionId);
 			dequeued++;
+			drained = this.laneManager.takeNext(workspaceId);
 		}
 
 		this.issueTrackers.delete(workspaceId);
@@ -5332,9 +5474,14 @@ ${taskSection}`;
 	 */
 	private armLaneBootRecovery(): void {
 		for (const workspaceId of this.laneManager.workspaceIds()) {
-			const activeSessionId = this.laneManager.activeSessionOf(workspaceId);
-			if (activeSessionId) {
-				if (this.agentSessionManager.getSession(activeSessionId)?.agentRunner) {
+			const activeSessionIds = this.laneManager.activeSessionsOf(workspaceId);
+			const activeSessionId = activeSessionIds.find(
+				(held) => !this.agentSessionManager.getSession(held)?.agentRunner,
+			);
+			if (activeSessionIds.length > 0) {
+				// Arm the window if ANY holder came back without a runner; expiry
+				// sweeps all of them.
+				if (!activeSessionId) {
 					continue;
 				}
 				const deadline = new Date(
@@ -5347,14 +5494,12 @@ ${taskSection}`;
 					deadline,
 				});
 				const timer = setTimeout(() => {
-					void this.fireLaneGrace(workspaceId, activeSessionId).catch(
-						(error) => {
-							this.logger.error(
-								`Lane grace handling failed for workspace ${workspaceId}:`,
-								error,
-							);
-						},
-					);
+					void this.fireLaneGrace(workspaceId).catch((error) => {
+						this.logger.error(
+							`Lane grace handling failed for workspace ${workspaceId}:`,
+							error,
+						);
+					});
 				}, EdgeWorker.LANE_BOOT_GRACE_MS);
 				timer.unref?.();
 				this.laneGraceTimers.set(workspaceId, timer);
@@ -5369,25 +5514,43 @@ ${taskSection}`;
 		}
 	}
 
-	/** Grace window expired: release the stalled session's lane and move on. */
-	private async fireLaneGrace(
-		workspaceId: string,
-		sessionId: string,
-	): Promise<void> {
+	/**
+	 * Grace window expired: release every stalled holder and move on.
+	 *
+	 * Takes only the workspace. The session the timer was armed for is no longer
+	 * special — with a lane admitting N, any restored holder whose runner never
+	 * came back is stalled, and releasing one while leaving the others would
+	 * leak slots that nothing else ever frees.
+	 */
+	private async fireLaneGrace(workspaceId: string): Promise<void> {
 		this.laneGraceTimers.delete(workspaceId);
-		if (this.laneManager.activeSessionOf(workspaceId) !== sessionId) return;
-		if (
-			this.agentSessionManager.getSession(sessionId)?.agentRunner?.isRunning?.()
-		) {
+
+		// Sweep every holder without a live runner, not only the one the timer
+		// was armed for. A lane may admit N (PON-139); releasing a single session
+		// would leave the other restored-but-dead holders occupying slots
+		// permanently, which is the leak this grace window exists to prevent.
+		const stalled = this.laneManager
+			.activeSessionsOf(workspaceId)
+			.filter(
+				(held) =>
+					!this.agentSessionManager
+						.getSession(held)
+						?.agentRunner?.isRunning?.(),
+			);
+
+		if (stalled.length === 0) {
 			this.laneManager.setGraceDeadline(workspaceId, null);
 			return;
 		}
-		this.logger.event("lane_grace_released", { workspaceId, sessionId });
-		await this.activityPoster.postLaneGraceReleaseNotice(
-			sessionId,
-			workspaceId,
-		);
-		this.releaseLaneAndContinue(workspaceId, sessionId, "boot_grace_expired");
+
+		for (const held of stalled) {
+			this.logger.event("lane_grace_released", {
+				workspaceId,
+				sessionId: held,
+			});
+			await this.activityPoster.postLaneGraceReleaseNotice(held, workspaceId);
+			this.releaseLaneAndContinue(workspaceId, held, "boot_grace_expired");
+		}
 	}
 
 	private clearLaneGrace(workspaceId: string): void {

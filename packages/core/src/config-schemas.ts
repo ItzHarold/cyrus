@@ -271,6 +271,46 @@ export const LinearWorkspaceConfigSchema = z.object({
 	 */
 	laneSerialization: z.boolean().optional(),
 	/**
+	 * How many sessions this workspace may run at once when serialized
+	 * (PON-139). Default 1.
+	 *
+	 * Concurrency is the **cost regulator**; the Anthropic workspace spend cap
+	 * is the backstop. A cap stops a runaway only after the money is gone and
+	 * takes the lane down with it, whereas a concurrency limit shapes spend
+	 * continuously and degrades into a queue — which is what the offer already
+	 * sells: one active issue at a time, unlimited backlog, client orders the
+	 * queue. If the cap is ever what stops us, something upstream already went
+	 * wrong.
+	 */
+	laneConcurrency: z.number().int().min(1).optional(),
+	/**
+	 * Which Anthropic credential this workspace's sessions run on (PON-139).
+	 *
+	 * Three states, and the third is the point:
+	 *
+	 *   { mode: "apiKey", apiKey }  — a workspace-scoped Console key, so spend
+	 *                                 is attributable and capped per tenant.
+	 *   { mode: "subscription" }    — the box's CLAUDE_CODE_OAUTH_TOKEN.
+	 *   absent                      — REFUSE, naming the workspace.
+	 *
+	 * `subscription` is a **declared mode, never a fallback**. A workspace runs
+	 * on the subscription only because it was configured to. That is the whole
+	 * distinction: a missing credential must never quietly resolve to "use
+	 * whatever the box happens to have", because that is indistinguishable from
+	 * a correct configuration right up until the bill arrives against the wrong
+	 * tenant — or a personal rate limit takes down a paying client's session.
+	 */
+	anthropicAuth: z
+		.discriminatedUnion("mode", [
+			z.object({
+				mode: z.literal("apiKey"),
+				/** Workspace-scoped Console key. Never logged. */
+				apiKey: z.string().min(1),
+			}),
+			z.object({ mode: z.literal("subscription") }),
+		])
+		.optional(),
+	/**
 	 * The app's own user id *within this workspace* (`viewer { id }` queried
 	 * with this installation's token). Linear issues a distinct app-user id per
 	 * install, so this is how the agent recognizes its own activity in a given

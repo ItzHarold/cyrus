@@ -59,6 +59,13 @@ export function buildBaseSessionEnv(
 
 	// Forward auth credentials from the parent process — the SDK needs these
 	// for API calls. See: https://code.claude.com/docs/en/env-vars
+	//
+	// This is the legacy path: whatever the box was started with reaches every
+	// session identically. A session that declares its own workspace credential
+	// (PON-139) overrides all three of these via `additionalEnv`, which spreads
+	// later and can carry `undefined` to unset. Forwarding here is therefore
+	// safe — it is the default for sessions with no declaration, and it is fully
+	// replaced for sessions that have one.
 	for (const key of AUTH_ENV_KEYS) {
 		if (process.env[key]) {
 			env[key] = process.env[key];

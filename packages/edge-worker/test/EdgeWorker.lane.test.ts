@@ -143,7 +143,9 @@ describe("EdgeWorker - Serialized lanes (PON-112)", () => {
 			repositories: [mockRepository],
 			linearWorkspaces: {
 				[LANE_WS]: { linearToken: "test-token", laneSerialization: true },
-				[FREE_WS]: { linearToken: "test-token-2" },
+				// Explicit opt-out: serialization is ON by default (PON-139), so a
+				// workspace only runs concurrently when it says so.
+				[FREE_WS]: { linearToken: "test-token-2", laneSerialization: false },
 			},
 		};
 
@@ -432,7 +434,7 @@ describe("EdgeWorker - Serialized lanes (PON-112)", () => {
 		expect((edgeWorker as any).laneManager.activeSessionOf(LANE_WS)).toBe(null);
 	});
 
-	it("workspaces without laneSerialization run sessions concurrently", async () => {
+	it("a workspace that explicitly opts out runs sessions concurrently", async () => {
 		const spies = mockStartFlow();
 		const repos = [mockRepository];
 
@@ -447,6 +449,31 @@ describe("EdgeWorker - Serialized lanes (PON-112)", () => {
 
 		expect(spies.init).toHaveBeenCalledTimes(2);
 		expect(spies.queuedAck).not.toHaveBeenCalled();
+	});
+
+	it("a workspace that says nothing is serialized by default (PON-139)", async () => {
+		// The default flipped: opt-out, not opt-in. An unserialized lane has no
+		// cost regulator, so a newly authorised workspace must be serialized
+		// before anyone thinks about it rather than after someone notices a bill.
+		const spies = mockStartFlow();
+		const repos = [mockRepository];
+		const SILENT_WS = "workspace-that-declares-nothing";
+		(edgeWorker as any).config.linearWorkspaces[SILENT_WS] = {
+			linearToken: "test-token-3",
+		};
+
+		await (edgeWorker as any).handleWebhook(
+			createdWebhook("s1", SILENT_WS),
+			repos,
+		);
+		await (edgeWorker as any).handleWebhook(
+			createdWebhook("s2", SILENT_WS),
+			repos,
+		);
+
+		// Second one queues rather than starting.
+		expect(spies.init).toHaveBeenCalledTimes(1);
+		expect(spies.queuedAck).toHaveBeenCalled();
 	});
 
 	it("child sessions bypass the lane (no parent-child deadlock)", async () => {
@@ -505,6 +532,61 @@ describe("EdgeWorker - Serialized lanes (PON-112)", () => {
 		expect(spies.graceNotice).toHaveBeenCalledWith("s1", LANE_WS);
 		expect(lm.activeSessionOf(LANE_WS)).toBe("s2");
 		expect(spies.init).toHaveBeenCalledTimes(1);
+	});
+
+	it("boot recovery arms grace when ANY restored holder lacks a runner (PON-139)", async () => {
+		// armLaneBootRecovery inspected activeSessionOf(), i.e. one holder. With a
+		// lane admitting more than one, a live first holder made it `continue` and
+		// no grace window was ever armed — so a dead second holder kept its slot
+		// for the lifetime of the process, with nothing to release it.
+		const lm = (edgeWorker as any).laneManager;
+		lm.restore({
+			[LANE_WS]: {
+				activeSessionId: null,
+				activeSessionIds: ["alive", "dead"],
+				queue: [],
+			},
+		});
+
+		// "alive" came back with a runner; "dead" did not.
+		sessionsWithRunners.clear();
+		sessionsWithRunners.add("alive");
+
+		vi.useFakeTimers();
+		(edgeWorker as any).armLaneBootRecovery();
+		vi.useRealTimers();
+
+		expect(lm.graceDeadlineOf(LANE_WS)).toBeDefined();
+	});
+
+	it("grace expiry sweeps every stalled holder, leaving live ones alone (PON-139)", async () => {
+		// fireLaneGrace released only the session its timer was armed for. Other
+		// restored-but-dead holders kept their slots permanently — the exact leak
+		// the grace window exists to prevent, reintroduced one level up.
+		const spies = mockStartFlow();
+		const lm = (edgeWorker as any).laneManager;
+		lm.restore({
+			[LANE_WS]: {
+				activeSessionId: null,
+				activeSessionIds: ["alive", "dead1", "dead2"],
+				queue: [],
+			},
+		});
+
+		sessionsWithRunners.clear();
+		sessionsWithRunners.add("alive");
+
+		vi.useFakeTimers();
+		(edgeWorker as any).armLaneBootRecovery();
+		await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+		vi.useRealTimers();
+		await settle();
+
+		// Both dead holders released; the live one still holds its slot.
+		expect(lm.activeSessionsOf(LANE_WS)).toEqual(["alive"]);
+		expect(spies.graceNotice).toHaveBeenCalledWith("dead1", LANE_WS);
+		expect(spies.graceNotice).toHaveBeenCalledWith("dead2", LANE_WS);
+		expect(spies.graceNotice).not.toHaveBeenCalledWith("alive", LANE_WS);
 	});
 
 	it("a resume prompt on a delivered session while the lane is busy is enqueued, not started", async () => {
