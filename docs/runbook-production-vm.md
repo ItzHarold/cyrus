@@ -7,11 +7,12 @@ the terminal — Hetzner console, DNS, Linear, GitHub — the step is marked
 
 Target: **serving a real webhook in under 30 minutes.**
 
-> **Provenance.** Every step below was executed on a fresh Hetzner box on
-> 2026-08-19 and corrected against what actually happened. Nineteen defects were
-> found that way. Where a step says "expect", that is observed output, not
-> expected output — except where explicitly marked unverified. See
-> [What is proven, and what is not](#what-is-proven-and-what-is-not).
+> **Provenance.** Every step below has been executed on a fresh Hetzner box
+> twice — a throwaway on 2026-08-19 and the real production box on 2026-08-20 —
+> and corrected against what actually happened both times. Twenty-three defects
+> were found that way, none of them by reading. Where a step says "expect", that
+> is observed output, not expected output, except where explicitly marked
+> unverified. See [What is proven, and what is not](#what-is-proven-and-what-is-not).
 
 ---
 
@@ -1253,23 +1254,38 @@ Settings → Applications.
 
 ## What is proven, and what is not
 
-Status as of **2026-08-19**, from a full walkthrough on a fresh Hetzner box
-(`agent-rebuild.pontedigital.co`, CX33, Ubuntu 26.04).
+Two full walkthroughs, both step by step with every command run and its output
+checked:
+
+- **2026-08-19** — `agent-rebuild.pontedigital.co`, a throwaway. Found and fixed
+  19 defects in this document.
+- **2026-08-20** — `agent.pontedigital.co`, the real production box. Found 4
+  more, plus a product defect that blocked it outright (PON-145: onboarding
+  never authenticated its clone).
 
 | PON-126 acceptance criterion | Status | Evidence |
 |---|---|---|
-| Onboarding without an outage | **PASS** | `self-auth-linear` reported "Service is running — authorising without stopping it"; approved in 36s; `NRestarts=0` across the flow |
-| Webhook served end to end | **PASS** | Delegated issue → `AgentSessionEvent (created)` → worktree → `session_started` → `session_completed`, messageCount 10 |
+| Onboarding without an outage | **PASS** | Production, 2026-08-20: `self-auth-linear` reported "Service is running — authorising without stopping it"; service stayed up throughout |
+| Webhook served end to end | **PASS** | Production, 2026-08-20, on a **private** repository: ack in 613ms → `Repositories selected: [frontdoor-sandbox] (label-based routing)` → worktree → `session_completed`, `subtype success` |
 | Snapshot restore tested | **PASS** | Snapshot restored to a new server; service came up unattended, `{"status":"idle"}`; stopped and deleted |
 | Health check alerts fire on simulated outage | **PASS** | Service stopped; alerts received from **both** healthchecks.io and UptimeRobot; recovered on restart |
-| **Throwaway VM rebuilt from the runbook in under 30 min** | **NOT VERIFIED** | The 2026-08-19 run *found and fixed* 19 defects in this document. It measured debugging, not following. **A clean timed run against this corrected version has not happened.** |
-| Production sessions run from the new box | **NOT DONE** | The box built on 2026-08-19 was `agent-rebuild`, a throwaway. `agent.pontedigital.co` does not exist yet |
+| Production sessions run from the new box | **PASS** | Production box built, authorised, private repository added, session run end to end |
+| **Rebuilt from the runbook in under 30 min** | **NOT VERIFIED** | *Both* runs measured debugging rather than following — 19 defects the first time, 4 more the second. **No clean timed pass over the corrected document has happened.** |
 | Dev box holds no tenant tokens | **NOT DONE** | Step 21 has not been run |
 
-**Do not read the four passes as a passing rebuild.** They were obtained while
-correcting the document, on a box built with help. The criterion that matters —
-that this document alone, followed by someone with no memory of writing it, gets
-to a served webhook in 30 minutes — is untested.
+**Do not read the passes as a passing rebuild.** Every one of them was obtained
+while correcting the document, on a box built with help. The criterion that
+matters — that this document *alone*, followed by someone with no memory of
+writing it, reaches a served webhook in 30 minutes — remains untested, and a run
+that fixes the document as it goes can never test it. That takes a third box and
+a clean pass. Whether that is worth a VM is a decision to take deliberately; the
+honest entry until then is NOT VERIFIED.
+
+**A green PON-126 is not "ready for a client."** The production box can clone a
+private repository but the agent cannot yet push a branch or open a pull
+request — every git path except the onboarding clone is still unauthenticated
+(PON-143). The first client delegation that must produce a PR is blocked there,
+not here.
 
 ### Defects this document has already absorbed
 
