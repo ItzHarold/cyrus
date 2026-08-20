@@ -532,11 +532,13 @@ the path echoed back. Slowest step — 2 to 4 minutes.
 If `ls` does not find that file, the build did not finish regardless of what it
 printed. Do not continue.
 
-> **Version requirement.** Step 15 authorises a workspace *without stopping the
-> service*, which needs the OAuth relay introduced in `a08dbea4`. If `main` does
-> not yet contain it, check out the branch that does before building — otherwise
-> `self-auth-linear` falls back to binding the port itself and step 15 behaves
-> nothing like this document says. Step 14 verifies which you have.
+> **A plain clone of `main` is correct.** Step 15 authorises a workspace
+> *without stopping the service*, which needs the OAuth relay introduced in
+> `a08dbea4` and merged to `main` in `885bb8ae` on 2026-08-20. No branch
+> checkout, no version pin. If you are ever building from a checkout that
+> predates that merge, `self-auth-linear` falls back to binding the port itself
+> and step 15 behaves nothing like this document says — step 14 tells you which
+> you have, from the `OAuth relay registered` line.
 
 > **The ignored-build-scripts warning is expected.** `pnpm install` prints:
 >
