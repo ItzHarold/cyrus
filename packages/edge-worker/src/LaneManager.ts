@@ -24,7 +24,15 @@ export interface LaneQueueEntry {
 }
 
 interface LaneState {
-	activeSessionId: string | null;
+	/**
+	 * Sessions currently holding the lane. At most `limit` (default 1).
+	 *
+	 * A set rather than a single slot because a lane admits N concurrent
+	 * sessions (PON-139). At N=1 this behaves exactly as the single slot did;
+	 * the guarantee generalizes from "one active session" to "at most N", and
+	 * every path that released the slot now releases one of N.
+	 */
+	activeSessionIds: Set<string>;
 	queue: LaneQueueEntry[];
 }
 
@@ -71,13 +79,17 @@ export class LaneManager {
 	/** Boot-grace deadlines per workspace (ISO), for admin visibility only. */
 	private graceDeadlines = new Map<string, string>();
 	private isWorkspaceEnabled: (workspaceId: string) => boolean;
+	/** How many sessions a workspace may run at once. Default 1. */
+	private workspaceConcurrency: (workspaceId: string) => number;
 	private logger: ILogger;
 
 	constructor(
 		isWorkspaceEnabled: (workspaceId: string) => boolean,
 		logger?: ILogger,
+		workspaceConcurrency: (workspaceId: string) => number = () => 1,
 	) {
 		this.isWorkspaceEnabled = isWorkspaceEnabled;
+		this.workspaceConcurrency = workspaceConcurrency;
 		this.logger = logger ?? createLogger({ component: "LaneManager" });
 	}
 
@@ -88,7 +100,7 @@ export class LaneManager {
 	private lane(workspaceId: string): LaneState {
 		let lane = this.lanes.get(workspaceId);
 		if (!lane) {
-			lane = { activeSessionId: null, queue: [] };
+			lane = { activeSessionIds: new Set(), queue: [] };
 			this.lanes.set(workspaceId, lane);
 		}
 		return lane;
@@ -101,9 +113,11 @@ export class LaneManager {
 	 */
 	acquire(workspaceId: string, sessionId: string): boolean {
 		const lane = this.lane(workspaceId);
-		if (lane.activeSessionId === sessionId) return true;
-		if (lane.activeSessionId !== null) return false;
-		lane.activeSessionId = sessionId;
+		if (lane.activeSessionIds.has(sessionId)) return true;
+		if (lane.activeSessionIds.size >= this.concurrencyOf(workspaceId)) {
+			return false;
+		}
+		lane.activeSessionIds.add(sessionId);
 		this.sessionWorkspace.set(sessionId, workspaceId);
 		return true;
 	}
@@ -135,10 +149,13 @@ export class LaneManager {
 	 */
 	release(workspaceId: string, sessionId: string): boolean {
 		const lane = this.lanes.get(workspaceId);
-		if (!lane || lane.activeSessionId !== sessionId) return false;
-		lane.activeSessionId = null;
+		if (!lane?.activeSessionIds.delete(sessionId)) return false;
 		this.sessionWorkspace.delete(sessionId);
-		this.graceDeadlines.delete(workspaceId);
+		// Only clear the boot grace once nothing holds the lane: with N > 1 a
+		// single session ending does not mean the lane is idle.
+		if (lane.activeSessionIds.size === 0) {
+			this.graceDeadlines.delete(workspaceId);
+		}
 		return true;
 	}
 
@@ -148,10 +165,15 @@ export class LaneManager {
 	 */
 	takeNext(workspaceId: string): LaneQueueEntry | null {
 		const lane = this.lanes.get(workspaceId);
-		if (!lane || lane.activeSessionId !== null) return null;
+		if (
+			!lane ||
+			lane.activeSessionIds.size >= this.concurrencyOf(workspaceId)
+		) {
+			return null;
+		}
 		const next = lane.queue.shift();
 		if (!next) return null;
-		lane.activeSessionId = next.sessionId;
+		lane.activeSessionIds.add(next.sessionId);
 		this.sessionWorkspace.set(next.sessionId, workspaceId);
 		return next;
 	}
@@ -206,7 +228,9 @@ export class LaneManager {
 	isActive(sessionId: string): boolean {
 		const workspaceId = this.sessionWorkspace.get(sessionId);
 		if (!workspaceId) return false;
-		return this.lanes.get(workspaceId)?.activeSessionId === sessionId;
+		return (
+			this.lanes.get(workspaceId)?.activeSessionIds.has(sessionId) ?? false
+		);
 	}
 
 	isQueued(sessionId: string): boolean {
@@ -235,7 +259,19 @@ export class LaneManager {
 	}
 
 	activeSessionOf(workspaceId: string): string | null {
-		return this.lanes.get(workspaceId)?.activeSessionId ?? null;
+		const [first] = this.lanes.get(workspaceId)?.activeSessionIds ?? [];
+		return first ?? null;
+	}
+
+	/** Every session currently holding this lane. */
+	activeSessionsOf(workspaceId: string): string[] {
+		return Array.from(this.lanes.get(workspaceId)?.activeSessionIds ?? []);
+	}
+
+	/** How many sessions this workspace may run at once. Default 1. */
+	private concurrencyOf(workspaceId: string): number {
+		const n = this.workspaceConcurrency(workspaceId);
+		return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1;
 	}
 
 	queueLength(workspaceId: string): number {
@@ -259,9 +295,15 @@ export class LaneManager {
 	serialize(): Record<string, SerializedLaneState> {
 		const out: Record<string, SerializedLaneState> = {};
 		for (const [workspaceId, lane] of this.lanes) {
-			if (lane.activeSessionId === null && lane.queue.length === 0) continue;
+			if (lane.activeSessionIds.size === 0 && lane.queue.length === 0) continue;
+			const active = Array.from(lane.activeSessionIds);
 			out[workspaceId] = {
-				activeSessionId: lane.activeSessionId,
+				// Written for rollback safety: a build that predates per-lane
+				// concurrency reads only this field, and at the default N=1 it is
+				// a complete description. Null when more than one session is held,
+				// which such a build could not have represented anyway.
+				activeSessionId: active.length === 1 ? (active[0] as string) : null,
+				activeSessionIds: active,
 				queue: lane.queue.map((e) => ({ ...e })),
 			};
 		}
@@ -270,8 +312,13 @@ export class LaneManager {
 
 	restore(state: Record<string, SerializedLaneState>): void {
 		for (const [workspaceId, laneState] of Object.entries(state)) {
+			// Prefer the multi-holder field; fall back to the legacy single slot so
+			// state written before per-lane concurrency restores intact.
+			const restoredActive =
+				laneState.activeSessionIds ??
+				(laneState.activeSessionId ? [laneState.activeSessionId] : []);
 			const lane: LaneState = {
-				activeSessionId: laneState.activeSessionId ?? null,
+				activeSessionIds: new Set(restoredActive),
 				queue: (laneState.queue ?? []).map((e) => ({
 					...e,
 					contextPrompts: e.contextPrompts ?? [],
@@ -279,14 +326,18 @@ export class LaneManager {
 				})),
 			};
 			this.lanes.set(workspaceId, lane);
-			if (lane.activeSessionId) {
-				this.sessionWorkspace.set(lane.activeSessionId, workspaceId);
+			for (const sessionId of lane.activeSessionIds) {
+				this.sessionWorkspace.set(sessionId, workspaceId);
 			}
 			for (const entry of lane.queue) {
 				this.sessionWorkspace.set(entry.sessionId, workspaceId);
 			}
 			this.logger.info(
-				`Restored lane for workspace ${workspaceId}: active=${lane.activeSessionId ?? "none"}, queued=${lane.queue.length}`,
+				`Restored lane for workspace ${workspaceId}: active=${
+					lane.activeSessionIds.size > 0
+						? Array.from(lane.activeSessionIds).join(",")
+						: "none"
+				}, queued=${lane.queue.length}`,
 			);
 		}
 	}
@@ -296,7 +347,12 @@ export class LaneManager {
 		string,
 		{
 			enabled: boolean;
+			/** First holder, kept for existing admin consumers. */
 			activeSessionId: string | null;
+			/** All current holders (PON-139). */
+			activeSessionIds: string[];
+			/** This workspace's concurrency limit. */
+			concurrency: number;
 			graceDeadline?: string;
 			queue: Array<{
 				position: number;
@@ -311,7 +367,9 @@ export class LaneManager {
 		for (const [workspaceId, lane] of this.lanes) {
 			out[workspaceId] = {
 				enabled: this.isWorkspaceEnabled(workspaceId),
-				activeSessionId: lane.activeSessionId,
+				activeSessionId: this.activeSessionOf(workspaceId),
+				activeSessionIds: Array.from(lane.activeSessionIds),
+				concurrency: this.concurrencyOf(workspaceId),
 				...(this.graceDeadlines.has(workspaceId) && {
 					graceDeadline: this.graceDeadlines.get(workspaceId),
 				}),

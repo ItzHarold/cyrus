@@ -37,6 +37,22 @@ export interface CreateGitWorktreeOptions {
 }
 
 export interface GitServiceOptions {
+	/**
+	 * Supplies one-shot GitHub App credentials for a repository's git
+	 * operations (PON-143), resolved from that repository's own `origin` remote.
+	 *
+	 * Returns null when the repository is not on GitHub or no App is configured,
+	 * so non-GitHub remotes and legacy installs keep working unchanged. The
+	 * credential is passed through the returned `env` for a single git process
+	 * and is never written to `.git/config`, the saved remote, or argv.
+	 */
+	resolveGitAuth?: (
+		repositoryPath: string,
+		operation: "fetch" | "ls-remote",
+	) => Promise<{
+		env: Record<string, string | undefined>;
+		args: string[];
+	} | null>;
 	cyrusHome?: string;
 }
 
@@ -215,11 +231,43 @@ export class GitService {
 	private logger: ILogger;
 	private worktreeIncludeService: WorktreeIncludeService;
 	private cyrusHome: string;
+	/**
+	 * Supplies one-shot GitHub App credentials for a repository's git
+	 * operations (PON-143). Returns null when the repository is not on GitHub or
+	 * no App is configured, in which case git runs as before.
+	 */
+	private resolveGitAuth?: (
+		repositoryPath: string,
+		operation: "fetch" | "ls-remote",
+	) => Promise<{
+		env: Record<string, string | undefined>;
+		args: string[];
+	} | null>;
 
 	constructor(options?: GitServiceOptions, logger?: ILogger) {
 		this.logger = logger ?? createLogger({ component: "GitService" });
 		this.worktreeIncludeService = new WorktreeIncludeService(this.logger);
 		this.cyrusHome = options?.cyrusHome ?? join(homedir(), ".cyrus");
+		this.resolveGitAuth = options?.resolveGitAuth;
+	}
+
+	/**
+	 * Whether this repository has an `origin` remote at all.
+	 *
+	 * The distinction matters for the fetch below: a repository with no remote
+	 * legitimately cannot fetch and must keep working, while a repository that
+	 * *has* one and cannot reach it is a failure worth stopping for.
+	 */
+	private hasOriginRemote(repositoryPath: string): boolean {
+		try {
+			execSync("git remote get-url origin", {
+				cwd: repositoryPath,
+				stdio: "pipe",
+			});
+			return true;
+		} catch {
+			return false;
+		}
 	}
 
 	/**
@@ -832,20 +880,48 @@ export class GitService {
 				}
 			}
 
-			// Fetch latest changes from remote
+			// Fetch latest changes from remote.
+			//
+			// A failure here used to be caught and tolerated: the session carried
+			// on against whatever was last cloned, reported success, and left a
+			// single `warn` nobody reads. Observed in production on 2026-08-20 —
+			// a session ran to `subtype success` having never reached the remote.
+			// It was harmless only because the clone was minutes old; on an older
+			// checkout the same line means the agent produced a diff against code
+			// that had moved on, with nothing saying so.
+			//
+			// Silent-stale is the same disease as silent-wrong-tenant: the system
+			// keeps working, produces a plausible result, and the result is wrong.
 			this.logger.debug("Fetching latest changes from remote...");
-			let hasRemote = true;
-			try {
-				execSync("git fetch origin", {
-					cwd: repository.repositoryPath,
-					stdio: "pipe",
-				});
-			} catch (e) {
-				this.logger.warn(
-					"Warning: git fetch failed, proceeding with local branch:",
-					(e as Error).message,
+			const hasRemote = this.hasOriginRemote(repository.repositoryPath);
+			if (hasRemote) {
+				const auth = this.resolveGitAuth
+					? await this.resolveGitAuth(repository.repositoryPath, "fetch")
+					: null;
+				try {
+					execSync(
+						`git ${(auth?.args ?? []).join(" ")} fetch origin`.replace(
+							/\s+/g,
+							" ",
+						),
+						{
+							cwd: repository.repositoryPath,
+							stdio: "pipe",
+							env: auth ? { ...process.env, ...auth.env } : process.env,
+						},
+					);
+				} catch (e) {
+					throw new Error(
+						`git fetch failed for ${repository.name} (${repository.repositoryPath}): ${(e as Error).message}\n` +
+							"   Refusing to continue against a possibly stale local branch. A session " +
+							"that silently builds on stale code produces a diff against code that no " +
+							"longer exists, and nothing in the logs says so.",
+					);
+				}
+			} else {
+				this.logger.debug(
+					"No origin remote configured; using the local branch.",
 				);
-				hasRemote = false;
 			}
 
 			// Create the worktree - use determined base branch

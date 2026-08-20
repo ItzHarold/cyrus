@@ -1,5 +1,6 @@
 export type {
 	GitHubAppGitAuthConfig,
+	GitHubOperation,
 	GitHubRepoRef,
 } from "./GitHubAppGitAuth.js";
 export {
@@ -25,6 +26,8 @@ export type {
 } from "./GitHubCommentService.js";
 export { GitHubCommentService } from "./GitHubCommentService.js";
 export { GitHubEventTransport } from "./GitHubEventTransport.js";
+export type { GitHubInstallationResolverOptions } from "./GitHubInstallationResolver.js";
+export { GitHubInstallationResolver } from "./GitHubInstallationResolver.js";
 export { GitHubMessageTranslator } from "./GitHubMessageTranslator.js";
 export {
 	extractCommentAuthor,

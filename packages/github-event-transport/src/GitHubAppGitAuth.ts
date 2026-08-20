@@ -60,14 +60,29 @@ export function parseGitHubRepoUrl(url: string): GitHubRepoRef | null {
 	return null;
 }
 
+/**
+ * What a token was being minted for. Named in the error so a failure says both
+ * *which repository* could not be resolved and *what we were trying to do* —
+ * "no installation for acme/widget" sends you to GitHub settings, while "…while
+ * pushing" also tells you which session just stopped and why.
+ */
+export type GitHubOperation =
+	| "clone"
+	| "fetch"
+	| "ls-remote"
+	| "push"
+	| "github-api";
+
 /** Raised when the App is configured but no installation covers the repo. */
 export class NoInstallationForRepositoryError extends Error {
 	readonly owner: string;
 	readonly repo: string;
+	readonly operation: GitHubOperation | undefined;
 
-	constructor(owner: string, repo: string) {
+	constructor(owner: string, repo: string, operation?: GitHubOperation) {
+		const during = operation ? ` while attempting: ${operation}` : "";
 		super(
-			`No GitHub App installation covers ${owner}/${repo}.\n` +
+			`No GitHub App installation covers ${owner}/${repo}${during}.\n` +
 				`   Install the app into the ${owner} organization and grant it access\n` +
 				`   to ${repo}, then retry. Refusing rather than minting a token for a\n` +
 				`   different installation — that would use another tenant's credential.`,
@@ -75,6 +90,7 @@ export class NoInstallationForRepositoryError extends Error {
 		this.name = "NoInstallationForRepositoryError";
 		this.owner = owner;
 		this.repo = repo;
+		this.operation = operation;
 	}
 }
 
@@ -122,7 +138,7 @@ export async function findInstallationForRepo(
 }
 
 /** Mint an installation access token for a specific installation. */
-async function mintInstallationToken(
+export async function mintInstallationToken(
 	config: GitHubAppGitAuthConfig,
 	installationId: string,
 ): Promise<string> {
@@ -163,10 +179,11 @@ async function mintInstallationToken(
 export async function mintTokenForRepo(
 	config: GitHubAppGitAuthConfig,
 	ref: GitHubRepoRef,
+	operation?: GitHubOperation,
 ): Promise<string> {
 	const installationId = await findInstallationForRepo(config, ref);
 	if (!installationId) {
-		throw new NoInstallationForRepositoryError(ref.owner, ref.repo);
+		throw new NoInstallationForRepositoryError(ref.owner, ref.repo, operation);
 	}
 	return mintInstallationToken(config, installationId);
 }

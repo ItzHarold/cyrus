@@ -76,7 +76,18 @@ export interface SerializableEdgeWorkerState {
  * start path when the entry reaches the front of the queue.
  */
 export interface SerializedLaneState {
+	/**
+	 * Legacy single-holder field. Still written when a lane holds at most one
+	 * session, so that rolling back to a build which only understands this
+	 * field does not strand a live lane. Read as a fallback when
+	 * `activeSessionIds` is absent.
+	 */
 	activeSessionId: string | null;
+	/**
+	 * Sessions currently holding the lane (PON-139). A lane admits up to N,
+	 * default 1. Absent in state written before per-lane concurrency existed.
+	 */
+	activeSessionIds?: string[];
 	queue: Array<{
 		sessionId: string;
 		issueId?: string;
