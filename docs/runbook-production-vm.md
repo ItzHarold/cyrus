@@ -1077,9 +1077,9 @@ Two things that are informative rather than alarming:
   label matches. Pick the repo. Note that the answer is currently resolved by
   fallback rather than by your selection (PON-142) — correct with one repo,
   wrong with two.
-- **`cyrus-setup.sh` may fail** with `cp: cannot stat
-  '/Users/cyrusops/code/cyrus/CLAUDE.local.md'`. That is a hardcoded upstream
-  developer path; the session continues (PON-141).
+- **`cyrus-setup.sh` may fail** on an older checkout, with `cp: cannot stat`
+  against an upstream developer's macOS path. Harmless — the session continues,
+  and the line is removed on current `main` (PON-141).
 
 Cancel the throwaway issue when done.
 

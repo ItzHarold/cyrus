@@ -25,4 +25,9 @@ else
     echo "CYRUS_SERVER_PORT=$CYRUS_SERVER_PORT" >> .env
 fi
 
-cp /Users/cyrusops/code/cyrus/CLAUDE.local.md CLAUDE.local.md
+# NOTE: a `cp /Users/<upstream-dev>/code/cyrus/CLAUDE.local.md` line lived here.
+# It was an upstream developer's macOS home directory and has never existed on
+# any box of ours, so it failed on every worktree of this repo and was ignored.
+# Carrying gitignored files into a worktree is what `.worktreeinclude` is for —
+# see PON-141, which adds it rather than guessing at an absolute path to a file
+# that lives outside the worktree.
