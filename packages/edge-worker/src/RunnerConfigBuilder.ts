@@ -139,6 +139,8 @@ export interface IssueRunnerConfigInput {
 	logger: ILogger;
 	onMessage: (message: SDKMessage) => void | Promise<void>;
 	onError: (error: Error) => void;
+	/** Fires when the runner's stream actually ends (PON-154 lane release). */
+	onComplete?: () => void;
 	/** Factory to create AskUserQuestion callback (Claude runner only) */
 	createAskUserQuestionCallback?: (
 		sessionId: string,
@@ -448,6 +450,7 @@ export class RunnerConfigBuilder {
 				}),
 			onMessage: input.onMessage,
 			onError: input.onError,
+			onComplete: input.onComplete,
 		};
 
 		// Cursor runner uses @cursor/sdk. Pass through API key, the same

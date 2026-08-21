@@ -117,6 +117,7 @@ describe("EdgeWorker - per-workspace auth wiring (PON-139)", () => {
 	let edgeWorker: EdgeWorker;
 	let builtConfig: Record<string, unknown>;
 	let runnerType: string;
+	let capturedBuilderInput: Record<string, unknown> | undefined;
 
 	const session = {
 		issueContext: {
@@ -141,12 +142,16 @@ describe("EdgeWorker - per-workspace auth wiring (PON-139)", () => {
 		// builder's internals — the builder returns a bare config we can inspect.
 		builtConfig = {};
 		runnerType = "claude";
+		capturedBuilderInput = undefined;
 		(edgeWorker as never as Record<string, unknown>).skillsPluginResolver = {
 			resolve: vi.fn().mockResolvedValue([]),
 			discoverSkillNames: vi.fn().mockResolvedValue([]),
 		};
 		(edgeWorker as never as Record<string, unknown>).runnerConfigBuilder = {
-			buildIssueConfig: vi.fn(() => ({ config: builtConfig, runnerType })),
+			buildIssueConfig: vi.fn((input: Record<string, unknown>) => {
+				capturedBuilderInput = input;
+				return { config: builtConfig, runnerType };
+			}),
 		};
 	});
 
@@ -262,6 +267,35 @@ describe("EdgeWorker - per-workspace auth wiring (PON-139)", () => {
 		const { config } = await build(repo(UNDECLARED_WS));
 
 		expect(config.additionalEnv).toBeUndefined();
+	});
+
+	describe("lane release timing wiring (PON-154)", () => {
+		it("wires onComplete so the lane releases when the stream ACTUALLY ends", async () => {
+			// The other half of the PON-154 fix: completeSession defers its release
+			// while the runner streams, so something must fire at true stream end.
+			// This asserts the built runner config carries that trigger and that
+			// invoking it releases this session's lane slot.
+			const lm = (
+				edgeWorker as never as {
+					laneManager: {
+						acquire: (ws: string, s: string) => boolean;
+						isActive: (s: string) => boolean;
+					};
+				}
+			).laneManager;
+			lm.acquire(SUB_WS, "session-1");
+			expect(lm.isActive("session-1")).toBe(true);
+
+			await build(repo(SUB_WS));
+
+			const onComplete = capturedBuilderInput?.onComplete as
+				| (() => void)
+				| undefined;
+			expect(typeof onComplete).toBe("function");
+
+			onComplete?.();
+			expect(lm.isActive("session-1")).toBe(false);
+		});
 	});
 
 	describe("warm-session attach guard (proof, not assumption)", () => {
