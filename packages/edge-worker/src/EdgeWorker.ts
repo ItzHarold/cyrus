@@ -57,6 +57,7 @@ import {
 	CLIRPCServer,
 	createLogger,
 	DEFAULT_PROXY_URL,
+	describeWorkspaceAuth,
 	getAttachmentsDir,
 	getPinnedModel,
 	isAgentSessionCreatedWebhook,
@@ -79,6 +80,7 @@ import {
 	PersistenceManager,
 	requireLinearWorkspaceId,
 	resolvePath,
+	resolveWorkspaceAuthEnv,
 	WebhookIpValidator,
 } from "cyrus-core";
 import { CursorRunner } from "cyrus-cursor-runner";
@@ -227,7 +229,18 @@ export class EdgeWorker extends EventEmitter {
 	private activitySinks: Map<string, IActivitySink> = new Map(); // Maps Linear workspace ID to activity sink (one per workspace, mirrors issueTrackers)
 	private sessionRepositories: Map<string, string> = new Map(); // Maps session ID to repository ID
 	private lastStopTimeBySession: Map<string, number> = new Map(); // Maps session ID to timestamp of last stop signal (for double-stop detection)
-	private warmInstances: Map<string, WarmQuery> = new Map(); // Pre-warmed Claude sessions keyed by agentSessionId
+	/**
+	 * Pre-warmed Claude sessions keyed by agentSessionId (PON-139: each entry
+	 * records the auth env its subprocess was spawned with, so attach can prove
+	 * the credential still matches instead of assuming it).
+	 */
+	private warmInstances: Map<
+		string,
+		{
+			query: WarmQuery;
+			authEnv: Record<string, string | undefined> | undefined;
+		}
+	> = new Map();
 	private issueTrackers: Map<string, IIssueTrackerService> = new Map(); // one issue tracker per Linear workspace (keyed by linearWorkspaceId)
 	private linearEventTransport: LinearEventTransport | null = null; // Single event transport for webhook delivery
 	private gitHubEventTransport: GitHubEventTransport | null = null; // GitHub event transport for forwarded GitHub webhooks
@@ -1374,8 +1387,36 @@ export class EdgeWorker extends EventEmitter {
 				runnerConfigBuilder: this.runnerConfigBuilder,
 				createRunner: (config) => {
 					const runnerType = this.runnerSelectionService.getDefaultRunner();
+					// PON-139: chat sessions run in the default Linear workspace and
+					// must carry its declared credential like any other session. The
+					// first wiring missed this path entirely — buildChatConfig never
+					// touches auth, and this callback constructed the runner on the
+					// box's ambient env. Confirmed by the adversarial review: a
+					// keyed default workspace's chat session would have billed the
+					// wrong tenant, and an undeclared one would never have been
+					// refused. Throws on undeclared, which fails the chat session
+					// loudly instead of borrowing.
+					let chatAuthEnv: Record<string, string | undefined> | undefined;
+					if (runnerType === "claude") {
+						chatAuthEnv = this.resolveAuthEnvForWorkspace(
+							chatRepositoryProvider.getDefaultLinearWorkspaceId(),
+							this.logger,
+						);
+					}
 					return this.createRunnerForType(runnerType, {
 						...config,
+						...(chatAuthEnv
+							? {
+									additionalEnv: {
+										...(
+											config as {
+												additionalEnv?: Record<string, string | undefined>;
+											}
+										).additionalEnv,
+										...chatAuthEnv,
+									},
+								}
+							: {}),
 						model: this.getDefaultModelForRunner(runnerType),
 						fallbackModel:
 							runnerType === "claude"
@@ -7768,6 +7809,40 @@ ${input.userComment}
 	 * falling back to "claude".
 	 */
 	/**
+	 * Resolve the Anthropic auth env for a workspace (PON-139) — the ONE place
+	 * every Claude-subprocess construction site goes through. Three sites use
+	 * it: issue sessions (buildAgentRunnerConfig), warm spawn
+	 * (warmupRecentSessions), and chat sessions (the createRunner callback).
+	 * A fourth construction site that skips this helper is a credential bug by
+	 * definition — the adversarial review of the first wiring attempt found
+	 * exactly two such sites, which is why this is a helper and not a block.
+	 *
+	 * Throws on an undeclared workspace. Returns undefined when there is no
+	 * workspace at all (non-Linear platforms): no tenant to attribute to, so
+	 * the legacy ambient tier applies, logged.
+	 */
+	private resolveAuthEnvForWorkspace(
+		workspaceId: string | undefined,
+		log: { info: (m: string) => void; warn: (m: string) => void },
+	): Record<string, string | undefined> | undefined {
+		if (!workspaceId) {
+			log.warn(
+				"Session has no Linear workspace; running on the box's ambient Anthropic credential (legacy tier)",
+			);
+			return undefined;
+		}
+		const wsConfig = this.config.linearWorkspaces?.[workspaceId];
+		const env = resolveWorkspaceAuthEnv(wsConfig?.anthropicAuth, workspaceId, {
+			workspaceName: wsConfig?.linearWorkspaceName,
+			subscriptionToken: process.env.CLAUDE_CODE_OAUTH_TOKEN,
+		});
+		log.info(
+			`[event:workspace_auth_resolved] {"workspaceId":"${workspaceId}","auth":"${describeWorkspaceAuth(wsConfig?.anthropicAuth)}"}`,
+		);
+		return env;
+	}
+
+	/**
 	 * Build agent runner configuration with common settings.
 	 * Delegates to RunnerConfigBuilder for shared config assembly.
 	 * @returns Object containing the runner config and runner type to use
@@ -7857,16 +7932,114 @@ ${input.userComment}
 			requireLinearWorkspaceId,
 		});
 
+		// PON-139: per-workspace Anthropic credentials. This is the runtime
+		// wiring of the three-state declaration — the resolver and schema shipped
+		// in PR #15, but nothing called them at session start, so every session
+		// still ran on whatever the box environment held and the documented
+		// refusal did not actually exist. Found in the pre-verification audit,
+		// not by a failing session.
+		//
+		// Claude sessions only: the declaration is Anthropic-specific, and other
+		// runners neither read these variables nor should have them.
+		let sessionAuthEnv: Record<string, string | undefined> | undefined;
+		if (result.runnerType === "claude") {
+			// Throws on an undeclared workspace, naming it — the session start
+			// fails loudly rather than borrowing the box credential. Reachable
+			// only on a box whose config was never gated through
+			// `cyrus check-workspace-auth`.
+			try {
+				sessionAuthEnv = this.resolveAuthEnvForWorkspace(
+					linearWorkspaceId ?? repository.linearWorkspaceId,
+					log,
+				);
+			} catch (authError) {
+				// The refusal must be VISIBLE where the tenant is looking. Every
+				// entry path — created, prompted, parked wake, PR-review — has
+				// already posted an acknowledgment by the time it reaches here,
+				// and every one of them swallows this throw after journaling it.
+				// Without this post, the client sees "Got it. Looking at this
+				// now." followed by permanent silence; with lane serialization
+				// on, the release backstop then replays the next queued session
+				// into the same refusal, silently draining their whole backlog.
+				// The drain still happens — every queued session of a
+				// misconfigured workspace WILL refuse — but each one now says so
+				// on the issue, which turns a vanished queue into a list of
+				// explicit, re-delegatable failures. (Found by the adversarial
+				// review of this wiring, not by a client.)
+				await this.agentSessionManager
+					.createErrorActivity(
+						sessionId,
+						"This workspace is not configured to run sessions on this " +
+							"host — its Anthropic credential is missing or " +
+							"unavailable. The operator has been notified via the " +
+							"service journal; once configuration is fixed, " +
+							"re-delegate this issue.",
+					)
+					.catch((postError) => {
+						log.warn(
+							`Failed to post workspace-auth refusal activity: ${(postError as Error).message}`,
+						);
+					});
+				throw authError;
+			}
+			if (sessionAuthEnv) {
+				// Spread last so the declared credential replaces — and, where the
+				// declaration requires it, unsets — anything inherited from the
+				// box. No SDK precedence rule is load-bearing after this line.
+				const claudeConfig = result.config as AgentRunnerConfig & {
+					additionalEnv?: Record<string, string | undefined>;
+				};
+				claudeConfig.additionalEnv = {
+					...claudeConfig.additionalEnv,
+					...sessionAuthEnv,
+				};
+			}
+		}
+
 		// Attach pre-warmed session if available (only for Claude runner).
 		// Skipped entirely when warm sessions are not enabled.
+		//
+		// PON-139: a warm subprocess's environment is fixed at spawn — attaching
+		// one cannot change what credential it holds, because the child process
+		// already exists (ClaudeRunner bypasses queryOptions entirely on warm
+		// attach). So attach is allowed only on PROOF: the auth env resolved for
+		// this session must deep-equal the auth env the warm subprocess was
+		// spawned with. The first version of this guard assumed subscription
+		// mode "matches the ambient credential by construction" — the
+		// adversarial review refuted that: nothing enforces the subscription
+		// token being the box's only ambient auth var, and on a box carrying a
+		// second one the warm child holds both, with SDK precedence deciding
+		// which tenant gets billed. Comparison replaces assumption. A mismatch
+		// costs a cold start; billing one tenant's work to another is not a
+		// latency trade.
 		if (result.runnerType === "claude" && this.isWarmSessionsEnabled()) {
-			const warmSession = this.warmInstances.get(sessionId);
-			if (warmSession) {
-				this.warmInstances.delete(sessionId);
-				(
-					result.config as AgentRunnerConfig & { warmSession?: WarmQuery }
-				).warmSession = warmSession;
-				log.debug("Attaching pre-warmed session to runner config");
+			const warmEntry = this.warmInstances.get(sessionId);
+			if (warmEntry) {
+				const authMatches =
+					JSON.stringify(warmEntry.authEnv ?? null) ===
+					JSON.stringify(sessionAuthEnv ?? null);
+				if (authMatches) {
+					this.warmInstances.delete(sessionId);
+					(
+						result.config as AgentRunnerConfig & { warmSession?: WarmQuery }
+					).warmSession = warmEntry.query;
+					log.debug("Attaching pre-warmed session to runner config");
+				} else {
+					// Close and remove it. There is no pool sweep — a refused entry
+					// left behind is a live subprocess holding the wrong credential
+					// set in a tenant worktree, forever. Never attach it, never
+					// keep it.
+					this.warmInstances.delete(sessionId);
+					try {
+						warmEntry.query.close();
+					} catch {
+						// Best-effort: a subprocess that will not close is a zombie
+						// either way; the journal line below is the trail.
+					}
+					log.warn(
+						"[event:warm_attach_refused] pre-warmed session's auth env does not match this session's resolved auth; closed the warm subprocess and cold-starting",
+					);
+				}
 			}
 		}
 
@@ -8171,6 +8344,24 @@ ${input.userComment}
 					const allowedTools = this.buildAllowedTools(repo);
 					const disallowedTools = this.buildDisallowedTools(repo);
 
+					// PON-139: the warm subprocess's env is fixed forever at this
+					// spawn, so the workspace credential must be resolved HERE, not
+					// at attach. An undeclared workspace is skipped, not warmed —
+					// warming it would spawn a child on the ambient credential and
+					// dangle it as an attach hazard.
+					let warmAuthEnv: Record<string, string | undefined> | undefined;
+					try {
+						warmAuthEnv = this.resolveAuthEnvForWorkspace(
+							linearWorkspaceId,
+							this.logger,
+						);
+					} catch (authError) {
+						this.logger.warn(
+							`Skipping pre-warm for session ${session.id}: ${(authError as Error).message.split("\n")[0]}`,
+						);
+						return; // map callback, not a loop body
+					}
+
 					const warm = await startup({
 						options: {
 							resume: session.claudeSessionId,
@@ -8182,11 +8373,16 @@ ${input.userComment}
 							settingSources: ["user", "project", "local"],
 							// CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is intentionally not set here;
 							// see CYPACK-1108 and ClaudeRunner.start() for context.
-							env: buildBaseSessionEnv(),
+							// Declared credential spread last: replaces and, where the
+							// declaration requires it, unsets the forwarded auth vars.
+							env: { ...buildBaseSessionEnv(), ...warmAuthEnv },
 						},
 					});
 
-					this.warmInstances.set(session.id, warm);
+					this.warmInstances.set(session.id, {
+						query: warm,
+						authEnv: warmAuthEnv,
+					});
 					this.logger.info(
 						`Pre-warmed session ${session.id} (${session.issueContext?.issueIdentifier ?? "unknown"})`,
 					);
