@@ -644,9 +644,17 @@ export class RepositoryRouter {
 			return;
 		}
 
-		// Create repository options
+		// Create repository options (PON-142).
+		//
+		// The value is the repository NAME, deliberately. It used to be the
+		// GitHub/GitLab URL, and the URL Linear echoed back did not string-match
+		// the URL in config (".git" suffix, case), so every click missed the
+		// lookup and the router silently used the first repository — the
+		// operator's answer was collected and then discarded. The name is both
+		// what a human should see in the selector and exactly what the matcher
+		// resolves, so a click answers by construction.
 		const options = workspaceRepos.map((repo) => ({
-			value: repo.githubUrl || repo.gitlabUrl || repo.name,
+			value: repo.name,
 		}));
 
 		// Post elicitation activity
@@ -729,32 +737,54 @@ export class RepositoryRouter {
 		// Remove from pending map
 		this.pendingSelections.delete(agentSessionId);
 
-		// Find selected repository by GitHub/GitLab URL or name
-		const selectedRepo = pendingData.workspaceRepos.find(
-			(repo) =>
-				repo.githubUrl === selectedRepositoryName ||
-				repo.gitlabUrl === selectedRepositoryName ||
-				repo.name === selectedRepositoryName,
-		);
+		// Resolve the answer (PON-142). Three tiers, most exact first:
+		//   1. name  — what the options now carry, so a click matches here
+		//   2. id    — future-proof, and unambiguous if ever used as a value
+		//   3. URL, normalized — kept for one reason: a selection posted by a
+		//      build that predates this fix replies with a URL, and a deploy in
+		//      between must not strand that in-flight answer. Normalized because
+		//      the mismatch that caused this whole defect was ".git" and case.
+		const answer = selectedRepositoryName.trim();
+		const normalizeUrl = (u: string | undefined): string | null =>
+			u
+				? u
+						.trim()
+						.toLowerCase()
+						.replace(/\.git$/, "")
+						.replace(/\/+$/, "")
+				: null;
+		const answerAsUrl = normalizeUrl(answer);
+		const selectedRepo =
+			pendingData.workspaceRepos.find((repo) => repo.name === answer) ??
+			pendingData.workspaceRepos.find((repo) => repo.id === answer) ??
+			pendingData.workspaceRepos.find(
+				(repo) =>
+					normalizeUrl(repo.githubUrl) === answerAsUrl ||
+					normalizeUrl(repo.gitlabUrl) === answerAsUrl,
+			);
 
-		// Fallback to first repository if not found
-		const repository = selectedRepo || pendingData.workspaceRepos[0];
-		if (!repository) {
+		if (selectedRepo) {
+			this.logger.info(`User selected repository: ${selectedRepo.name}`);
+			return selectedRepo;
+		}
+
+		// Nothing matched: this is not a selection, it is an unrelated prompt
+		// (the user ignored the selector and said something else — a documented
+		// case, see packages/CLAUDE.md). The contract for that case is the
+		// first-configured repository, and it stays — but LOUDLY. The silent
+		// version of this line is how a correct answer was misrouted for as
+		// long as this code existed, and nobody could see it happening.
+		const fallback = pendingData.workspaceRepos[0];
+		if (!fallback) {
 			this.logger.error(
 				`No repository found for selection: ${selectedRepositoryName}`,
 			);
 			return null;
 		}
-
-		if (!selectedRepo) {
-			this.logger.info(
-				`Repository "${selectedRepositoryName}" not found, falling back to ${repository.name}`,
-			);
-		} else {
-			this.logger.info(`User selected repository: ${repository.name}`);
-		}
-
-		return repository;
+		this.logger.warn(
+			`[event:repo_selection_unresolved] reply ${JSON.stringify(answer.slice(0, 120))} matched no offered repository (offered: ${pendingData.workspaceRepos.map((r) => r.name).join(", ")}); treating as an unrelated prompt and using first-configured ${fallback.name}`,
+		);
+		return fallback;
 	}
 
 	/**
