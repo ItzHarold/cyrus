@@ -468,10 +468,31 @@ export class AgentSessionManager extends EventEmitter {
 		// Notify before the early returns below — every outcome (success,
 		// error, user stop) must count as "session ended" so a workspace lane
 		// holding this session releases (PON-112).
-		try {
-			this.onSessionEnded?.(sessionId);
-		} catch (error) {
-			log.error(`onSessionEnded callback failed:`, error);
+		//
+		// PON-154: but a result message is NOT the same thing as the session
+		// ending. When the Stop hook blocks a stop, the CLI emits a result and
+		// then CONTINUES in the same stream — observed live: a lane released on
+		// a mid-session result, and a second session was admitted concurrently
+		// into a concurrency-1 lane while the first ran another 81 seconds. So
+		// when the runner reports it is still running, the release is deferred
+		// to the runner's own completion (the onComplete wiring in EdgeWorker),
+		// which fires when the stream actually ends. The immediate release
+		// stays as the fallback for runners that are already stopped by the
+		// time their result is processed — release is idempotent, so the
+		// belt-and-braces double fire is a no-op, but a missing fire wedges a
+		// lane forever.
+		const stillRunning =
+			this.getSession(sessionId)?.agentRunner?.isRunning?.() === true;
+		if (stillRunning) {
+			log.info(
+				`[event:lane_release_deferred] result received while the runner is still streaming (Stop-hook continuation); the lane releases on actual completion`,
+			);
+		} else {
+			try {
+				this.onSessionEnded?.(sessionId);
+			} catch (error) {
+				log.error(`onSessionEnded callback failed:`, error);
+			}
 		}
 
 		if (wasStopRequested) {

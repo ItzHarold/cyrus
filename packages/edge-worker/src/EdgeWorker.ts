@@ -7927,6 +7927,16 @@ ${input.userComment}
 				// must not wedge the workspace lane.
 				this.handleLaneRunnerError(sessionId);
 			},
+			// PON-154: the lane releases when the runner's stream ACTUALLY ends,
+			// not on result messages. A Stop-hook-blocked stop emits a result and
+			// keeps streaming; releasing there admitted a second session into a
+			// concurrency-1 lane, observed live. completeSession defers its
+			// release whenever the runner still reports running; this is the
+			// event that then fires. Release is idempotent, so the fallback
+			// double-fire for already-stopped runners is a no-op.
+			onComplete: () => {
+				this.handleLaneSessionEnded(sessionId, "runner_complete");
+			},
 			createAskUserQuestionCallback: (sid, wid) =>
 				this.createAskUserQuestionCallback(sid, wid)!,
 			requireLinearWorkspaceId,
