@@ -45,7 +45,13 @@ describe("EdgeWorker - Native Attachments", () => {
 				},
 			],
 			linearWorkspaces: {
-				"test-workspace": { linearToken: "test-token" },
+				"test-workspace": {
+					linearToken: "test-token",
+					// PON-139: sessions refuse to start for an undeclared workspace, so
+					// every fixture that builds one must declare. apiKey rather than
+					// subscription: self-contained, no hidden env-var dependency.
+					anthropicAuth: { mode: "apiKey" as const, apiKey: "sk-ant-test" },
+				},
 			},
 		};
 

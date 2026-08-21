@@ -196,7 +196,13 @@ describe("EdgeWorker - Issue Update Session Delivery (CYPACK-954)", () => {
 			cyrusHome: TEST_CYRUS_HOME,
 			repositories: [mockRepository],
 			linearWorkspaces: {
-				"test-workspace": { linearToken: "test-token" },
+				"test-workspace": {
+					linearToken: "test-token",
+					// PON-139: sessions refuse to start for an undeclared workspace, so
+					// every fixture that builds one must declare. apiKey rather than
+					// subscription: self-contained, no hidden env-var dependency.
+					anthropicAuth: { mode: "apiKey" as const, apiKey: "sk-ant-test" },
+				},
 			},
 			handlers: {
 				createWorkspace: vi.fn().mockResolvedValue({
