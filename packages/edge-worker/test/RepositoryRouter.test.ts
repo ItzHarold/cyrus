@@ -1470,7 +1470,10 @@ describe("RepositoryRouter", () => {
 				// When: Eliciting user selection
 				await env.router.elicitUserRepositorySelection(webhook, [repo1, repo2]);
 
-				// Then: Should post elicitation with correct options
+				// Then: Options carry repository NAMES (PON-142). They used to carry
+				// URLs, which Linear echoed back in a form that never string-matched
+				// the config — so every click silently resolved by fallback. The
+				// name is both what a human should see and what the matcher keys on.
 				expect(env.mockLinearClient.createAgentActivity).toHaveBeenCalledWith({
 					agentSessionId: "session-123",
 					content: {
@@ -1479,10 +1482,7 @@ describe("RepositoryRouter", () => {
 					},
 					signal: AgentActivitySignal.Select,
 					signalMetadata: {
-						options: [
-							{ value: "https://github.com/org/frontend" },
-							{ value: "https://github.com/org/backend" },
-						],
+						options: [{ value: "Frontend Repo" }, { value: "Backend Repo" }],
 					},
 				});
 			});
@@ -1633,6 +1633,78 @@ describe("RepositoryRouter", () => {
 
 				// Then: Should fallback to first repository
 				expect(result).toBe(repo1);
+			});
+
+			it("resolves a legacy URL answer despite .git/case differences (PON-142)", async () => {
+				// A selection posted by a build predating PON-142 replies with a
+				// URL, and Linear's echo dropped the ".git" suffix — the exact
+				// production mismatch. A deploy in between must not strand it.
+				const repo1 = env
+					.repository("repo-1", "frontend")
+					.withGithubUrl("https://github.com/Org/Frontend.git")
+					.build();
+				const repo2 = env
+					.repository("repo-2", "backend")
+					.withGithubUrl("https://github.com/Org/Backend.git")
+					.build();
+
+				const webhook = env.webhook().withSession("session-1").build();
+				await env.router.elicitUserRepositorySelection(webhook, [repo1, repo2]);
+
+				const result = await env.router.selectRepositoryFromResponse(
+					"session-1",
+					"https://github.com/org/backend",
+				);
+
+				expect(result).toBe(repo2);
+			});
+
+			it("routes to the SECOND repository when the second is chosen (PON-142)", async () => {
+				// The two-repo regression this issue demands: the one-repo case
+				// passes either way because first-configured is always right, so
+				// only this shape can catch a resolve-by-fallback regression.
+				const repo1 = env.repository("repo-1", "alpha").build();
+				const repo2 = env.repository("repo-2", "beta").build();
+
+				const webhook = env.webhook().withSession("session-1").build();
+				await env.router.elicitUserRepositorySelection(webhook, [repo1, repo2]);
+
+				const result = await env.router.selectRepositoryFromResponse(
+					"session-1",
+					"beta",
+				);
+
+				expect(result).toBe(repo2);
+				expect(result).not.toBe(repo1);
+			});
+
+			it("an unresolved answer falls back LOUDLY, naming the value (PON-142)", async () => {
+				// The unrelated-prompt contract keeps first-configured as the
+				// destination — but never silently. The silent version of this
+				// path is how a correct answer was misrouted for as long as the
+				// code existed, with nothing in the logs to see.
+				const warnSpy = vi.fn();
+				(
+					env.router as unknown as {
+						logger: { warn: (...a: unknown[]) => void };
+					}
+				).logger.warn = warnSpy;
+
+				const repo1 = env.repository("repo-1", "alpha").build();
+				const repo2 = env.repository("repo-2", "beta").build();
+				const webhook = env.webhook().withSession("session-1").build();
+				await env.router.elicitUserRepositorySelection(webhook, [repo1, repo2]);
+
+				const result = await env.router.selectRepositoryFromResponse(
+					"session-1",
+					"also please fix the header while you are at it",
+				);
+
+				expect(result).toBe(repo1);
+				const warned = warnSpy.mock.calls.map((c) => String(c[0])).join(" ");
+				expect(warned).toContain("repo_selection_unresolved");
+				expect(warned).toContain("also please fix the header");
+				expect(warned).toContain("alpha");
 			});
 
 			it("should return null when no pending selection exists for session", async () => {
