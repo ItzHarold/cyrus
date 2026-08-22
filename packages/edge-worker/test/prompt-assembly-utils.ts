@@ -219,6 +219,11 @@ export class PromptScenario {
 		return this;
 	}
 
+	withLinearWorkspaceId(linearWorkspaceId: string) {
+		this.input.linearWorkspaceId = linearWorkspaceId;
+		return this;
+	}
+
 	withMentionTriggered(triggered: boolean) {
 		this.input.isMentionTriggered = triggered;
 		return this;

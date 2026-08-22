@@ -504,6 +504,9 @@
 					"laneSerialization": {
 						"type": "boolean"
 					},
+					"scopeConfirmGate": {
+						"type": "boolean"
+					},
 					"laneConcurrency": {
 						"type": "integer",
 						"minimum": 1,

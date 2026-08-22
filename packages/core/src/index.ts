@@ -261,6 +261,7 @@ export type {
 	SerializedCyrusAgentSession,
 	SerializedCyrusAgentSessionEntry,
 	SerializedLaneState,
+	SerializedScopeApprovalRecord,
 	V3SerializableEdgeWorkerState,
 } from "./PersistenceManager.js";
 export {
