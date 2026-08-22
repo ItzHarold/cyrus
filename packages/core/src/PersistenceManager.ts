@@ -67,6 +67,31 @@ export interface SerializableEdgeWorkerState {
 	// Per-workspace serialized-lane state (v4.2, PON-112). Absent for state
 	// saved by older versions and for installs with no lane-enabled workspace.
 	lanes?: Record<string, SerializedLaneState>;
+	// Per-issue scope approvals (v4.3, PON-150). Keyed by issue id — the
+	// approval belongs to the issue, not to any one session. Absent for state
+	// saved by older versions, which reads as "no gate pending" and is correct
+	// for issues already in flight when the gate shipped.
+	scopeApprovals?: Record<string, SerializedScopeApprovalRecord>;
+}
+
+/**
+ * One issue's scope-confirmation state (PON-150).
+ *
+ * `approvedAt` is the SLA clock start: the moment the client's structured
+ * "Approve scope" answer arrived. It is written exactly once.
+ */
+export interface SerializedScopeApprovalRecord {
+	state: "awaiting" | "approved" | "revised";
+	/** When the scope reading's confirmation elicitation was first posted */
+	proposedAt: string;
+	/** When the client approved — the SLA clock start. Written once. */
+	approvedAt?: string;
+	/** How many times the client asked for a revised reading */
+	revisions?: number;
+	/** Linear workspace the issue lives in (for the queryable list) */
+	workspaceId?: string;
+	/** Human-readable issue identifier (for the queryable list) */
+	issueIdentifier?: string;
 }
 
 /**

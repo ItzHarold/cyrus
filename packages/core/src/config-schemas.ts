@@ -271,6 +271,18 @@ export const LinearWorkspaceConfigSchema = z.object({
 	 */
 	laneSerialization: z.boolean().optional(),
 	/**
+	 * Scope-confirm gate (PON-150): on delegation, the session posts its
+	 * reading of the scope and asks for explicit structured confirmation
+	 * (Approve scope / Revise scope / Cancel) before implementing anything.
+	 * `approvedAt` on the persisted record is the SLA clock start.
+	 *
+	 * Default **on** — the gate exists for people who are paying us, so a
+	 * newly connected workspace is gated before anyone thinks about it.
+	 * Explicit `false` opts a workspace out (our own development workspace:
+	 * gating our own issues on our own confirmation is ceremony).
+	 */
+	scopeConfirmGate: z.boolean().optional(),
+	/**
 	 * How many sessions this workspace may run at once when serialized
 	 * (PON-139). Default 1.
 	 *

@@ -270,6 +270,15 @@ export class AskUserQuestionHandler {
 	}
 
 	/**
+	 * The question currently awaiting an answer for this session, if any.
+	 * The scope-confirm gate (PON-150) reads it to resolve the client's reply
+	 * against the options that were actually posted.
+	 */
+	getPendingQuestion(linearAgentSessionId: string): AskUserQuestion | null {
+		return this.pendingQuestions.get(linearAgentSessionId)?.question ?? null;
+	}
+
+	/**
 	 * Cancel a pending question.
 	 *
 	 * @param linearAgentSessionId - Linear agent session ID

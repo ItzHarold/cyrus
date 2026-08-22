@@ -161,6 +161,13 @@ import { EgressProxy } from "./EgressProxy.js";
 import { GitService } from "./GitService.js";
 import { GlobalSessionRegistry } from "./GlobalSessionRegistry.js";
 import { isQueueReorderIntent, LaneManager } from "./LaneManager.js";
+import { ScopeApprovalStore } from "./ScopeApprovalStore.js";
+import {
+	buildScopeConfirmGateBlock,
+	interpretCanonicalScopeAnswer,
+	interpretScopeConfirmAnswer,
+	isScopeConfirmQuestion,
+} from "./scope-confirm-gate.js";
 
 /** Options threaded through the created-session flow by the lane machinery. */
 interface LaneStartOptions {
@@ -281,6 +288,8 @@ export class EdgeWorker extends EventEmitter {
 	private activeWebhookCount = 0; // Track number of webhooks currently being processed
 	/** Handler for AskUserQuestion tool invocations via Linear select signal */
 	private askUserQuestionHandler: AskUserQuestionHandler;
+	/** Per-issue scope-approval records for the scope-confirm gate (PON-150) */
+	private scopeApprovals: ScopeApprovalStore = new ScopeApprovalStore();
 	/** User access control for whitelisting/blacklisting Linear users */
 	private userAccessControl: UserAccessControl;
 	private logger: ILogger;
@@ -1015,8 +1024,36 @@ export class EdgeWorker extends EventEmitter {
 			return reply.status(200).send({ lanes: this.laneManager.snapshot() });
 		});
 
+		// Scope-confirm gate list (PON-150). Same guard. This is the
+		// independent answer to "an unconfirmed issue sits forever and nobody
+		// notices" — it exists whether or not the operator cockpit does.
+		fastify.get("/admin/scope-approvals", async (request, reply) => {
+			const forwarded = [
+				"x-forwarded-for",
+				"x-forwarded-proto",
+				"x-forwarded-host",
+				"x-real-ip",
+				"forwarded",
+			].some((header) => request.headers[header] !== undefined);
+			const loopback = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(
+				request.ip,
+			);
+			if (!loopback || forwarded) {
+				return reply.status(404).send({ error: "Not found" });
+			}
+			const now = Date.now();
+			return reply.status(200).send({
+				pending: this.scopeApprovals.listPending().map((entry) => ({
+					...entry,
+					awaitingForMs: now - Date.parse(entry.proposedAt),
+				})),
+				all: this.scopeApprovals.serialize(),
+			});
+		});
+
 		this.logger.info("✅ Lanes endpoint registered (localhost only)");
 		this.logger.info("   Route: GET /admin/lanes");
+		this.logger.info("   Route: GET /admin/scope-approvals");
 	}
 
 	/**
@@ -3827,6 +3864,14 @@ ${taskSection}`;
 			this.agentSessionManager.removeSession(session.id);
 		}
 
+		// Scope-gate cleanup (PON-150): a terminal issue's gate record is done
+		// — remove it so the pending list stays honest. Unassignment does NOT
+		// clear it: the approval belongs to the issue, and a re-delegated
+		// issue whose scope was approved must not re-ask.
+		if (this.scopeApprovals.remove(issueId)) {
+			await this.persistScopeApprovals("issue_terminal");
+		}
+
 		// Lane cleanup (PON-112): release the lane if a stopped session held
 		// it, and drop queued sessions of this issue from their lane queue.
 		for (const session of sessions) {
@@ -5041,7 +5086,180 @@ ${taskSection}`;
 	private releaseLaneWhileAwaitingInput(sessionId: string): void {
 		const workspaceId = this.laneManager.workspaceOf(sessionId);
 		if (!workspaceId || !this.laneManager.isActive(sessionId)) return;
-		this.releaseLaneAndContinue(workspaceId, sessionId, "awaiting_user_input");
+		// PON-150: while the issue's scope is unapproved, a wait on a human is
+		// a wait on scope confirmation — recorded distinctly so the cockpit
+		// can tell "blocked on an answer" from "blocked on the gate".
+		const issueId = this.sessionIssueId(sessionId);
+		const reason =
+			issueId && this.scopeGatePendingForIssue(workspaceId, issueId)
+				? "awaiting_scope_confirm"
+				: "awaiting_user_input";
+		this.releaseLaneAndContinue(workspaceId, sessionId, reason);
+	}
+
+	// ========================================================================
+	// SCOPE-CONFIRM GATE (PON-150)
+	// ========================================================================
+
+	/**
+	 * Whether the scope-confirm gate is on for a workspace. Default on —
+	 * the gate exists for people who are paying us; explicit `false` opts a
+	 * workspace out (our own development workspace).
+	 */
+	private scopeGateEnabled(workspaceId: string | undefined): boolean {
+		if (!workspaceId) return false;
+		return (
+			this.config.linearWorkspaces?.[workspaceId]?.scopeConfirmGate !== false
+		);
+	}
+
+	/** Gate on for the workspace AND the issue's scope not yet approved. */
+	private scopeGatePendingForIssue(
+		workspaceId: string | undefined,
+		issueId: string | undefined,
+	): boolean {
+		if (!workspaceId || !issueId) return false;
+		return (
+			this.scopeGateEnabled(workspaceId) &&
+			!this.scopeApprovals.isApproved(issueId)
+		);
+	}
+
+	/** The Linear issue id a session is working, from the session manager. */
+	private sessionIssueId(sessionId: string): string | undefined {
+		const session = this.agentSessionManager.getSession(sessionId);
+		return session?.issueContext?.issueId ?? session?.issueId;
+	}
+
+	/**
+	 * Append the gate block when the gate is pending for the issue (PON-150).
+	 * Called from every path that hands a system prompt to a runner on a
+	 * gated issue: new delegated sessions, mention sessions on an issue whose
+	 * gate is already open, and — critically — session RESUME. A resumed
+	 * runner does not inherit the previous invocation's appended prompt, so
+	 * without re-injection a routine restart would silently remove the gate
+	 * (adversarial review finding, 2026-08-22). Child sessions are exempt:
+	 * they work inside a scope their parent already carries.
+	 */
+	private appendScopeGateIfPending(
+		systemPrompt: string | undefined,
+		workspaceId: string | undefined,
+		issueId: string | undefined,
+		sessionId: string | undefined,
+	): string | undefined {
+		if (!this.scopeGatePendingForIssue(workspaceId, issueId)) {
+			return systemPrompt;
+		}
+		if (
+			sessionId &&
+			this.globalSessionRegistry.getParentSessionId(sessionId) != null
+		) {
+			return systemPrompt;
+		}
+		return (systemPrompt ?? "") + buildScopeConfirmGateBlock();
+	}
+
+	/**
+	 * Persist scope-approval state, logging rather than throwing: gate
+	 * bookkeeping must never break the elicitation or answer flow it rides on.
+	 */
+	private async persistScopeApprovals(context: string): Promise<void> {
+		try {
+			await this.savePersistedStateStrict();
+		} catch (error) {
+			this.logger.error(
+				`Failed to persist scope approvals (${context}):`,
+				error,
+			);
+		}
+	}
+
+	/**
+	 * Interpret a structured reply to the gate's confirmation elicitation
+	 * (PON-150). Called from the prompted-webhook path BEFORE lane admission,
+	 * so `approvedAt` — the SLA clock start — is the answer's arrival, not
+	 * whenever a queued resume finally replays. Idempotent under replay:
+	 * `recordApproved` only reports the first transition.
+	 */
+	private async interpretScopeConfirmReply(
+		webhook: AgentSessionPromptedWebhook,
+	): Promise<void> {
+		const sessionId = webhook.agentSession.id;
+		const workspaceId = webhook.organizationId;
+		const issueId =
+			webhook.agentSession.issue?.id ?? this.sessionIssueId(sessionId);
+		if (!this.scopeGatePendingForIssue(workspaceId, issueId)) return;
+
+		const response = webhook.agentActivity?.content?.body ?? "";
+		if (!response.trim()) return;
+
+		// Resolve against the options that were actually posted (PON-142's
+		// lesson: by the answer, never by fallback). After a restart the
+		// pending question is gone from memory — fall back to the canonical
+		// labels alone, exact matches only, so a confirmed issue never
+		// re-asks just because the box restarted mid-elicitation.
+		const pendingQuestion =
+			this.askUserQuestionHandler.getPendingQuestion(sessionId);
+
+		// With no pending question AND no record, nothing was ever proposed —
+		// record nothing. This is what stops a late answer webhook, arriving
+		// after terminal-state cleanup removed the record, from resurrecting
+		// an approval for a Done issue that nothing will ever clean up again.
+		if (!pendingQuestion && !this.scopeApprovals.get(issueId as string)) {
+			return;
+		}
+		const verdict = pendingQuestion
+			? isScopeConfirmQuestion(pendingQuestion)
+				? interpretScopeConfirmAnswer(pendingQuestion, response)
+				: "other"
+			: interpretCanonicalScopeAnswer(response);
+
+		if (verdict === "approved") {
+			const identifier = webhook.agentSession.issue?.identifier;
+			if (
+				this.scopeApprovals.recordApproved(issueId as string, {
+					workspaceId,
+					issueIdentifier: identifier,
+				})
+			) {
+				const record = this.scopeApprovals.get(issueId as string);
+				this.logger.event("scope_confirmed", {
+					issueId,
+					issueIdentifier: identifier,
+					workspaceId,
+					approvedAt: record?.approvedAt,
+					proposedAt: record?.proposedAt,
+					revisions: record?.revisions ?? 0,
+				});
+				await this.persistScopeApprovals("scope_confirmed");
+			}
+		} else if (verdict === "revision") {
+			if (this.scopeApprovals.recordRevised(issueId as string)) {
+				this.logger.event("scope_revision_requested", {
+					issueId,
+					issueIdentifier: webhook.agentSession.issue?.identifier,
+					workspaceId,
+					revisions: this.scopeApprovals.get(issueId as string)?.revisions,
+				});
+				await this.persistScopeApprovals("scope_revision_requested");
+			}
+		} else if (verdict === "canceled") {
+			// The client closed the gate. Remove the record: the pending list
+			// stays honest (a cancelled gate is not "awaiting"), and a later
+			// re-delegation re-engages the gate fresh — the scope was never
+			// approved. Idempotent under replay: remove reports the first
+			// removal only.
+			if (this.scopeApprovals.remove(issueId as string)) {
+				this.logger.event("scope_confirm_canceled", {
+					issueId,
+					issueIdentifier: webhook.agentSession.issue?.identifier,
+					workspaceId,
+				});
+				await this.persistScopeApprovals("scope_confirm_canceled");
+			}
+		}
+		// "other" — free text or an ambiguity answer: nothing to record. The
+		// reply flows to the session as context.
 	}
 
 	/**
@@ -5463,6 +5681,13 @@ ${taskSection}`;
 		const workspaceId = this.laneManager.workspaceOf(sessionId);
 		if (!workspaceId) return;
 		const body = webhook.agentActivity?.content?.body ?? "";
+
+		// PON-150: a canonical gate reply can land while the session is
+		// lane-queued (its answer webhook already enqueued as a resume
+		// entry). This branch runs before branch 2.5, so interpret here too —
+		// otherwise "Approve scope" sent to a queued session records nothing
+		// until replay, and the SLA clock drifts to whenever the lane frees.
+		await this.interpretScopeConfirmReply(webhook);
 
 		if (isQueueReorderIntent(body)) {
 			const result = this.laneManager.moveToFront(sessionId);
@@ -6336,6 +6561,10 @@ ${taskSection}`;
 		// This handles responses to questions posed via the AskUserQuestion tool.
 		// The response is passed to the pending promise resolver.
 		if (this.askUserQuestionHandler.hasPendingQuestion(agentSessionId)) {
+			// PON-150: interpret the reply against the posted options BEFORE
+			// lane admission, so approvedAt — the SLA clock start — is the
+			// answer's arrival, not whenever a queued resume replays.
+			await this.interpretScopeConfirmReply(webhook);
 			// PON-113: the session gave up its lane when it asked, so another
 			// issue may be running now. Re-enter the lane before resuming;
 			// when it is busy this enqueues and replays on dequeue, so two
@@ -6348,6 +6577,13 @@ ${taskSection}`;
 			await this.handleAskUserQuestionResponse(webhook);
 			return;
 		}
+
+		// PON-150 restart fallback: a pending elicitation does not survive a
+		// restart in memory, so a canonical "Approve scope" / "Revise scope"
+		// reply arriving with no pending question is still recorded — a
+		// confirmed issue must never re-ask just because the box restarted
+		// mid-elicitation. The reply then flows on as a normal prompt.
+		await this.interpretScopeConfirmReply(webhook);
 
 		// Branch 3: Handle normal prompted activity (existing session continuation)
 		// Per CLAUDE.md: "an agentSession MUST exist and a repository MUST already
@@ -7596,6 +7832,28 @@ ${taskSection}`;
 		// 4. Append agent context — dynamic values for skills to reference
 		systemPrompt += this.buildAgentContextBlock();
 
+		// 4b. Scope-confirm gate (PON-150) — intrinsic, not enforced: an
+		// always-on prompt step for delegated sessions whose issue has no
+		// approved scope yet. An approved issue never re-asks; child sessions
+		// work inside a scope their parent already carries. Mentions stay
+		// conversational EXCEPT when a delegated flow on the issue is already
+		// mid-gate (an open record exists): a mention thread must not become
+		// the ungated side door that implements while the delegated session
+		// waits for approval, so it gets the block too — its side-conversation
+		// paragraph keeps it conversational while forbidding implementation.
+		const mentionMidGate =
+			input.isMentionTriggered === true &&
+			this.scopeApprovals.get(input.fullIssue.id) !== undefined;
+		if (!input.isMentionTriggered || mentionMidGate) {
+			systemPrompt =
+				this.appendScopeGateIfPending(
+					systemPrompt,
+					input.linearWorkspaceId,
+					input.fullIssue.id,
+					input.agentSession?.id,
+				) ?? systemPrompt;
+		}
+
 		// 5. Build issue context using appropriate builder
 		// Use label-based prompt ONLY if we have a label-based system prompt
 		const promptType = this.determinePromptType(
@@ -8069,6 +8327,32 @@ ${input.userComment}
 		organizationId: string,
 	): AgentRunnerConfig["onAskUserQuestion"] {
 		return async (input, _sessionId, signal) => {
+			// PON-150: an Approve-labelled option marks this elicitation as the
+			// gate's confirmation ask — record the proposal (first one stamps
+			// proposedAt) before the lane releases, so the events read
+			// scope_confirm_posted → lane_released.
+			const gateIssueId = this.sessionIssueId(linearAgentSessionId);
+			const gateQuestion = input.questions?.[0];
+			if (
+				gateQuestion &&
+				this.scopeGatePendingForIssue(organizationId, gateIssueId) &&
+				isScopeConfirmQuestion(gateQuestion)
+			) {
+				const session =
+					this.agentSessionManager.getSession(linearAgentSessionId);
+				this.scopeApprovals.recordProposed(gateIssueId as string, {
+					workspaceId: organizationId,
+					issueIdentifier: session?.issueContext?.issueIdentifier,
+				});
+				this.logger.event("scope_confirm_posted", {
+					issueId: gateIssueId,
+					issueIdentifier: session?.issueContext?.issueIdentifier,
+					workspaceId: organizationId,
+					proposedAt: this.scopeApprovals.get(gateIssueId as string)
+						?.proposedAt,
+				});
+				await this.persistScopeApprovals("scope_confirm_posted");
+			}
 			// PON-113: hand back the lane before blocking on the human. The
 			// answer re-enters through lane admission, so this widens nothing
 			// — it only stops an unanswered question from freezing the
@@ -8453,6 +8737,7 @@ ${input.userComment}
 			childToParentAgentSession,
 			issueRepositoryCache,
 			lanes: this.laneManager.serialize(),
+			scopeApprovals: this.scopeApprovals.serialize(),
 		};
 	}
 
@@ -8531,6 +8816,11 @@ ${input.userComment}
 		if (state.lanes) {
 			this.laneManager.restore(state.lanes);
 		}
+
+		// Restore per-issue scope approvals (PON-150). Absent in older state
+		// reads as "no gate pending" — correct for issues already in flight
+		// when the gate shipped.
+		this.scopeApprovals.restore(state.scopeApprovals);
 	}
 
 	/**
@@ -8796,7 +9086,16 @@ ${input.userComment}
 			labels,
 			repository,
 		);
-		const systemPrompt = systemPromptResult?.prompt;
+		// PON-150: re-arm the gate on resume. A resumed runner does not
+		// inherit the previous invocation's appended system prompt, so a
+		// restart mid-gate would otherwise remove the gate exactly when the
+		// client's answer arrives.
+		const systemPrompt = this.appendScopeGateIfPending(
+			systemPromptResult?.prompt,
+			resolvedWorkspaceId,
+			fullIssue.id,
+			sessionId,
+		);
 		const promptType = systemPromptResult?.type;
 
 		// Build allowed and disallowed tools lists
