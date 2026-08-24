@@ -378,11 +378,20 @@ export class CockpitMirror {
 				.map(([, m]) => m.mirrorIssueId),
 		);
 
+		const anyStateLabels = stateLabelIds.size > 0;
 		for (const node of data.team.issues.nodes) {
 			if (config.projectId && node.project?.id !== config.projectId) continue;
 			const match = MIRROR_TITLE_PATTERN.exec(node.title);
 			if (!match) continue;
-			if (!node.labels.nodes.some((label) => stateLabelIds.has(label.id))) {
+			// Recognition: a state label when labels exist; otherwise —
+			// labels being unavailable to app tokens — the mirror title
+			// shape inside the DEDICATED project is the marker. Without a
+			// project configured AND without labels, adoption stays off
+			// rather than guessing against a mixed team.
+			const labeled = node.labels.nodes.some((label) =>
+				stateLabelIds.has(label.id),
+			);
+			if (!labeled && !(anyStateLabels === false && config.projectId)) {
 				continue;
 			}
 			if (trackedMirrorIds.has(node.id)) continue; // map already knows it
@@ -504,8 +513,16 @@ export class CockpitMirror {
 				for (const label of data.team.labels.nodes) {
 					labelIds[label.name] = label.id;
 				}
+				// Label creation is BEST-EFFORT: agent-app tokens (scope
+				// write,app:assignable,app:mentionable) are not allowed to
+				// create labels. Existing labels are still found by name, so
+				// an operator pre-creating the three state labels once gets
+				// filterable state; without them the mirror still works —
+				// state lives in the description.
+				let labelCreateDenied = false;
 				for (const state of COCKPIT_STATES) {
-					if (!labelIds[state]) {
+					if (labelIds[state] || labelCreateDenied) continue;
+					try {
 						const created = await this.gql<{
 							issueLabelCreate: {
 								success: boolean;
@@ -519,6 +536,11 @@ export class CockpitMirror {
 							{ input: { teamId: config.teamId, name: state } },
 						);
 						labelIds[state] = created.issueLabelCreate.issueLabel.id;
+					} catch (error) {
+						labelCreateDenied = true;
+						this.logger.warn(
+							`[cockpit] cannot create state labels in the cockpit team (agent tokens may lack permission) — mirrors carry state in the description only. Pre-create labels ${COCKPIT_STATES.join(", ")} in the team for filterable state. (${error instanceof Error ? error.message.slice(0, 120) : String(error)})`,
+						);
 					}
 				}
 				const completedStateId = data.team.states.nodes.find(
