@@ -260,12 +260,24 @@ export class WorkerService {
 					options?: {
 						baseBranchOverrides?: Map<string, string>;
 						onRepoSetupHookEvent?: RepoSetupHookEventHandler;
+						resolveGitAuth?: (
+							repositoryPath: string,
+							operation: "fetch" | "ls-remote",
+						) => Promise<{
+							env: Record<string, string | undefined>;
+							args: string[];
+						} | null>;
 					},
 				): Promise<Workspace> => {
 					return this.gitService.createGitWorktree(issue, repositories, {
 						globalSetupScript: edgeConfig.global_setup_script,
 						baseBranchOverrides: options?.baseBranchOverrides,
 						onRepoSetupHookEvent: options?.onRepoSetupHookEvent,
+						// PON-162: THE load-bearing forward. This GitService is
+						// the CLI's instance with no constructor-wired resolver;
+						// dropping this line reverts production to
+						// credential-less fetches.
+						resolveGitAuth: options?.resolveGitAuth,
 					});
 				},
 				onOAuthCallback,

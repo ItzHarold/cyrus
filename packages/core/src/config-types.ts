@@ -148,6 +148,20 @@ export interface EdgeWorkerRuntimeConfig {
 			options?: {
 				baseBranchOverrides?: Map<string, string>;
 				onRepoSetupHookEvent?: RepoSetupHookEventHandler;
+				/**
+				 * Per-git-process credential resolver (PON-162). EdgeWorker
+				 * supplies it so the handler's GitService — the instance the
+				 * production path actually uses — authenticates fetch and
+				 * ls-remote exactly like EdgeWorker's own. Handlers MUST
+				 * forward it into `createGitWorktree`.
+				 */
+				resolveGitAuth?: (
+					repositoryPath: string,
+					operation: "fetch" | "ls-remote",
+				) => Promise<{
+					env: Record<string, string | undefined>;
+					args: string[];
+				} | null>;
 			},
 		) => Promise<Workspace>;
 
