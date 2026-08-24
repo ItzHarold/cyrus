@@ -246,6 +246,12 @@ export class WorkerService {
 			// User access control configuration
 			userAccessControl: edgeConfig.userAccessControl,
 			sandbox: edgeConfig.sandbox,
+			// Operator cockpit (PON-151). This enumerated mapping is the
+			// startup twin of ConfigManager's merge whitelist: a field left
+			// out here is silently dropped at boot even though hot-reload
+			// would carry it — which is exactly how this line was found.
+			cockpit: edgeConfig.cockpit,
+
 			handlers: {
 				createWorkspace: async (
 					issue: Issue,
