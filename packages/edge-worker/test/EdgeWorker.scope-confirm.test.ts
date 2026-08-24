@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { EdgeWorker } from "../src/EdgeWorker.js";
 import {
@@ -629,6 +632,19 @@ describe("EdgeWorker - scope-confirm gate (PON-150)", () => {
 			};
 			privates(worker).cyrusHome =
 				"/tmp/claude-0/scope-confirm-test-cyrus-home";
+			// PON-164: resume validates the workspace is a real checkout;
+			// the fixture session's path is synthetic, so satisfy the
+			// re-creation with a real one.
+			const fresh = mkdtempSync(join(tmpdir(), "scope-resume-ws-"));
+			mkdirSync(join(fresh, ".git"));
+			privates(worker).config.handlers = {
+				createWorkspace: vi
+					.fn()
+					.mockResolvedValue({ path: fresh, isGitWorktree: true }),
+			};
+			privates(worker).savePersistedState = vi
+				.fn()
+				.mockResolvedValue(undefined);
 			privates(worker).buildAgentRunnerConfig = vi.fn(
 				async (...args: unknown[]) => {
 					captured.push(args);

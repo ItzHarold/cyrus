@@ -1,4 +1,9 @@
+// PON-164: resume validates the workspace is a real git checkout; synthetic
+// fixture paths would trigger re-creation, so give sessions a real one.
+import { mkdirSync as __mk, mkdtempSync as __mkd } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { tmpdir as __tmp } from "node:os";
+import { join as __join } from "node:path";
 import { LinearClient } from "@linear/sdk";
 import { ClaudeRunner } from "cyrus-claude-runner";
 import type {
@@ -11,6 +16,13 @@ import {
 } from "cyrus-core";
 import { LinearEventTransport } from "cyrus-linear-event-transport";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const pon164RealCheckout = () => {
+	const dir = __mkd(__join(__tmp(), "pon164-fixture-ws-"));
+	__mk(__join(dir, ".git"));
+	return dir;
+};
+
 import { AgentSessionManager } from "../src/AgentSessionManager.js";
 import { EdgeWorker } from "../src/EdgeWorker.js";
 import { SharedApplicationServer } from "../src/SharedApplicationServer.js";
@@ -146,7 +158,7 @@ describe("EdgeWorker - System Prompt Resume", () => {
 					title: "Test Issue with Bug",
 					branchName: "test-branch",
 				},
-				workspace: { path: "/test/workspaces/TEST-123" },
+				workspace: { path: pon164RealCheckout(), isGitWorktree: true },
 				claudeRunner: mockClaudeRunner,
 			}),
 			addAgentRunner: vi.fn(),

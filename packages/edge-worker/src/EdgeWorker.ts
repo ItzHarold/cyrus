@@ -10040,6 +10040,125 @@ ${input.userComment}
 			);
 		}
 
+		// PON-164: a resume must land in a REAL checkout. A restored session
+		// can point at a deleted directory, or — for sessions created before
+		// PON-161 — at the empty-directory fallback. Observed live on
+		// agent-prod: scope re-admission resumed a runner into a missing
+		// worktree, with no creation and no credential minting. Validate,
+		// re-create through the same authenticated path a fresh session
+		// uses, and treat a refusal as terminal exactly like the created
+		// path does. (The live-streaming shortcut above is exempt: a running
+		// process cannot have its directory re-created underneath it.)
+		const checkoutValid = (p: string) =>
+			existsSync(p) && existsSync(join(p, ".git"));
+		const workspaceIsRealCheckout = (
+			w: import("cyrus-core").Workspace | undefined,
+		): boolean =>
+			!!w?.path &&
+			existsSync(w.path) &&
+			w.isGitWorktree !== false &&
+			(w.repoPaths
+				? Object.values(w.repoPaths).every((p) => checkoutValid(p))
+				: checkoutValid(w.path));
+		const ws = session.workspace;
+		if (!workspaceIsRealCheckout(ws)) {
+			log.warn(
+				`Resume workspace for ${fullIssue.identifier} is missing or not a git checkout (path=${ws?.path ?? "none"}, isGitWorktree=${String(ws?.isGitWorktree)}) — re-creating before any runner starts (PON-164)`,
+			);
+			// Terminal helper shared by every dead-end below: visible error,
+			// journal event, lane slot freed, cockpit mirror closed, no runner.
+			const terminalResume = async (clientBody: string, repoName: string) => {
+				await this.agentSessionManager.createErrorActivity(
+					sessionId,
+					clientBody,
+				);
+				this.logger.event("worktree_refusal_terminal", {
+					issueId: fullIssue.id,
+					repository: repoName,
+					sessionId,
+					phase: "resume",
+				});
+				this.handleLaneSessionEnded(sessionId, "not_started");
+			};
+			// Re-create with the session's FULL repository set, not just the
+			// primary: a multi-repo session re-created single-repo would lose
+			// its repoPaths map and silently collapse to one repository
+			// (adversarial review finding, 2026-08-24). The resolved base
+			// branches recorded at creation ride along so the re-created
+			// checkout lands where the original did.
+			const contextRepos = (session.repositories ?? [])
+				.map((ctx) => this.repositories.get(ctx.repositoryId))
+				.filter((r): r is RepositoryConfig => !!r);
+			const recreateRepos =
+				contextRepos.length > 0 ? contextRepos : [repository];
+			const recreateOverrides = new Map<string, string>();
+			for (const ctx of session.repositories ?? []) {
+				if (ctx.baseBranchName) {
+					recreateOverrides.set(ctx.repositoryId, ctx.baseBranchName);
+				}
+			}
+			try {
+				const fresh = this.config.handlers?.createWorkspace
+					? await this.config.handlers.createWorkspace(
+							fullIssue,
+							recreateRepos,
+							{
+								...(recreateOverrides.size > 0
+									? { baseBranchOverrides: recreateOverrides }
+									: {}),
+								resolveGitAuth: (repositoryPath, operation) =>
+									this.resolveGitAuthForRepoPath(repositoryPath, operation),
+							},
+						)
+					: await this.gitService.createGitWorktree(
+							fullIssue,
+							recreateRepos,
+							recreateOverrides.size > 0
+								? { baseBranchOverrides: recreateOverrides }
+								: {},
+						);
+				// Trust nothing: the generic worktree fallbacks can still hand
+				// back an empty directory or a stale deleted path (reuse
+				// branch). A re-creation that did not produce a REAL checkout
+				// is terminal, not a workspace (adversarial review finding).
+				if (!workspaceIsRealCheckout(fresh)) {
+					await terminalResume(
+						`This session could not resume: a clean working copy of the ` +
+							`repository could not be prepared. The operator has been ` +
+							`notified — re-delegate this issue once the repository is ` +
+							`healthy again.`,
+						repository.name ?? repository.id,
+					);
+					return;
+				}
+				session.workspace = {
+					...fresh,
+					...(ws?.historyPath ? { historyPath: ws.historyPath } : {}),
+				};
+				this.logger.event("resume_workspace_recreated", {
+					issueId: fullIssue.id,
+					issueIdentifier: fullIssue.identifier,
+					sessionId,
+					path: fresh.path,
+					repositories: recreateRepos.map((r) => r.id).join(","),
+				});
+				await this.savePersistedState();
+			} catch (error) {
+				if (error instanceof WorktreeCreationRefusedError) {
+					await terminalResume(
+						`This session could not resume: the latest code for ` +
+							`**${error.repositoryName}** could not be fetched, and ` +
+							`continuing against a stale or missing copy would be worse ` +
+							`than stopping. The operator has been notified — once ` +
+							`repository access is restored, re-delegate this issue.`,
+						error.repositoryName,
+					);
+					return;
+				}
+				throw error;
+			}
+		}
+
 		// Fetch issue labels early to determine runner type
 		const labels = await this.fetchIssueLabels(fullIssue);
 
