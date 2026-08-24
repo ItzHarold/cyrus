@@ -513,6 +513,9 @@
 					"scopeConfirmGate": {
 						"type": "boolean"
 					},
+					"verifyBeforeDelivery": {
+						"type": "boolean"
+					},
 					"laneConcurrency": {
 						"type": "integer",
 						"minimum": 1,
@@ -1031,9 +1034,26 @@
 				},
 				"projectId": {
 					"type": "string"
+				},
+				"assigneeId": {
+					"type": "string"
 				}
 			},
 			"required": ["linearWorkspaceId", "workspaceName", "teamId"],
+			"additionalProperties": false
+		},
+		"verificationEscalation": {
+			"type": "object",
+			"properties": {
+				"remindAfterHours": {
+					"type": "number",
+					"exclusiveMinimum": 0
+				},
+				"delayNoteAfterHours": {
+					"type": "number",
+					"exclusiveMinimum": 0
+				}
+			},
 			"additionalProperties": false
 		}
 	},

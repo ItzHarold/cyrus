@@ -436,6 +436,27 @@ export class AgentSessionManager extends EventEmitter {
 	 * Complete a session from Claude result message.
 	 * Posts the final result to the issue tracker and handles child session completion.
 	 */
+	/**
+	 * PON-152: when set, the final completion response runs through this
+	 * before posting; returning true suppresses the client-facing post (the
+	 * interceptor has stored it for delivery on approval).
+	 */
+	private finalResponseInterceptor?: (
+		sessionId: string,
+		content: string,
+		isError: boolean,
+	) => boolean;
+
+	setFinalResponseInterceptor(
+		interceptor: (
+			sessionId: string,
+			content: string,
+			isError: boolean,
+		) => boolean,
+	): void {
+		this.finalResponseInterceptor = interceptor;
+	}
+
 	async completeSession(
 		sessionId: string,
 		resultMessage: SDKResultMessage,
@@ -914,6 +935,23 @@ export class AgentSessionManager extends EventEmitter {
 		// bare "Finished" with no body. Skip it entirely (the timeline already
 		// shows the trailing action, and pending work has its own thought).
 		if (!content.trim()) {
+			return;
+		}
+
+		// Verify-before-client-sees (PON-152): a gated workspace's completion
+		// summary is held for operator approval instead of posted. The
+		// interceptor stores it; progress activity earlier in the session was
+		// untouched — only the "this is done" moment is gated.
+		if (
+			this.finalResponseInterceptor?.(
+				sessionId,
+				content,
+				resultMessage.is_error === true,
+			) === true
+		) {
+			this.sessionLog(sessionId).info(
+				`[event:client_summary_suppressed] completion response held for verification (PON-152)`,
+			);
 			return;
 		}
 
@@ -1760,6 +1798,42 @@ export class AgentSessionManager extends EventEmitter {
 	/**
 	 * Create a response activity
 	 */
+	/**
+	 * Post a response activity and PROVE it landed (PON-152 delivery). The
+	 * lenient posting paths swallow every failure by design — fine for
+	 * progress activity, fatal for the one post that flips work to
+	 * "delivered". Throws on a missing session, a missing sink, or a post
+	 * that produced no activity id, so the caller keeps the work pending and
+	 * the operator retries instead of being told it went out.
+	 */
+	async postResponseActivityStrict(
+		sessionId: string,
+		body: string,
+	): Promise<string> {
+		const session = this.sessions.get(sessionId);
+		if (!session?.externalSessionId) {
+			throw new Error(
+				"session has no external session id (removed, or non-Linear platform)",
+			);
+		}
+		const activitySink = this.getActivitySink(sessionId);
+		if (!activitySink) {
+			throw new Error("no activity sink registered for the session");
+		}
+		const result = await activitySink.postActivity(
+			session.externalSessionId,
+			// Same literal shape the lenient path sends (it passes through an
+			// `any`-typed field; the sink accepts the string literal at
+			// runtime).
+			{ type: "response", body } as never,
+			{},
+		);
+		if (!result?.activityId) {
+			throw new Error("activity post returned no activity id");
+		}
+		return result.activityId;
+	}
+
 	async createResponseActivity(sessionId: string, body: string): Promise<void> {
 		await this.postActivity(
 			sessionId,

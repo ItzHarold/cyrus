@@ -21,6 +21,8 @@ export const COCKPIT_STATES = [
 	"awaiting-scope-confirm",
 	"queued",
 	"active",
+	"in-verification",
+	"delivered",
 ] as const;
 export type CockpitState = (typeof COCKPIT_STATES)[number];
 
@@ -123,7 +125,13 @@ export class CockpitMirror {
 		issue: CockpitIssueRef,
 		tenantWorkspaceId: string,
 		state: CockpitState,
-		detail?: { position?: number },
+		detail?: {
+			position?: number;
+			/** Assign the mirror (in-verification: assignment IS the notification) */
+			assigneeId?: string;
+			/** Extra description body (the held summary, PR links) */
+			note?: string;
+		},
 	): Promise<void> {
 		return this.chain(issue.issueId, async () => {
 			const config = this.configFor(tenantWorkspaceId);
@@ -143,12 +151,17 @@ export class CockpitMirror {
 				issueUrl: issue.url ?? existing?.issueUrl,
 				title: issue.title ?? existing?.title,
 			};
-			const description = this.renderDescription(record, tenantWorkspaceId);
+			const description =
+				this.renderDescription(record, tenantWorkspaceId) +
+				(detail?.note ? `\n\n${detail.note}` : "");
 			const labelId = setup.labelIds[state];
 			const labelIds = labelId ? [labelId] : [];
+			const assignee = detail?.assigneeId
+				? { assigneeId: detail.assigneeId }
+				: {};
 
 			if (existing?.mirrorIssueId) {
-				if (existing.state === record.state) return; // nothing changed
+				if (existing.state === record.state && !detail?.note) return; // nothing changed
 				await this.gql(
 					config.linearWorkspaceId,
 					`mutation($id: String!, $input: IssueUpdateInput!) {
@@ -156,7 +169,7 @@ export class CockpitMirror {
 					}`,
 					{
 						id: existing.mirrorIssueId,
-						input: { description, labelIds },
+						input: { description, labelIds, ...assignee },
 					},
 				);
 				this.mirrors.set(issue.issueId, record);
@@ -176,6 +189,7 @@ export class CockpitMirror {
 							title,
 							description,
 							labelIds,
+							...assignee,
 						},
 					},
 				);
@@ -267,6 +281,11 @@ export class CockpitMirror {
 			issue: CockpitIssueRef;
 			tenantWorkspaceId: string;
 		}>;
+		/** Completed work awaiting operator approval (PON-152) */
+		inVerification?: Array<{
+			issue: CockpitIssueRef;
+			tenantWorkspaceId: string;
+		}>;
 	}): Promise<void> {
 		try {
 			if (!this.deps.getConfig()) return;
@@ -280,6 +299,7 @@ export class CockpitMirror {
 				...live.active.map((e) => e.issue),
 				...live.queued.map((e) => e.issue),
 				...live.awaitingScopeConfirm.map((e) => e.issue),
+				...(live.inVerification ?? []).map((e) => e.issue),
 			]);
 			const liveIds = new Set<string>();
 			for (const entry of live.awaitingScopeConfirm) {
@@ -299,6 +319,14 @@ export class CockpitMirror {
 			for (const entry of live.active) {
 				liveIds.add(entry.issue.issueId);
 				await this.upsert(entry.issue, entry.tenantWorkspaceId, "active");
+			}
+			for (const entry of live.inVerification ?? []) {
+				liveIds.add(entry.issue.issueId);
+				await this.upsert(
+					entry.issue,
+					entry.tenantWorkspaceId,
+					"in-verification",
+				);
 			}
 			for (const issueId of [...this.mirrors.keys()]) {
 				if (!liveIds.has(issueId)) {
@@ -435,6 +463,41 @@ export class CockpitMirror {
 					title: node.title.slice(0, 60),
 				});
 			}
+		}
+	}
+
+	/**
+	 * Which client issue a mirror issue stands for (PON-152). This resolves
+	 * the TARGET of a human action taken on a mirror — it never reads mirror
+	 * state as a source of truth.
+	 */
+	clientIssueIdFor(mirrorIssueId: string): string | undefined {
+		for (const [clientIssueId, record] of this.mirrors) {
+			if (record.mirrorIssueId === mirrorIssueId) return clientIssueId;
+		}
+		return undefined;
+	}
+
+	/**
+	 * Post a comment on a client issue's mirror (PON-152 escalation: the
+	 * assignee is a subscriber, so a comment is the second, louder
+	 * notification). Never throws.
+	 */
+	async commentOnMirror(clientIssueId: string, body: string): Promise<void> {
+		try {
+			const record = this.mirrors.get(clientIssueId);
+			if (!record?.mirrorIssueId) return;
+			const config = this.configFor(record.tenantWorkspaceId);
+			if (!config) return;
+			await this.gql(
+				config.linearWorkspaceId,
+				`mutation($input: CommentCreateInput!) {
+					commentCreate(input: $input) { success }
+				}`,
+				{ input: { issueId: record.mirrorIssueId, body } },
+			);
+		} catch (error) {
+			this.logger.error("[cockpit] mirror comment failed:", error);
 		}
 	}
 
