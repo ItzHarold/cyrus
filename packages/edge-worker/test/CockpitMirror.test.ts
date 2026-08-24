@@ -384,6 +384,50 @@ describe("CockpitMirror", () => {
 		).toBe(false);
 	});
 
+	it("label creation denied: mirrors still work, state in description, one warning", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (_url: string, init: { body: string }) => {
+				const call = JSON.parse(init.body) as GqlCall;
+				calls.push(call);
+				if (call.query.includes("issueLabelCreate")) {
+					return {
+						ok: true,
+						status: 200,
+						json: async () => ({
+							errors: [{ message: "not allowed to take action" }],
+						}),
+					};
+				}
+				return {
+					ok: true,
+					status: 200,
+					json: async () => ({ data: respond(call) }),
+				};
+			}),
+		);
+		makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
+		await mirror.upsert(issue, TENANT_WS, "active");
+
+		// One denied create stops further attempts; the mirror is created
+		// with the labels that DID resolve ("queued" pre-existed).
+		expect(
+			calls.filter((c) => c.query.includes("issueLabelCreate")),
+		).toHaveLength(1);
+		const create = calls.find((c) => c.query.includes("issueCreate"));
+		expect(create).toBeDefined();
+		expect(
+			(create?.variables.input as { labelIds: string[] }).labelIds,
+		).toEqual([]);
+		expect(
+			String((create?.variables.input as { description: string }).description),
+		).toContain("active");
+		expect(
+			(logger as never as { warn: ReturnType<typeof vi.fn> }).warn,
+		).toHaveBeenCalledTimes(1);
+		expect(mirror.size).toBe(1);
+	});
+
 	it("round-trips through serialize/restore", async () => {
 		makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
 		await mirror.upsert(issue, TENANT_WS, "active");
