@@ -247,6 +247,26 @@ export class LaneManager {
 		return this.sessionWorkspace.get(sessionId);
 	}
 
+	/**
+	 * One workspace's queue with positions and issue references, for derived
+	 * views (the operator cockpit, PON-151). Read-only.
+	 */
+	queuedEntriesOf(workspaceId: string): Array<{
+		sessionId: string;
+		issueId?: string;
+		issueIdentifier?: string;
+		position: number;
+	}> {
+		const lane = this.lanes.get(workspaceId);
+		if (!lane) return [];
+		return lane.queue.map((entry, index) => ({
+			sessionId: entry.sessionId,
+			issueId: entry.issueId,
+			issueIdentifier: entry.issueIdentifier,
+			position: index + 1,
+		}));
+	}
+
 	/** Queued sessions belonging to an issue (for unassign/cancel cleanup). */
 	queuedSessionIdsForIssue(issueId: string): string[] {
 		const out: string[] = [];

@@ -258,6 +258,7 @@ export {
 // Import them directly from that package instead of from cyrus-core
 export type {
 	SerializableEdgeWorkerState,
+	SerializedCockpitMirror,
 	SerializedCyrusAgentSession,
 	SerializedCyrusAgentSessionEntry,
 	SerializedLaneState,

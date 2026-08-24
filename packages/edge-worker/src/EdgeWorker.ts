@@ -155,6 +155,7 @@ import { AskUserQuestionHandler } from "./AskUserQuestionHandler.js";
 import { AttachmentService } from "./AttachmentService.js";
 import { LiveChatRepositoryProvider } from "./ChatRepositoryProvider.js";
 import { ChatSessionHandler } from "./ChatSessionHandler.js";
+import { CockpitMirror } from "./CockpitMirror.js";
 import { ConfigManager, type RepositoryChanges } from "./ConfigManager.js";
 import { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
 import { EgressProxy } from "./EgressProxy.js";
@@ -290,6 +291,15 @@ export class EdgeWorker extends EventEmitter {
 	private askUserQuestionHandler: AskUserQuestionHandler;
 	/** Per-issue scope-approval records for the scope-confirm gate (PON-150) */
 	private scopeApprovals: ScopeApprovalStore = new ScopeApprovalStore();
+	/** Operator-cockpit mirror (PON-151) — derived view, write-only from here */
+	private cockpitMirror!: CockpitMirror;
+	/**
+	 * Sessions that started from an @mention (PON-151). A mention is a
+	 * conversation on the issue, not the delegated work — its end must not
+	 * close the issue's cockpit mirror. In-memory: after a restart the
+	 * other-live-work check in shouldCloseCockpitMirror covers the gap.
+	 */
+	private mentionSessionIds = new Set<string>();
 	/** User access control for whitelisting/blacklisting Linear users */
 	private userAccessControl: UserAccessControl;
 	private logger: ILogger;
@@ -530,6 +540,26 @@ export class EdgeWorker extends EventEmitter {
 				return this.getIssueTrackerForWorkspace(linearWorkspaceId) ?? null;
 			},
 		});
+
+		// Operator cockpit (PON-151): a derived mirror of delegated issues in
+		// one Linear team. Config read live so hot-reload applies; the persist
+		// hook is best-effort — a broken mirror never breaks a client session.
+		this.cockpitMirror = new CockpitMirror(
+			{
+				getConfig: () => this.config.cockpit,
+				getToken: (workspaceId) =>
+					this.config.linearWorkspaces?.[workspaceId]?.linearToken,
+				getWorkspaceName: (workspaceId) =>
+					this.config.linearWorkspaces?.[workspaceId]?.linearWorkspaceName,
+				// Trailing-debounced: a lane dequeue re-renders every queued
+				// mirror, and N back-to-back transitions must not become N
+				// full state-file writes.
+				persist: async () => {
+					this.scheduleCockpitPersist();
+				},
+			},
+			this.logger,
+		);
 
 		// Initialize webhook IP validator
 		// Enabled by default in self-hosted mode (CYRUS_HOST_EXTERNAL=true),
@@ -995,6 +1025,10 @@ export class EdgeWorker extends EventEmitter {
 		// Runs last so transports, trackers, and endpoints are all live before
 		// any queued session starts.
 		this.armLaneBootRecovery();
+
+		// 8. Cockpit reconciliation (PON-151): make the mirror match reality.
+		// Fire-and-forget — startup never waits on a derived view.
+		void this.reconcileCockpitMirror();
 	}
 
 	/**
@@ -3872,6 +3906,9 @@ ${taskSection}`;
 			await this.persistScopeApprovals("issue_terminal");
 		}
 
+		// Cockpit (PON-151): a terminal client issue closes its mirror.
+		void this.cockpitMirror.close(issueId, "issue_terminal");
+
 		// Lane cleanup (PON-112): release the lane if a stopped session held
 		// it, and drop queued sessions of this issue from their lane queue.
 		for (const session of sessions) {
@@ -4747,6 +4784,27 @@ ${taskSection}`;
 						webhook,
 						kind: "created",
 					});
+					// Cockpit (PON-151): a freshly queued delegation mirrors
+					// with its position. Mentions queue too but are
+					// conversations — the marker heuristic (same one
+					// initializeAgentRunner uses) keeps them out.
+					const queuedCommentBody = webhook.agentSession.comment?.body;
+					const queuedIsMention =
+						!!queuedCommentBody &&
+						!queuedCommentBody.includes("This thread is for an agent session");
+					if (webhook.agentSession.issue && !queuedIsMention) {
+						void this.cockpitMirror.upsert(
+							{
+								issueId: webhook.agentSession.issue.id,
+								issueIdentifier: webhook.agentSession.issue.identifier,
+								title: webhook.agentSession.issue.title,
+								url: (webhook.agentSession.issue as { url?: string }).url,
+							},
+							workspaceId,
+							"queued",
+							{ position },
+						);
+					}
 					// Persist BEFORE the client-visible ack: once the client has
 					// been told "position #N", a crash must not lose the entry.
 					// Strict: a failed write rolls the entry back and aborts —
@@ -5232,6 +5290,12 @@ ${taskSection}`;
 					revisions: record?.revisions ?? 0,
 				});
 				await this.persistScopeApprovals("scope_confirmed");
+				// Cockpit (PON-151): approved — work resumes.
+				void this.cockpitMirror.upsert(
+					{ issueId: issueId as string, issueIdentifier: identifier },
+					workspaceId,
+					"active",
+				);
 			}
 		} else if (verdict === "revision") {
 			if (this.scopeApprovals.recordRevised(issueId as string)) {
@@ -5256,6 +5320,7 @@ ${taskSection}`;
 					workspaceId,
 				});
 				await this.persistScopeApprovals("scope_confirm_canceled");
+				void this.cockpitMirror.close(issueId as string, "scope_canceled");
 			}
 		}
 		// "other" — free text or an ambiguity answer: nothing to record. The
@@ -5307,6 +5372,21 @@ ${taskSection}`;
 			webhook,
 			kind: "resume",
 		});
+		// Cockpit (PON-151): an answered session waiting for the lane is
+		// queued, position visible.
+		if (webhook.agentSession.issue) {
+			void this.cockpitMirror.upsert(
+				{
+					issueId: webhook.agentSession.issue.id,
+					issueIdentifier: webhook.agentSession.issue.identifier,
+					title: webhook.agentSession.issue.title,
+					url: (webhook.agentSession.issue as { url?: string }).url,
+				},
+				workspaceId,
+				"queued",
+				{ position },
+			);
+		}
 		try {
 			await this.savePersistedStateStrict();
 		} catch (error) {
@@ -5514,7 +5594,139 @@ ${taskSection}`;
 	 * A session ended (result message: success, error, or user stop). Release
 	 * the lane if this session holds one and start the next queued session.
 	 */
+	/** Trailing debounce for cockpit-driven state persists (PON-151). */
+	private cockpitPersistTimer: NodeJS.Timeout | undefined;
+	private scheduleCockpitPersist(): void {
+		if (this.cockpitPersistTimer) clearTimeout(this.cockpitPersistTimer);
+		this.cockpitPersistTimer = setTimeout(() => {
+			this.cockpitPersistTimer = undefined;
+			this.savePersistedStateStrict().catch((error) => {
+				this.logger.error("Failed to persist cockpit mirrors:", error);
+			});
+		}, 500);
+	}
+
+	/**
+	 * Whether an ending session really ends its issue's delegated work
+	 * (PON-151). False while: the session was a mention conversation, the
+	 * issue's scope gate is still open, other sessions on the issue are
+	 * still running or lane-active, or queue entries for the issue remain.
+	 */
+	private shouldCloseCockpitMirror(
+		endingSessionId: string,
+		issueId: string,
+	): boolean {
+		if (this.mentionSessionIds.has(endingSessionId)) return false;
+		const gate = this.scopeApprovals.get(issueId);
+		if (gate && gate.state !== "approved") return false;
+		if (this.laneManager.queuedSessionIdsForIssue(issueId).length > 0) {
+			return false;
+		}
+		const others = this.agentSessionManager.getSessionsByIssueId(issueId);
+		for (const other of others) {
+			if (other.id === endingSessionId) continue;
+			if (
+				other.agentRunner?.isRunning?.() ||
+				this.laneManager.isActive(other.id)
+			) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * Cockpit (PON-151): push current queue positions for one workspace to
+	 * the mirror after any queue change. Fire-and-forget, never throws.
+	 */
+	private syncCockpitQueue(workspaceId: string): void {
+		for (const entry of this.laneManager.queuedEntriesOf(workspaceId)) {
+			if (!entry.issueId) continue;
+			void this.cockpitMirror.upsert(
+				{ issueId: entry.issueId, issueIdentifier: entry.issueIdentifier },
+				workspaceId,
+				"queued",
+				{ position: entry.position },
+			);
+		}
+	}
+
+	/**
+	 * Build the live picture (active lane holders, queued entries, open scope
+	 * gates) and hand it to the cockpit for reconciliation (PON-151).
+	 */
+	private async reconcileCockpitMirror(): Promise<void> {
+		try {
+			const snapshot = this.laneManager.snapshot();
+			const active: Array<{
+				issue: { issueId: string; issueIdentifier?: string };
+				tenantWorkspaceId: string;
+			}> = [];
+			const queued: Array<{
+				issue: { issueId: string; issueIdentifier?: string };
+				tenantWorkspaceId: string;
+				position: number;
+			}> = [];
+			for (const [workspaceId, lane] of Object.entries(snapshot)) {
+				for (const sessionId of lane.activeSessionIds) {
+					const issueId = this.sessionIssueId(sessionId);
+					if (issueId) {
+						const session = this.agentSessionManager.getSession(sessionId);
+						active.push({
+							issue: {
+								issueId,
+								issueIdentifier: session?.issueContext?.issueIdentifier,
+							},
+							tenantWorkspaceId: workspaceId,
+						});
+					}
+				}
+				for (const entry of this.laneManager.queuedEntriesOf(workspaceId)) {
+					if (!entry.issueId) continue;
+					queued.push({
+						issue: {
+							issueId: entry.issueId,
+							issueIdentifier: entry.issueIdentifier,
+						},
+						tenantWorkspaceId: workspaceId,
+						position: entry.position,
+					});
+				}
+			}
+			const awaitingScopeConfirm = this.scopeApprovals
+				.listPending()
+				.filter((record) => record.workspaceId)
+				.map((record) => ({
+					issue: {
+						issueId: record.issueId,
+						issueIdentifier: record.issueIdentifier,
+					},
+					tenantWorkspaceId: record.workspaceId as string,
+				}));
+			await this.cockpitMirror.reconcile({
+				active,
+				queued,
+				awaitingScopeConfirm,
+			});
+		} catch (error) {
+			this.logger.error("Cockpit reconciliation failed:", error);
+		}
+	}
+
 	private handleLaneSessionEnded(sessionId: string, reason: string): void {
+		// Cockpit (PON-151): every reason reaching here is a real session end
+		// (result, runner_complete, runner_error, not_started) — but a
+		// session end is not always the END OF THE ISSUE'S WORK: a mention
+		// conversation finishing, or one session of several, must not close
+		// the mirror while the delegation is still live (review finding).
+		const endedIssueId = this.sessionIssueId(sessionId);
+		if (
+			endedIssueId &&
+			this.shouldCloseCockpitMirror(sessionId, endedIssueId)
+		) {
+			void this.cockpitMirror.close(endedIssueId, reason);
+		}
+		this.mentionSessionIds.delete(sessionId);
 		const workspaceId = this.laneManager.workspaceOf(sessionId);
 		if (!workspaceId || !this.laneManager.isActive(sessionId)) return;
 		this.releaseLaneAndContinue(workspaceId, sessionId, reason);
@@ -5578,6 +5790,7 @@ ${taskSection}`;
 				entry.position,
 			);
 		}
+		this.syncCockpitQueue(workspaceId);
 
 		try {
 			if (next.kind === "resume") {
@@ -5638,6 +5851,7 @@ ${taskSection}`;
 				change.position,
 			);
 		}
+		this.syncCockpitQueue(workspaceId);
 	}
 
 	/**
@@ -5652,6 +5866,15 @@ ${taskSection}`;
 		if (!workspaceId) return;
 		const result = this.laneManager.removeQueued(sessionId);
 		await this.savePersistedState();
+		// Cockpit (PON-151): a stopped queued delegation is no longer live
+		// work — without this its mirror shows "queued (#N)" forever.
+		const stoppedIssueId = webhook.agentSession.issue?.id;
+		if (
+			stoppedIssueId &&
+			this.shouldCloseCockpitMirror(sessionId, stoppedIssueId)
+		) {
+			void this.cockpitMirror.close(stoppedIssueId, "stopped_while_queued");
+		}
 		await this.activityPoster.postQueueRemovedNotice(sessionId, workspaceId);
 		for (const change of result?.changes ?? []) {
 			await this.activityPoster.postQueuePositionUpdate(
@@ -5660,6 +5883,7 @@ ${taskSection}`;
 				change.position,
 			);
 		}
+		this.syncCockpitQueue(workspaceId);
 		this.logger.event("lane_queue_removed", {
 			workspaceId,
 			sessionId,
@@ -5705,6 +5929,7 @@ ${taskSection}`;
 					change.position,
 				);
 			}
+			this.syncCockpitQueue(workspaceId);
 			this.logger.event("lane_reordered", {
 				workspaceId,
 				sessionId,
@@ -5897,6 +6122,25 @@ ${taskSection}`;
 		const isLabelBasedPromptRequested = commentBody?.includes(
 			"/label-based-prompt",
 		);
+
+		// Operator cockpit (PON-151): a starting delegated session mirrors as
+		// `active`. Mentions are conversations, not delegations — not
+		// mirrored, and remembered so their end never closes the mirror.
+		if (isMentionTriggered) {
+			this.mentionSessionIds.add(sessionId);
+		}
+		if (!isMentionTriggered) {
+			void this.cockpitMirror.upsert(
+				{
+					issueId: issue.id,
+					issueIdentifier: issue.identifier,
+					title: issue.title,
+					url: (issue as { url?: string }).url,
+				},
+				linearWorkspaceId,
+				"active",
+			);
+		}
 
 		const agentSessionManager = this.agentSessionManager;
 
@@ -6822,6 +7066,9 @@ ${taskSection}`;
 				// No parentId - post as a new comment on the issue
 			);
 		}
+
+		// Cockpit (PON-151): an unassigned issue is no longer delegated work.
+		void this.cockpitMirror.close(issue.id, "unassigned");
 
 		// Lane cleanup (PON-112): release the lane if a stopped session held
 		// it, and drop queued sessions of this issue from their lane queue.
@@ -8352,6 +8599,16 @@ ${input.userComment}
 						?.proposedAt,
 				});
 				await this.persistScopeApprovals("scope_confirm_posted");
+				// Cockpit (PON-151): the invisible-by-construction state, made
+				// visible.
+				void this.cockpitMirror.upsert(
+					{
+						issueId: gateIssueId as string,
+						issueIdentifier: session?.issueContext?.issueIdentifier,
+					},
+					organizationId,
+					"awaiting-scope-confirm",
+				);
 			}
 			// PON-113: hand back the lane before blocking on the human. The
 			// answer re-enters through lane admission, so this widens nothing
@@ -8738,6 +8995,7 @@ ${input.userComment}
 			issueRepositoryCache,
 			lanes: this.laneManager.serialize(),
 			scopeApprovals: this.scopeApprovals.serialize(),
+			cockpitMirrors: this.cockpitMirror.serialize(),
 		};
 	}
 
@@ -8821,6 +9079,10 @@ ${input.userComment}
 		// reads as "no gate pending" — correct for issues already in flight
 		// when the gate shipped.
 		this.scopeApprovals.restore(state.scopeApprovals);
+
+		// Restore the cockpit mirror map (PON-151). Derived state — boot
+		// reconciliation repairs it against reality right after startup.
+		this.cockpitMirror.restore(state.cockpitMirrors);
 	}
 
 	/**

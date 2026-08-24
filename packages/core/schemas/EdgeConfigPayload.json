@@ -1010,6 +1010,25 @@
 			},
 			"required": ["httpProxyPort", "socksProxyPort"],
 			"additionalProperties": false
+		},
+		"cockpit": {
+			"type": "object",
+			"properties": {
+				"linearWorkspaceId": {
+					"type": "string"
+				},
+				"workspaceName": {
+					"type": "string"
+				},
+				"teamId": {
+					"type": "string"
+				},
+				"projectId": {
+					"type": "string"
+				}
+			},
+			"required": ["linearWorkspaceId", "workspaceName", "teamId"],
+			"additionalProperties": false
 		}
 	},
 	"required": ["repositories"],

@@ -565,6 +565,33 @@ export const EdgeConfigSchema = z.object({
 	 * all agent network traffic through it for inspection and filtering.
 	 */
 	sandbox: SandboxConfigSchema.optional(),
+
+	/**
+	 * Operator cockpit (PON-151): mirror every delegated issue from tenant
+	 * workspaces into one Linear team/project the operator already looks at.
+	 * The mirror is DERIVED, never a source of truth — nothing reads it back.
+	 * Absent = mirroring off. Issues in the cockpit's own workspace are never
+	 * mirrored.
+	 */
+	cockpit: z
+		.object({
+			/** Workspace the mirrors are written into (must be a configured linearWorkspaces entry — its token does the writing) */
+			linearWorkspaceId: z.string(),
+			/**
+			 * The SAME workspace's human-readable name, declared again on
+			 * purpose: the id and the name must agree with the configured
+			 * linearWorkspaces entry before a single mirror is written. A
+			 * copied-wrong workspace id (client ids sit right next to the
+			 * operator's) then fails loudly instead of silently writing
+			 * cross-tenant data into a client's Linear.
+			 */
+			workspaceName: z.string(),
+			/** Team the mirror issues are created in */
+			teamId: z.string(),
+			/** Optional project to group the mirrors under */
+			projectId: z.string().optional(),
+		})
+		.optional(),
 });
 
 /**
