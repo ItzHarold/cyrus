@@ -250,6 +250,10 @@ export class ConfigManager extends EventEmitter {
 					parsedConfig.prReviewTrigger ?? this.config.prReviewTrigger,
 				// Sandbox / egress proxy config
 				sandbox: parsedConfig.sandbox ?? this.config.sandbox,
+				// "Absent = mirroring off" must hold on hot-reload too: deleting
+				// the block is the documented kill switch, so absence is a
+				// value here, never "keep the old one" (PON-151 review).
+				cockpit: "cockpit" in parsedConfig ? parsedConfig.cockpit : undefined,
 			};
 
 			// Basic validation
@@ -348,6 +352,7 @@ export class ConfigManager extends EventEmitter {
 			"linearWorkspaces",
 			"userAccessControl",
 			"sandbox",
+			"cockpit",
 		];
 
 		for (const key of globalKeys) {

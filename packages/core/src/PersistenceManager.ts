@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -72,6 +72,28 @@ export interface SerializableEdgeWorkerState {
 	// saved by older versions, which reads as "no gate pending" and is correct
 	// for issues already in flight when the gate shipped.
 	scopeApprovals?: Record<string, SerializedScopeApprovalRecord>;
+	// Operator-cockpit mirror map (v4.4, PON-151). Keyed by the CLIENT issue
+	// id; the value names the mirror issue in the cockpit workspace. Derived
+	// state only — boot reconciliation repairs it, never trusts it.
+	cockpitMirrors?: Record<string, SerializedCockpitMirror>;
+}
+
+/**
+ * One mirrored issue in the operator cockpit (PON-151).
+ */
+export interface SerializedCockpitMirror {
+	/** The mirror issue's id in the cockpit workspace */
+	mirrorIssueId: string;
+	/** Tenant workspace the client issue lives in */
+	tenantWorkspaceId: string;
+	/** Last state written to the mirror (label name) */
+	state: string;
+	/** Client issue identifier, e.g. "DVV-12" (for re-rendering) */
+	issueIdentifier?: string;
+	/** Client issue URL (for re-rendering) */
+	issueUrl?: string;
+	/** Client issue title (for re-rendering) */
+	title?: string;
 }
 
 /**
@@ -149,6 +171,8 @@ export interface V3SerializableEdgeWorkerState {
 export class PersistenceManager {
 	private persistencePath: string;
 	private logger: ILogger;
+	/** In-process save serialization — see saveEdgeWorkerState. */
+	private saveChain: Promise<void> = Promise.resolve();
 
 	constructor(persistencePath?: string, logger?: ILogger) {
 		this.persistencePath =
@@ -174,7 +198,14 @@ export class PersistenceManager {
 	 * Save EdgeWorker state to disk (single file for all repositories)
 	 */
 	async saveEdgeWorkerState(state: SerializableEdgeWorkerState): Promise<void> {
-		try {
+		// Serialize saves in-process AND write atomically (temp + rename).
+		// This file carries every lane queue, session, and scope approval —
+		// two concurrent plain writeFile calls can interleave into JSON that
+		// loadEdgeWorkerState rejects, silently resetting ALL state at next
+		// boot. Fire-and-forget writers (the cockpit mirror, PON-151) made
+		// concurrent saves routine rather than exotic, so both protections
+		// are load-bearing.
+		const run = this.saveChain.then(async () => {
 			await this.ensurePersistenceDirectory();
 			const stateFile = this.getEdgeWorkerStateFilePath();
 			const stateData = {
@@ -182,7 +213,14 @@ export class PersistenceManager {
 				savedAt: new Date().toISOString(),
 				state,
 			};
-			await writeFile(stateFile, JSON.stringify(stateData, null, 2), "utf8");
+			const tempFile = `${stateFile}.tmp`;
+			await writeFile(tempFile, JSON.stringify(stateData, null, 2), "utf8");
+			await rename(tempFile, stateFile);
+		});
+		// The chain must survive a failed save; the caller still sees it.
+		this.saveChain = run.catch(() => {});
+		try {
+			await run;
 		} catch (error) {
 			this.logger.error("Failed to save EdgeWorker state:", error);
 			throw error;
