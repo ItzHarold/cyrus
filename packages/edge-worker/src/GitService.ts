@@ -20,6 +20,33 @@ import type {
 import { createLogger, getDefaultWorktreesDir, type ILogger } from "cyrus-core";
 import { WorktreeIncludeService } from "./WorktreeIncludeService.js";
 
+/**
+ * The deliberate "refusing to continue against possibly stale code" error
+ * (PON-161). Distinct so that the plain-directory fallbacks in worktree
+ * creation can NEVER absorb it: found live on agent-prod 2026-08-24, the
+ * refusal fired correctly and the generic catch then started the session in
+ * an empty directory — the worst version of the thing the refusal exists to
+ * prevent. This error is terminal for the session.
+ */
+export class WorktreeCreationRefusedError extends Error {
+	constructor(
+		message: string,
+		public readonly repositoryName: string,
+	) {
+		super(message);
+		this.name = "WorktreeCreationRefusedError";
+	}
+}
+
+/** Per-git-process credential resolver — see `GitServiceOptions.resolveGitAuth`. */
+export type GitAuthResolver = (
+	repositoryPath: string,
+	operation: "fetch" | "ls-remote",
+) => Promise<{
+	env: Record<string, string | undefined>;
+	args: string[];
+} | null>;
+
 export interface CreateGitWorktreeOptions {
 	globalSetupScript?: string;
 	/** Called for repository setup hook lifecycle events. Global setup hooks do not emit events. */
@@ -29,6 +56,14 @@ export interface CreateGitWorktreeOptions {
 	 * For 1+ repos, defaults to the first repository's workspaceBaseDir.
 	 */
 	workspaceBaseDir?: string;
+	/**
+	 * Per-call git credential resolver (PON-162). The production worktree
+	 * path runs through the CLI's createWorkspace handler, whose GitService
+	 * instance has no constructor-wired resolver — this option threads
+	 * EdgeWorker's resolver through that path. Falls back to the
+	 * constructor-wired resolver when absent.
+	 */
+	resolveGitAuth?: GitAuthResolver;
 	/**
 	 * Per-repo base branch overrides from [repo=name#branch] syntax.
 	 * Takes highest priority over graphite, parent, and default base branches.
@@ -625,6 +660,7 @@ export class GitService {
 			onRepoSetupHookEvent,
 			workspaceBaseDir: overrideBaseDir,
 			baseBranchOverrides,
+			resolveGitAuth: resolveGitAuthOverride,
 		} = options ?? {};
 
 		if (repositories.length === 0) {
@@ -671,6 +707,7 @@ export class GitService {
 				undefined,
 				overrideValue,
 				onRepoSetupHookEvent,
+				resolveGitAuthOverride,
 			);
 		}
 
@@ -709,6 +746,7 @@ export class GitService {
 					repoSubPath, // override workspace path for N-repo layout
 					baseBranchOverrides?.get(repository.id),
 					onRepoSetupHookEvent,
+					resolveGitAuthOverride,
 				);
 				repoPaths[repository.id] = repoWorkspace.path;
 				if (repoWorkspace.resolvedBaseBranches) {
@@ -718,6 +756,9 @@ export class GitService {
 					);
 				}
 			} catch (error) {
+				// A deliberate refusal is terminal for the whole session — an
+				// empty directory is not a workspace (PON-161).
+				if (error instanceof WorktreeCreationRefusedError) throw error;
 				this.logger.error(
 					`Failed to create worktree for repo '${repository.name}': ${(error as Error).message}`,
 				);
@@ -749,6 +790,7 @@ export class GitService {
 		workspacePathOverride?: string,
 		baseBranchOverride?: string,
 		onRepoSetupHookEvent?: RepoSetupHookEventHandler,
+		resolveGitAuthOverride?: GitAuthResolver,
 	): Promise<Workspace> {
 		this.logger.info(
 			`createSingleRepoWorktree for ${repository.name} (id=${repository.id}): baseBranchOverride=${baseBranchOverride ?? "undefined"}`,
@@ -894,9 +936,13 @@ export class GitService {
 			// keeps working, produces a plausible result, and the result is wrong.
 			this.logger.debug("Fetching latest changes from remote...");
 			const hasRemote = this.hasOriginRemote(repository.repositoryPath);
+			// PON-162: the per-call resolver (threaded through the CLI's
+			// createWorkspace handler) wins; the constructor-wired one is the
+			// fallback for direct GitService use.
+			const resolveAuth = resolveGitAuthOverride ?? this.resolveGitAuth;
 			if (hasRemote) {
-				const auth = this.resolveGitAuth
-					? await this.resolveGitAuth(repository.repositoryPath, "fetch")
+				const auth = resolveAuth
+					? await resolveAuth(repository.repositoryPath, "fetch")
 					: null;
 				try {
 					execSync(
@@ -911,11 +957,12 @@ export class GitService {
 						},
 					);
 				} catch (e) {
-					throw new Error(
+					throw new WorktreeCreationRefusedError(
 						`git fetch failed for ${repository.name} (${repository.repositoryPath}): ${(e as Error).message}\n` +
 							"   Refusing to continue against a possibly stale local branch. A session " +
 							"that silently builds on stale code produces a diff against code that no " +
 							"longer exists, and nothing in the logs says so.",
+						repository.name,
 					);
 				}
 			} else {
@@ -931,11 +978,21 @@ export class GitService {
 					// Check if the base branch exists remotely
 					let useRemoteBranch = false;
 					try {
+						// Same credential path as the fetch (PON-162): on a
+						// private repo a bare ls-remote silently degrades
+						// base-branch resolution.
+						const lsAuth = resolveAuth
+							? await resolveAuth(repository.repositoryPath, "ls-remote")
+							: null;
 						const remoteOutput = execSync(
-							`git ls-remote --heads origin "${baseBranch}"`,
+							`git ${(lsAuth?.args ?? []).join(" ")} ls-remote --heads origin "${baseBranch}"`.replace(
+								/\s+/g,
+								" ",
+							),
 							{
 								cwd: repository.repositoryPath,
 								stdio: "pipe",
+								env: lsAuth ? { ...process.env, ...lsAuth.env } : process.env,
 							},
 						);
 						// Check if output is non-empty (branch actually exists on remote)
@@ -1032,6 +1089,9 @@ export class GitService {
 				resolvedBaseBranches: { [repository.id]: resolution },
 			};
 		} catch (error) {
+			// The deliberate stale-refusal must never be absorbed into a
+			// plain-directory fallback: terminal for the session (PON-161).
+			if (error instanceof WorktreeCreationRefusedError) throw error;
 			const errorMessage = (error as Error).message;
 			this.logger.error("Failed to create git worktree:", errorMessage);
 

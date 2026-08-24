@@ -159,7 +159,7 @@ import { CockpitMirror } from "./CockpitMirror.js";
 import { ConfigManager, type RepositoryChanges } from "./ConfigManager.js";
 import { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
 import { EgressProxy } from "./EgressProxy.js";
-import { GitService } from "./GitService.js";
+import { GitService, WorktreeCreationRefusedError } from "./GitService.js";
 import { GlobalSessionRegistry } from "./GlobalSessionRegistry.js";
 import {
 	markPullRequestReady,
@@ -517,30 +517,8 @@ export class EdgeWorker extends EventEmitter {
 			// resolved from its origin remote. Routing decides where work happens;
 			// GitHub decides which credential covers a repository, and those two
 			// facts must not be able to disagree.
-			resolveGitAuth: async (repositoryPath, operation) => {
-				if (!this.gitHubInstallationResolver) return null;
-				let originUrl: string;
-				try {
-					originUrl = execSync("git remote get-url origin", {
-						cwd: repositoryPath,
-						stdio: "pipe",
-						encoding: "utf-8",
-					}).trim();
-				} catch {
-					return null; // no remote: nothing to authenticate against
-				}
-				const ref = parseGitHubRepoUrl(originUrl);
-				if (!ref) return null; // not GitHub: leave it alone
-
-				const token = await this.gitHubInstallationResolver.mintTokenForRef(
-					ref,
-					operation,
-				);
-				return {
-					env: gitAuthEnv(token),
-					args: [...GIT_NO_AMBIENT_CREDENTIALS],
-				};
-			},
+			resolveGitAuth: (repositoryPath, operation) =>
+				this.resolveGitAuthForRepoPath(repositoryPath, operation),
 		});
 
 		// Initialize AskUserQuestion handler for elicitation via Linear select signal
@@ -4677,25 +4655,69 @@ ${taskSection}`;
 		this.logger.info(
 			`createCyrusAgentSession: passing baseBranchOverrides=${baseBranchOverrides ? `Map(size=${baseBranchOverrides.size}, keys=[${Array.from(baseBranchOverrides.keys()).join(",")}])` : "undefined"}, useCustomHandler=${!!this.config.handlers?.createWorkspace}`,
 		);
-		const workspace = this.config.handlers?.createWorkspace
-			? await this.config.handlers.createWorkspace(fullIssue, repositories, {
-					baseBranchOverrides,
-					onRepoSetupHookEvent: (activity) =>
-						this.activityPoster.postRepoSetupHookActivity(
-							sessionId,
-							linearWorkspaceId,
-							activity,
-						),
-				})
-			: await this.gitService.createGitWorktree(fullIssue, repositories, {
-					baseBranchOverrides,
-					onRepoSetupHookEvent: (activity) =>
-						this.activityPoster.postRepoSetupHookActivity(
-							sessionId,
-							linearWorkspaceId,
-							activity,
-						),
+		let workspace: import("cyrus-core").Workspace;
+		try {
+			workspace = this.config.handlers?.createWorkspace
+				? await this.config.handlers.createWorkspace(fullIssue, repositories, {
+						baseBranchOverrides,
+						onRepoSetupHookEvent: (activity) =>
+							this.activityPoster.postRepoSetupHookActivity(
+								sessionId,
+								linearWorkspaceId,
+								activity,
+							),
+						// PON-162: the handler's GitService is the CLI's instance,
+						// which has no constructor-wired credential resolver — this
+						// is how the production worktree path authenticates.
+						resolveGitAuth: (repositoryPath, operation) =>
+							this.resolveGitAuthForRepoPath(repositoryPath, operation),
+					})
+				: await this.gitService.createGitWorktree(fullIssue, repositories, {
+						baseBranchOverrides,
+						onRepoSetupHookEvent: (activity) =>
+							this.activityPoster.postRepoSetupHookActivity(
+								sessionId,
+								linearWorkspaceId,
+								activity,
+							),
+					});
+		} catch (error) {
+			if (error instanceof WorktreeCreationRefusedError) {
+				// PON-161: the refusal is TERMINAL for the session. The client
+				// has already seen the ack — without this post they would see
+				// "Got it" followed by silence; observed live on agent-prod,
+				// the swallowed refusal instead started the session in an
+				// empty directory. Post the failure where the client looks,
+				// close the cockpit mirror, and rethrow: the caller's lane
+				// backstop releases the slot (not_started), and no runner
+				// ever starts.
+				await this.getIssueTrackerForWorkspace(linearWorkspaceId)
+					?.createAgentActivity({
+						agentSessionId: sessionId,
+						content: {
+							type: "error",
+							body:
+								`This session could not start: the latest code for ` +
+								`**${error.repositoryName}** could not be fetched, and ` +
+								`starting against a stale copy would be worse than not ` +
+								`starting. The operator has been notified — once ` +
+								`repository access is restored, re-delegate this issue.`,
+						},
+					})
+					.catch((postError) => {
+						this.logger.warn(
+							`Failed to post worktree-refusal activity: ${(postError as Error).message}`,
+						);
+					});
+				void this.cockpitMirror.close(issue.id, "not_started");
+				this.logger.event("worktree_refusal_terminal", {
+					issueId: issue.id,
+					repository: error.repositoryName,
+					sessionId,
 				});
+			}
+			throw error;
+		}
 
 		this.logger.debug(`Workspace created at: ${workspace.path}`);
 
@@ -5289,6 +5311,46 @@ ${taskSection}`;
 			this.scopeGateEnabled(workspaceId) &&
 			!this.scopeApprovals.isApproved(issueId)
 		);
+	}
+
+	/**
+	 * Per-git-process credential for a repository path (PON-143/162): mint an
+	 * installation token from the worktree's OWN origin remote. Returns null
+	 * for non-GitHub remotes, missing remotes, or no-App installs — those
+	 * keep working unchanged. Threaded into BOTH GitService instances: the
+	 * one EdgeWorker constructs, and — via the createWorkspace handler
+	 * options — the CLI's, which is the instance the production worktree
+	 * path actually uses (found live on agent-prod, PON-162).
+	 */
+	private async resolveGitAuthForRepoPath(
+		repositoryPath: string,
+		operation: "fetch" | "ls-remote",
+	): Promise<{
+		env: Record<string, string | undefined>;
+		args: string[];
+	} | null> {
+		if (!this.gitHubInstallationResolver) return null;
+		let originUrl: string;
+		try {
+			originUrl = execSync("git remote get-url origin", {
+				cwd: repositoryPath,
+				stdio: "pipe",
+				encoding: "utf-8",
+			}).trim();
+		} catch {
+			return null; // no remote: nothing to authenticate against
+		}
+		const ref = parseGitHubRepoUrl(originUrl);
+		if (!ref) return null; // not GitHub: leave it alone
+
+		const token = await this.gitHubInstallationResolver.mintTokenForRef(
+			ref,
+			operation,
+		);
+		return {
+			env: gitAuthEnv(token),
+			args: [...GIT_NO_AMBIENT_CREDENTIALS],
+		};
 	}
 
 	/** The Linear issue id a session is working, from the session manager. */

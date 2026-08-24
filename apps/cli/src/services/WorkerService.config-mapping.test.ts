@@ -59,6 +59,15 @@ describe("WorkerService config mapping (startup twin of the hot-reload whitelist
 		).toEqual([]);
 	});
 
+	it("the createWorkspace handler forwards the git credential resolver (PON-162)", () => {
+		// The handler's GitService is the CLI's instance with no
+		// constructor-wired resolver; production worktree auth exists ONLY
+		// through this forward. Found live on agent-prod: the line was
+		// missing and every session-time fetch ran credential-less.
+		const source = readFileSync(join(__dirname, "WorkerService.ts"), "utf8");
+		expect(source).toContain("resolveGitAuth: options?.resolveGitAuth");
+	});
+
 	it("keys on the exception list are genuinely absent (stale entries get cleaned up)", () => {
 		const source = readFileSync(join(__dirname, "WorkerService.ts"), "utf8");
 		const stale = Object.keys(KNOWN_UNMAPPED).filter((key) =>
