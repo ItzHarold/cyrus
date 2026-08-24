@@ -161,7 +161,12 @@ describe("CockpitMirror", () => {
 		);
 		expect(
 			labelCreates.map((c) => (c.variables.input as { name: string }).name),
-		).toEqual(["awaiting-scope-confirm", "active"]);
+		).toEqual([
+			"awaiting-scope-confirm",
+			"active",
+			"in-verification",
+			"delivered",
+		]);
 
 		const create = calls.find((c) => c.query.includes("issueCreate"));
 		const input = create?.variables.input as Record<string, unknown>;

@@ -283,6 +283,13 @@ export const LinearWorkspaceConfigSchema = z.object({
 	 */
 	scopeConfirmGate: z.boolean().optional(),
 	/**
+	 * Verify-before-client-sees (PON-152): a completed session's client-facing
+	 * summary is held until the operator approves; the PR stays draft until
+	 * then. Default **on** — the client is never TOLD work exists before a
+	 * human looked at it. Explicit `false` opts a workspace out.
+	 */
+	verifyBeforeDelivery: z.boolean().optional(),
+	/**
 	 * How many sessions this workspace may run at once when serialized
 	 * (PON-139). Default 1.
 	 *
@@ -590,6 +597,24 @@ export const EdgeConfigSchema = z.object({
 			teamId: z.string(),
 			/** Optional project to group the mirrors under */
 			projectId: z.string().optional(),
+			/**
+			 * User the mirror is assigned to when work reaches
+			 * in-verification (PON-152) — assignment is the notification.
+			 */
+			assigneeId: z.string().optional(),
+		})
+		.optional(),
+
+	/**
+	 * Escalation ladder thresholds for unapproved work (PON-152). The ladder
+	 * only ever gets LOUDER — nothing here auto-delivers.
+	 */
+	verificationEscalation: z
+		.object({
+			/** Hours before a second, louder operator notification. Default 4. */
+			remindAfterHours: z.number().positive().optional(),
+			/** Hours before an honest delay note on the client's issue. Default 24. */
+			delayNoteAfterHours: z.number().positive().optional(),
 		})
 		.optional(),
 });

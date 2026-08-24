@@ -251,6 +251,7 @@ export class WorkerService {
 			// out here is silently dropped at boot even though hot-reload
 			// would carry it — which is exactly how this line was found.
 			cockpit: edgeConfig.cockpit,
+			verificationEscalation: edgeConfig.verificationEscalation,
 
 			handlers: {
 				createWorkspace: async (

@@ -161,6 +161,10 @@ import { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
 import { EgressProxy } from "./EgressProxy.js";
 import { GitService } from "./GitService.js";
 import { GlobalSessionRegistry } from "./GlobalSessionRegistry.js";
+import {
+	markPullRequestReady,
+	parsePullRequestUrl,
+} from "./github-pr-ready.js";
 import { isQueueReorderIntent, LaneManager } from "./LaneManager.js";
 import { ScopeApprovalStore } from "./ScopeApprovalStore.js";
 import {
@@ -169,6 +173,7 @@ import {
 	interpretScopeConfirmAnswer,
 	isScopeConfirmQuestion,
 } from "./scope-confirm-gate.js";
+import { VerificationGate } from "./VerificationGate.js";
 
 /** Options threaded through the created-session flow by the lane machinery. */
 interface LaneStartOptions {
@@ -300,6 +305,10 @@ export class EdgeWorker extends EventEmitter {
 	 * other-live-work check in shouldCloseCockpitMirror covers the gap.
 	 */
 	private mentionSessionIds = new Set<string>();
+	/** Verify-before-client-sees (PON-152): held summaries awaiting approval */
+	private verificationGate: VerificationGate = new VerificationGate();
+	/** PON-152 escalation ladder timer */
+	private verificationLadderTimer: NodeJS.Timeout | undefined;
 	/** User access control for whitelisting/blacklisting Linear users */
 	private userAccessControl: UserAccessControl;
 	private logger: ILogger;
@@ -633,6 +642,39 @@ export class EdgeWorker extends EventEmitter {
 				const tracker = this.issueTrackers.get(workspaceId);
 				if (!tracker?.updateAgentSession) return false;
 				return await tracker.updateAgentSession(sessionId, fields);
+			},
+		);
+		// Verify-before-client-sees (PON-152): the final completion response
+		// of a delegated session in a gated workspace is stored, not posted.
+		// Mentions and child sessions post as before — they are conversation,
+		// not the deliverable.
+		// Optional-call: partial AgentSessionManager test doubles may lack the
+		// setter. The real class always has it — and the warn below keeps a
+		// genuinely absent hook from being silent (the PR #15 lesson).
+		if (
+			typeof this.agentSessionManager.setFinalResponseInterceptor !== "function"
+		) {
+			this.logger.warn(
+				"AgentSessionManager has no setFinalResponseInterceptor — the verification gate (PON-152) is NOT armed",
+			);
+		}
+		this.agentSessionManager.setFinalResponseInterceptor?.(
+			(sessionId, content, isError) => {
+				try {
+					return this.holdCompletionForVerification(
+						sessionId,
+						content,
+						isError,
+					);
+				} catch (error) {
+					// The gate must fail OPEN for posting: a broken gate must
+					// never silently swallow a client's summary.
+					this.logger.error(
+						"Verification interceptor failed — posting normally:",
+						error,
+					);
+					return false;
+				}
 			},
 		);
 
@@ -1029,6 +1071,9 @@ export class EdgeWorker extends EventEmitter {
 		// 8. Cockpit reconciliation (PON-151): make the mirror match reality.
 		// Fire-and-forget — startup never waits on a derived view.
 		void this.reconcileCockpitMirror();
+
+		// 9. PON-152 escalation ladder — reminders only, never delivery.
+		this.armVerificationLadder();
 	}
 
 	/**
@@ -1085,9 +1130,44 @@ export class EdgeWorker extends EventEmitter {
 			});
 		});
 
+		// Verification queue (PON-152). Same guard. "Visible and counted,
+		// not merely stored" — independent of the cockpit.
+		fastify.get("/admin/verification", async (request, reply) => {
+			const forwarded = [
+				"x-forwarded-for",
+				"x-forwarded-proto",
+				"x-forwarded-host",
+				"x-real-ip",
+				"forwarded",
+			].some((header) => request.headers[header] !== undefined);
+			const loopback = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(
+				request.ip,
+			);
+			if (!loopback || forwarded) {
+				return reply.status(404).send({ error: "Not found" });
+			}
+			const now = Date.now();
+			const pending = this.verificationGate.listPending().map((entry) => ({
+				issueId: entry.issueId,
+				issueIdentifier: entry.issueIdentifier,
+				workspaceId: entry.workspaceId,
+				completedAt: entry.completedAt,
+				pendingForMs: now - Date.parse(entry.completedAt),
+				isError: entry.isError,
+				prUrls: entry.prUrls,
+				escalatedAt: entry.escalatedAt,
+				delayNotedAt: entry.delayNotedAt,
+			}));
+			return reply.status(200).send({
+				pendingCount: pending.length,
+				pending,
+			});
+		});
+
 		this.logger.info("✅ Lanes endpoint registered (localhost only)");
 		this.logger.info("   Route: GET /admin/lanes");
 		this.logger.info("   Route: GET /admin/scope-approvals");
+		this.logger.info("   Route: GET /admin/verification");
 	}
 
 	/**
@@ -3909,6 +3989,14 @@ ${taskSection}`;
 		// Cockpit (PON-151): a terminal client issue closes its mirror.
 		void this.cockpitMirror.close(issueId, "issue_terminal");
 
+		// Verification gate (PON-152): a terminal issue's record is done.
+		if (this.verificationGate.remove(issueId)) {
+			await this.persistScopeApprovals("verification_issue_terminal");
+		}
+		for (const session of sessions) {
+			this.mentionSessionIds.delete(session.id);
+		}
+
 		// Lane cleanup (PON-112): release the lane if a stopped session held
 		// it, and drop queued sessions of this issue from their lane queue.
 		for (const session of sessions) {
@@ -4750,6 +4838,26 @@ ${taskSection}`;
 		const issueId = webhook.agentSession?.issue?.id;
 		const sessionId = webhook.agentSession.id;
 		const workspaceId = webhook.organizationId;
+
+		// PON-152: an @mention on a COCKPIT MIRROR issue is an operator
+		// action (approve / reject), not a work request — intercept before
+		// any lane, routing, or runner machinery. No model session starts.
+		if (issueId) {
+			const clientIssueId = this.cockpitMirror.clientIssueIdFor(issueId);
+			if (clientIssueId) {
+				await this.handleMirrorAction(
+					{
+						organizationId: workspaceId,
+						mirrorSessionId: sessionId,
+						actorId: webhook.agentSession.creator?.id,
+						actorName: webhook.agentSession.creator?.name,
+						rawBody: webhook.agentSession.comment?.body ?? "",
+					},
+					clientIssueId,
+				);
+				return;
+			}
+		}
 
 		// PON-112: serialized-lane admission, before the ack so the FIRST
 		// activity is already queue-aware. Lane bookkeeping is synchronous and
@@ -5703,13 +5811,499 @@ ${taskSection}`;
 					},
 					tenantWorkspaceId: record.workspaceId as string,
 				}));
+			const inVerification = this.verificationGate
+				.listPending()
+				.map((record) => ({
+					issue: {
+						issueId: record.issueId,
+						issueIdentifier: record.issueIdentifier,
+					},
+					tenantWorkspaceId: record.workspaceId,
+				}));
 			await this.cockpitMirror.reconcile({
 				active,
 				queued,
 				awaitingScopeConfirm,
+				inVerification,
 			});
 		} catch (error) {
 			this.logger.error("Cockpit reconciliation failed:", error);
+		}
+	}
+
+	// ========================================================================
+	// VERIFY-BEFORE-CLIENT-SEES (PON-152)
+	// ========================================================================
+
+	/**
+	 * Default on; explicit false opts a workspace out — same shape as the
+	 * scope gate. The gate additionally requires a working approval surface:
+	 * without a configured cockpit there is no notification and no approve
+	 * action, and the cockpit's own workspace is never mirrored — holding a
+	 * summary nobody can ever release is worse than posting it (review
+	 * finding, 2026-08-24).
+	 */
+	private verificationGateEnabled(workspaceId: string | undefined): boolean {
+		if (!workspaceId) return false;
+		const cockpit = this.config.cockpit;
+		if (!cockpit) return false;
+		if (workspaceId === cockpit.linearWorkspaceId) return false;
+		return (
+			this.config.linearWorkspaces?.[workspaceId]?.verifyBeforeDelivery !==
+			false
+		);
+	}
+
+	/**
+	 * The final-response interceptor body (PON-152). Returns true when the
+	 * summary was stored for verification instead of posted.
+	 */
+	private holdCompletionForVerification(
+		sessionId: string,
+		content: string,
+		isError: boolean,
+	): boolean {
+		// Resolve the workspace from the session's repository, NOT from the
+		// lane: in the runner-already-stopped ordering the lane has released
+		// (and dropped its session mapping) before this interceptor runs.
+		const workspaceId =
+			this.resolveWorkspaceIdForSession(sessionId) ??
+			this.laneManager.workspaceOf(sessionId);
+		const issueId = this.sessionIssueId(sessionId);
+		if (!issueId || !this.verificationGateEnabled(workspaceId)) return false;
+		const session = this.agentSessionManager.getSession(sessionId);
+		// Only Linear delegations are gated. GitHub/GitLab PR-comment
+		// sessions answer on the PR thread through their own reply path —
+		// gating their SDK result here would mint phantom held records for
+		// synthetic issue ids while the real reply ships anyway (review
+		// finding, 2026-08-24).
+		if (session?.issueContext?.trackerId !== "linear") return false;
+		// Mentions and child sessions are conversation, not the deliverable.
+		if (this.mentionSessionIds.has(sessionId)) return false;
+		if (this.globalSessionRegistry.getParentSessionId(sessionId)) return false;
+		// Already delivered for this issue: a post-delivery follow-up result
+		// posts normally rather than vanishing.
+		if (this.verificationGate.get(issueId)?.state === "delivered") {
+			return false;
+		}
+
+		this.verificationGate.recordPending(issueId, {
+			workspaceId: workspaceId as string,
+			issueIdentifier: session?.issueContext?.issueIdentifier,
+			sessionId,
+			summary: content,
+			isError,
+		});
+		this.logger.event("verification_pending", {
+			issueId,
+			issueIdentifier: session?.issueContext?.issueIdentifier,
+			workspaceId,
+			isError,
+			prUrls: (this.verificationGate.get(issueId)?.prUrls ?? []).join(" "),
+		});
+		void this.persistScopeApprovals("verification_pending");
+		// The mirror transition belongs to the ACTUAL session end. When the
+		// runner already stopped (result processed after stream end), fire it
+		// here; the still-streaming case is handled by handleLaneSessionEnded
+		// when runner_complete lands. Both are idempotent.
+		if (session?.agentRunner?.isRunning?.() !== true) {
+			this.mirrorInVerification(issueId);
+		}
+		return true;
+	}
+
+	/** Upsert the cockpit mirror to in-verification, assigned, with the held summary. */
+	private mirrorInVerification(issueId: string): void {
+		const record = this.verificationGate.get(issueId);
+		if (!record || record.state !== "in-verification") return;
+		const note = [
+			"---",
+			`**Held for verification** — reply \`@mention approve\` on this issue to deliver, or \`@mention reject: <feedback>\` to send it back.`,
+			record.prUrls.length
+				? `**PR (draft):** ${record.prUrls.join(" · ")}`
+				: "**PR:** none found in the summary.",
+			record.isError ? "**The session ended with an error.**" : "",
+			"",
+			"**What the session reported:**",
+			record.summary.length > 3000
+				? `${record.summary.slice(0, 3000)}\n\n*(truncated — full summary delivered on approval)*`
+				: record.summary,
+		]
+			.filter(Boolean)
+			.join("\n");
+		void this.cockpitMirror.upsert(
+			{ issueId, issueIdentifier: record.issueIdentifier },
+			record.workspaceId,
+			"in-verification",
+			{
+				assigneeId: this.config.cockpit?.assigneeId,
+				note,
+			},
+		);
+	}
+
+	/**
+	 * A GitHub token for one repository, for the approval path (PON-152).
+	 * The ref comes from OUR stored record (the session's own summary), not
+	 * from an unverified webhook payload, and the trigger is an explicit
+	 * operator action — so per-repo App resolution applies directly, with
+	 * the legacy ambient token as the last resort.
+	 */
+	private async mintGitHubTokenForRepo(
+		owner: string,
+		repo: string,
+	): Promise<string | undefined> {
+		if (this.gitHubInstallationResolver) {
+			try {
+				return await this.gitHubInstallationResolver.mintTokenForRef(
+					{ owner, repo },
+					"github-api",
+				);
+			} catch (error) {
+				this.logger.error(
+					`No usable GitHub App installation for ${owner}/${repo}:`,
+					error,
+				);
+			}
+		}
+		// Deliberately NO ambient-PAT fallback here: the approval path acts
+		// on URLs a model wrote into free text, and a broad PAT would let a
+		// quoted foreign PR link flip someone else's draft (review finding,
+		// 2026-08-24). No App coverage → the PR stays draft, reported
+		// honestly.
+		return undefined;
+	}
+
+	/**
+	 * The session repository's origin "owner/repo", for scoping which PR
+	 * links an approval may act on. Undefined when unknown — the caller then
+	 * marks nothing ready rather than guessing.
+	 */
+	private async sessionRepoOriginRef(
+		sessionId: string,
+	): Promise<{ owner: string; repo: string } | undefined> {
+		const repoId = this.sessionRepositories.get(sessionId);
+		const repository = repoId ? this.repositories.get(repoId) : undefined;
+		if (!repository) return undefined;
+		try {
+			const { execFile } = await import("node:child_process");
+			const { promisify } = await import("node:util");
+			const { stdout } = await promisify(execFile)(
+				"git",
+				["-C", repository.repositoryPath, "remote", "get-url", "origin"],
+				{ timeout: 10_000 },
+			);
+			const match = /github\.com[:/]([\w.-]+)\/([\w.-]+?)(?:\.git)?\s*$/.exec(
+				stdout.trim(),
+			);
+			if (!match) return undefined;
+			return { owner: match[1] as string, repo: match[2] as string };
+		} catch {
+			return undefined;
+		}
+	}
+
+	/**
+	 * The operator approved: mark the draft PR(s) ready FIRST, then post the
+	 * held summary on the client's thread — in that order, so the client is
+	 * never pointed at a draft. Returns a human-readable report for the
+	 * mirror thread.
+	 */
+	private async deliverVerifiedWork(issueId: string): Promise<string> {
+		const record = this.verificationGate.get(issueId);
+		if (!record) {
+			return "Nothing is awaiting verification on this issue.";
+		}
+		if (record.state === "delivered") {
+			return `Already delivered at ${record.deliveredAt}.`;
+		}
+
+		const report: string[] = [];
+		// Only PRs in the session's OWN repository are acted on: the URL list
+		// comes from model-written free text, which can quote foreign PR
+		// links (review finding, 2026-08-24).
+		const originRef = await this.sessionRepoOriginRef(record.sessionId);
+		for (const url of record.prUrls) {
+			const parsed = parsePullRequestUrl(url);
+			if (!parsed) continue;
+			if (
+				!originRef ||
+				parsed.owner.toLowerCase() !== originRef.owner.toLowerCase() ||
+				parsed.repo.toLowerCase() !== originRef.repo.toLowerCase()
+			) {
+				report.push(
+					`⚠️ ${url}: outside this session's repository${originRef ? ` (${originRef.owner}/${originRef.repo})` : " (origin unknown)"} — not touched.`,
+				);
+				continue;
+			}
+			try {
+				const token = await this.mintGitHubTokenForRepo(
+					parsed.owner,
+					parsed.repo,
+				);
+				if (!token) {
+					report.push(`⚠️ ${url}: no GitHub credential — left as draft.`);
+					continue;
+				}
+				const outcome = await markPullRequestReady(token, parsed);
+				report.push(
+					outcome === "ready"
+						? `✅ ${url} marked ready for review.`
+						: `ℹ️ ${url} was already ready.`,
+				);
+			} catch (error) {
+				report.push(
+					`⚠️ ${url}: could not mark ready (${error instanceof Error ? error.message.slice(0, 140) : String(error)}) — left as draft.`,
+				);
+			}
+		}
+
+		// Post the held summary to the client's session thread — STRICTLY:
+		// the lenient posting paths swallow failures, and a swallowed failure
+		// here would mark work delivered that the client never saw (review
+		// finding, 2026-08-24: the previous catch was dead code).
+		try {
+			await this.agentSessionManager.postResponseActivityStrict(
+				record.sessionId,
+				record.summary,
+			);
+			report.push("✅ Client summary posted.");
+		} catch (error) {
+			// Delivery of the summary is the point — if it failed, do NOT
+			// mark delivered; the operator retries.
+			report.push(
+				`❌ Posting the client summary FAILED (${error instanceof Error ? error.message.slice(0, 140) : String(error)}) — still in verification, approve again to retry.`,
+			);
+			return report.join("\n");
+		}
+
+		this.verificationGate.markDelivered(issueId);
+		this.logger.event("verification_delivered", {
+			issueId,
+			issueIdentifier: record.issueIdentifier,
+			workspaceId: record.workspaceId,
+			deliveredAt: this.verificationGate.get(issueId)?.deliveredAt,
+		});
+		void this.persistScopeApprovals("verification_delivered");
+		void this.cockpitMirror.upsert(
+			{ issueId, issueIdentifier: record.issueIdentifier },
+			record.workspaceId,
+			"delivered",
+		);
+		return report.join("\n");
+	}
+
+	/**
+	 * The operator rejected: the work goes back to the agent with the
+	 * feedback as a direct prompt. The feedback text itself is never posted
+	 * to the client's thread — only its consequences appear, as continued
+	 * work.
+	 */
+	private async rejectVerifiedWork(
+		issueId: string,
+		feedback: string,
+	): Promise<string> {
+		const record = this.verificationGate.reject(issueId);
+		if (!record) {
+			return "Nothing is awaiting verification on this issue.";
+		}
+		this.logger.event("verification_rejected", {
+			issueId,
+			issueIdentifier: record.issueIdentifier,
+			workspaceId: record.workspaceId,
+		});
+		void this.persistScopeApprovals("verification_rejected");
+		void this.cockpitMirror.upsert(
+			{ issueId, issueIdentifier: record.issueIdentifier },
+			record.workspaceId,
+			"active",
+		);
+
+		const session = this.agentSessionManager.getSession(record.sessionId);
+		const repoId = this.sessionRepositories.get(record.sessionId);
+		const repository = repoId ? this.repositories.get(repoId) : undefined;
+		if (!session || !repository) {
+			return "Rejection recorded, but the session could not be resumed automatically (session or repository no longer known). Prompt the client issue's thread directly to continue.";
+		}
+		const prompt = `The completed work was reviewed internally and needs another pass before it reaches the client. Reviewer feedback:\n\n${feedback}\n\nAddress the feedback on the same branch and PR (keep the PR a draft), then stop and wait for verification again. Do not post any completion summary claiming the work is done for the client.`;
+		void this.resumeAgentSession(
+			session,
+			repository,
+			record.sessionId,
+			this.agentSessionManager,
+			prompt,
+			"",
+			false,
+			[],
+			record.workspaceId,
+		).catch((error) => {
+			this.logger.error("Failed to resume session after rejection:", error);
+		});
+		return "Rejection sent back to the agent with your feedback. The client was told nothing.";
+	}
+
+	/**
+	 * An operator action on a cockpit mirror (PON-152): approve delivers,
+	 * reject sends the work back. One action, answered on the mirror thread.
+	 * Reached from BOTH webhook shapes — the first @mention (created) and
+	 * every reply in the resulting thread (prompted) — so "approve again to
+	 * retry" works where the operator naturally types it.
+	 */
+	private async handleMirrorAction(
+		action: {
+			organizationId: string;
+			mirrorSessionId: string;
+			actorId?: string;
+			actorName?: string;
+			rawBody: string;
+		},
+		clientIssueId: string,
+	): Promise<void> {
+		const { mirrorSessionId } = action;
+		const body = action.rawBody
+			.replace(/@\S+/g, " ") // strip the mention handle
+			.trim();
+		const reply = async (text: string) => {
+			const tracker = this.getIssueTrackerForWorkspace(action.organizationId);
+			if (!tracker) return;
+			try {
+				await tracker.createAgentActivity({
+					agentSessionId: mirrorSessionId,
+					content: { type: "response", body: text },
+				});
+			} catch (error) {
+				this.logger.error("Failed to reply on mirror thread:", error);
+			}
+		};
+
+		// The single most consequential action in the system — releasing
+		// unverified work to a client — gets the strictest checks anywhere
+		// (review finding, 2026-08-24): the webhook must come from the
+		// cockpit workspace, and the actor must be the configured approver.
+		if (action.organizationId !== this.config.cockpit?.linearWorkspaceId) {
+			this.logger.warn(
+				`Mirror action from non-cockpit workspace ${action.organizationId} — refused`,
+			);
+			return;
+		}
+
+		const rejectMatch = /^reject\b[:,-]?\s*([\s\S]*)$/i.exec(body);
+		const isApprove = /^approve\b/i.test(body);
+		if (isApprove || rejectMatch) {
+			const approverId = this.config.cockpit?.assigneeId;
+			if (!approverId) {
+				await reply(
+					"Approve/reject requires `cockpit.assigneeId` in the config — the approver must be declared before anything can be delivered.",
+				);
+				return;
+			}
+			if (action.actorId !== approverId) {
+				this.logger.event("verification_action_refused", {
+					clientIssueId,
+					actorId: action.actorId,
+					actorName: action.actorName,
+				});
+				await reply(
+					`Only the configured approver can ${isApprove ? "approve" : "reject"} delivery.`,
+				);
+				return;
+			}
+		}
+
+		if (isApprove) {
+			this.logger.event("verification_approve_action", {
+				clientIssueId,
+				actorId: action.actorId,
+			});
+			const report = await this.deliverVerifiedWork(clientIssueId);
+			await reply(report);
+			return;
+		}
+		if (rejectMatch) {
+			const feedback = rejectMatch[1]?.trim() ?? "";
+			if (!feedback) {
+				await reply(
+					'Rejection needs feedback for the agent: "reject: <what needs to change>".',
+				);
+				return;
+			}
+			this.logger.event("verification_reject_action", {
+				clientIssueId,
+				actorId: action.actorId,
+			});
+			const report = await this.rejectVerifiedWork(clientIssueId, feedback);
+			await reply(report);
+			return;
+		}
+		await reply(
+			'This is a cockpit mirror — a derived view. Mention me with "approve" to deliver the completed work to the client, or "reject: <feedback>" to send it back. Discussion belongs on the client\u2019s issue.',
+		);
+	}
+
+	/**
+	 * The PON-152 escalation ladder. Runs every 10 minutes; only ever gets
+	 * LOUDER — a second notification, then one honest delay note on the
+	 * client's issue. It never delivers anything.
+	 */
+	private armVerificationLadder(): void {
+		if (this.verificationLadderTimer) return;
+		this.verificationLadderTimer = setInterval(
+			() => {
+				this.runVerificationLadder().catch((error) => {
+					this.logger.error("Verification ladder failed:", error);
+				});
+			},
+			10 * 60 * 1000,
+		);
+		this.verificationLadderTimer.unref?.();
+	}
+
+	private async runVerificationLadder(): Promise<void> {
+		const remindMs =
+			(this.config.verificationEscalation?.remindAfterHours ?? 4) * 3600_000;
+		const delayNoteMs =
+			(this.config.verificationEscalation?.delayNoteAfterHours ?? 24) *
+			3600_000;
+		const now = Date.now();
+		for (const entry of this.verificationGate.listPending()) {
+			const age = now - Date.parse(entry.completedAt);
+			if (age > remindMs && !entry.escalatedAt) {
+				if (this.verificationGate.markEscalated(entry.issueId)) {
+					this.logger.event("verification_escalated", {
+						issueId: entry.issueId,
+						issueIdentifier: entry.issueIdentifier,
+						ageHours: Math.round(age / 3600_000),
+					});
+					await this.cockpitMirror.commentOnMirror(
+						entry.issueId,
+						`Still awaiting verification after ${Math.round(age / 3600_000)}h. The client has not been told anything. Mention me with "approve" or "reject: <feedback>".`,
+					);
+					void this.persistScopeApprovals("verification_escalated");
+				}
+			}
+			if (age > delayNoteMs && !entry.delayNotedAt) {
+				if (this.verificationGate.markDelayNoted(entry.issueId)) {
+					this.logger.event("verification_delay_note", {
+						issueId: entry.issueId,
+						issueIdentifier: entry.issueIdentifier,
+						ageHours: Math.round(age / 3600_000),
+					});
+					const tracker = this.getIssueTrackerForWorkspace(entry.workspaceId);
+					if (tracker) {
+						try {
+							await tracker.createComment(entry.issueId, {
+								body: "This one is taking longer than planned — the work is in final verification on our side. No action needed from you; we'll post the result here as soon as it clears.",
+							});
+						} catch (error) {
+							this.logger.error(
+								"Failed to post delay note on client issue:",
+								error,
+							);
+						}
+					}
+					void this.persistScopeApprovals("verification_delay_note");
+				}
+			}
 		}
 	}
 
@@ -5720,13 +6314,22 @@ ${taskSection}`;
 		// conversation finishing, or one session of several, must not close
 		// the mirror while the delegation is still live (review finding).
 		const endedIssueId = this.sessionIssueId(sessionId);
-		if (
+		if (endedIssueId && this.verificationGate.isPending(endedIssueId)) {
+			// PON-152: completed work awaiting approval — the mirror shows
+			// in-verification instead of closing. Idempotent with the
+			// interceptor-side transition (runner-already-stopped ordering).
+			this.mirrorInVerification(endedIssueId);
+		} else if (
 			endedIssueId &&
 			this.shouldCloseCockpitMirror(sessionId, endedIssueId)
 		) {
 			void this.cockpitMirror.close(endedIssueId, reason);
 		}
-		this.mentionSessionIds.delete(sessionId);
+		// The mention marker is NOT cleared here: in the runner-already-
+		// stopped ordering this runs BEFORE the final-response interceptor,
+		// which needs it (a mention conversation's answer must never be
+		// held). Markers are cleared when the issue's sessions are removed
+		// (terminal state / unassign) and are persisted across restarts.
 		const workspaceId = this.laneManager.workspaceOf(sessionId);
 		if (!workspaceId || !this.laneManager.isActive(sessionId)) return;
 		this.releaseLaneAndContinue(workspaceId, sessionId, reason);
@@ -6753,6 +7356,31 @@ ${taskSection}`;
 		const agentSessionId = webhook.agentSession.id;
 		const activityBody = webhook.agentActivity?.content?.body || "";
 		const signal = (webhook.agentActivity as any)?.signal;
+
+		// PON-152: replies in a mirror issue's thread are operator actions
+		// too — the failure report says "approve again to retry", and the
+		// natural place to type that is the same thread. Without this, a
+		// mirror reply would fall to normal routing and start a model
+		// session on a derived-view issue.
+		const mirrorIssueIdForPrompt = webhook.agentSession?.issue?.id;
+		if (mirrorIssueIdForPrompt) {
+			const mirrorClientIssueId = this.cockpitMirror.clientIssueIdFor(
+				mirrorIssueIdForPrompt,
+			);
+			if (mirrorClientIssueId) {
+				await this.handleMirrorAction(
+					{
+						organizationId: webhook.organizationId,
+						mirrorSessionId: agentSessionId,
+						actorId: webhook.agentSession.creator?.id,
+						actorName: webhook.agentSession.creator?.name,
+						rawBody: activityBody,
+					},
+					mirrorClientIssueId,
+				);
+				return;
+			}
+		}
 		const isTextStopRequest = /^\s*stop(\s+session|\s+working)?[\s.!?]*$/i.test(
 			activityBody,
 		);
@@ -7067,8 +7695,21 @@ ${taskSection}`;
 			);
 		}
 
-		// Cockpit (PON-151): an unassigned issue is no longer delegated work.
-		void this.cockpitMirror.close(issue.id, "unassigned");
+		// Cockpit (PON-151): an unassigned issue is no longer delegated work —
+		// unless completed work is still awaiting verification (PON-152):
+		// closing then would strand the held summary with no notification
+		// surface and no interceptable approve action.
+		if (this.verificationGate.isPending(issue.id)) {
+			void this.cockpitMirror.commentOnMirror(
+				issue.id,
+				"The client unassigned the agent while this work awaits verification. The held summary is still deliverable — approve or reject here.",
+			);
+		} else {
+			void this.cockpitMirror.close(issue.id, "unassigned");
+		}
+		for (const session of sessions) {
+			this.mentionSessionIds.delete(session.id);
+		}
 
 		// Lane cleanup (PON-112): release the lane if a stopped session held
 		// it, and drop queued sessions of this issue from their lane queue.
@@ -8996,6 +9637,8 @@ ${input.userComment}
 			lanes: this.laneManager.serialize(),
 			scopeApprovals: this.scopeApprovals.serialize(),
 			cockpitMirrors: this.cockpitMirror.serialize(),
+			pendingDeliveries: this.verificationGate.serialize(),
+			mentionSessionIds: [...this.mentionSessionIds],
 		};
 	}
 
@@ -9083,6 +9726,14 @@ ${input.userComment}
 		// Restore the cockpit mirror map (PON-151). Derived state — boot
 		// reconciliation repairs it against reality right after startup.
 		this.cockpitMirror.restore(state.cockpitMirrors);
+
+		// Restore held deliveries (PON-152). A restart restores these — it
+		// NEVER delivers them; that stays a human action.
+		this.verificationGate.restore(state.pendingDeliveries);
+
+		// Restore mention markers (PON-151/152): a mention session completing
+		// after a restart must still post conversationally, never be held.
+		this.mentionSessionIds = new Set(state.mentionSessionIds ?? []);
 	}
 
 	/**

@@ -353,6 +353,7 @@ export class ConfigManager extends EventEmitter {
 			"userAccessControl",
 			"sandbox",
 			"cockpit",
+			"verificationEscalation",
 		];
 
 		for (const key of globalKeys) {

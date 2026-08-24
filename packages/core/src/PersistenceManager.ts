@@ -76,6 +76,35 @@ export interface SerializableEdgeWorkerState {
 	// id; the value names the mirror issue in the cockpit workspace. Derived
 	// state only — boot reconciliation repairs it, never trusts it.
 	cockpitMirrors?: Record<string, SerializedCockpitMirror>;
+	// Verification gate (v4.5, PON-152). Keyed by client issue id: completed
+	// work whose client-facing summary is held until the operator approves.
+	// NEVER auto-released — a restart must restore these, not deliver them.
+	pendingDeliveries?: Record<string, SerializedVerificationRecord>;
+	// Mention-session markers (v4.5, PON-151/152). A mention session
+	// completing after a restart must still post conversationally, never be
+	// held for verification or close a delegation's mirror.
+	mentionSessionIds?: string[];
+}
+
+/**
+ * One completed-but-unapproved piece of work (PON-152).
+ */
+export interface SerializedVerificationRecord {
+	state: "in-verification" | "delivered";
+	/** When the work FIRST completed — the escalation ladder clock. */
+	completedAt: string;
+	workspaceId: string;
+	issueIdentifier?: string;
+	sessionId: string;
+	/** The suppressed client-facing summary, delivered on approval. */
+	summary: string;
+	isError: boolean;
+	/** GitHub PR links parsed from the summary (drafts to mark ready). */
+	prUrls: string[];
+	deliveredAt?: string;
+	/** One-shot ladder bookkeeping */
+	escalatedAt?: string;
+	delayNotedAt?: string;
 }
 
 /**
