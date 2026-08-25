@@ -1,6 +1,13 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { type EdgeConfig, getDefaultWorktreesDir } from "cyrus-core";
+import { pruneBackups } from "../backupRetention.js";
 import {
 	type ApiResponse,
 	type CyrusConfigPayload,
@@ -89,7 +96,15 @@ export async function handleCyrusConfig(
 				const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
 				const backupPath = join(cyrusHome, `config.backup-${timestamp}.json`);
 				const existingConfig = readFileSync(configPath, "utf-8");
-				writeFileSync(backupPath, existingConfig, "utf-8");
+				// PON-148: this file holds every tenant token. mode applies
+				// only on create; chmod covers overwrites of a pre-existing
+				// world-readable file.
+				writeFileSync(backupPath, existingConfig, {
+					encoding: "utf-8",
+					mode: 0o600,
+				});
+				chmodSync(backupPath, 0o600);
+				pruneBackups(cyrusHome, /^config\.backup-.*\.json$/);
 			} catch (backupError) {
 				// Log but don't fail - backup is not critical
 				console.warn(
@@ -100,7 +115,13 @@ export async function handleCyrusConfig(
 
 		// Write config file
 		try {
-			writeFileSync(configPath, JSON.stringify(config, null, 2), "utf-8");
+			writeFileSync(configPath, JSON.stringify(config, null, 2), {
+				encoding: "utf-8",
+				mode: 0o600,
+			});
+			// PON-148: correct by construction, not by accident — an existing
+			// file keeps its mode, so enforce it every write.
+			chmodSync(configPath, 0o600);
 
 			return {
 				success: true,
