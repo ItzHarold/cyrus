@@ -1,5 +1,12 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
+import { pruneBackups } from "../backupRetention.js";
 import type { ApiResponse, CyrusEnvPayload } from "../types.js";
 
 /**
@@ -93,7 +100,14 @@ export async function handleCyrusEnv(
 				const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
 				const backupPath = join(cyrusHome, `.env.backup-${timestamp}`);
 				const existingEnvFile = readFileSync(envPath, "utf-8");
-				writeFileSync(backupPath, existingEnvFile, "utf-8");
+				// PON-148: client secrets — same 0600 + chmod + retention as
+				// the config backups.
+				writeFileSync(backupPath, existingEnvFile, {
+					encoding: "utf-8",
+					mode: 0o600,
+				});
+				chmodSync(backupPath, 0o600);
+				pruneBackups(cyrusHome, /^\.env\.backup-/);
 			} catch (backupError) {
 				// Log but don't fail - backup is not critical
 				console.warn(
@@ -104,7 +118,11 @@ export async function handleCyrusEnv(
 
 		// Write env file
 		try {
-			writeFileSync(envPath, `${envContent}\n`, "utf-8");
+			writeFileSync(envPath, `${envContent}\n`, {
+				encoding: "utf-8",
+				mode: 0o600,
+			});
+			chmodSync(envPath, 0o600);
 
 			return {
 				success: true,

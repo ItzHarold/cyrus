@@ -3,9 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleCyrusConfig } from "../../src/handlers/cyrusConfig.js";
 
 vi.mock("node:fs", () => ({
+	chmodSync: vi.fn(),
 	existsSync: vi.fn(() => false),
 	mkdirSync: vi.fn(),
 	readFileSync: vi.fn(),
+	readdirSync: vi.fn(() => []),
+	unlinkSync: vi.fn(),
 	writeFileSync: vi.fn(),
 }));
 
@@ -50,7 +53,7 @@ describe("handleCyrusConfig", () => {
 			expect.stringContaining(
 				'"workspaceBaseDir": "/test/cyrus-home/worktrees"',
 			),
-			"utf-8",
+			{ encoding: "utf-8", mode: 0o600 },
 		);
 	});
 
@@ -75,7 +78,7 @@ describe("handleCyrusConfig", () => {
 		expect(mockWriteFileSync).toHaveBeenCalledWith(
 			"/test/cyrus-home/config.json",
 			expect.stringContaining('"workspaceBaseDir": "/tmp/custom-worktrees"'),
-			"utf-8",
+			{ encoding: "utf-8", mode: 0o600 },
 		);
 	});
 });
