@@ -30,6 +30,9 @@ export interface ClientContentViolation {
 	redactable: boolean;
 }
 
+/** http(s) URLs — exempt as functional pointers (see the scanner comment). */
+const URL_PATTERN = /https?:\/\/[^\s<>")]+/gi;
+
 const RULES: Array<{
 	rule: ClientContentViolation["rule"];
 	pattern: RegExp;
@@ -71,6 +74,13 @@ export function findClientContentViolations(
 	allowlist: string[] = [],
 ): ClientContentViolation[] {
 	let scanned = text;
+	// URLs are exempt (found live, PON-175 audit 2026-08-25): a URL is a
+	// functional pointer — Vercel preview hosts embed the branch name in
+	// DASHED form (`repo-git-appuser-issue.vercel.app`), which the slash-
+	// shaped branch-ref exemption below cannot cover, and rewriting it
+	// hands the client a broken link. The name class a URL can leak (the
+	// app username) is already client-visible as the comment author.
+	scanned = scanned.replace(URL_PATTERN, " ");
 	// The per-repo hook script names are the CLIENT's own files, documented
 	// product conventions that live in their repository — reporting "ran
 	// cyrus-setup.sh" names their file, not our internals. (Renaming the
@@ -106,10 +116,18 @@ export function redactClientContent(text: string): {
 	redactions: string[];
 } {
 	const redactions: string[] = [];
+	// Same URL exemption as the scanner, protected FIRST (a URL may contain
+	// branch-shaped or path-shaped substrings): rewriting a pointer hands
+	// the client a broken link (found live, PON-175 audit).
+	const urls: string[] = [];
+	let out = text.replace(URL_PATTERN, (m) => {
+		urls.push(m);
+		return `\uE001U${urls.length - 1}\uE001`;
+	});
 	// Same branch-reference exemption as the scanner: protect them before
 	// any rewriting, restore after.
 	const branchRefs: string[] = [];
-	let out = text.replace(/\bcyrus[\w-]*\/[\w./-]+/gi, (m) => {
+	out = out.replace(/\bcyrus[\w-]*\/[\w./-]+/gi, (m) => {
 		branchRefs.push(m);
 		return `\uE000BR${branchRefs.length - 1}\uE000`;
 	});
@@ -133,6 +151,7 @@ export function redactClientContent(text: string): {
 		/\uE000BR(\d+)\uE000/g,
 		(_m, i) => branchRefs[Number(i)] ?? "",
 	);
+	out = out.replace(/\uE001U(\d+)\uE001/g, (_m, i) => urls[Number(i)] ?? "");
 	return { text: out, redactions };
 }
 
