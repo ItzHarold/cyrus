@@ -171,6 +171,8 @@ import {
 	parsePullRequestUrl,
 } from "./github-pr-ready.js";
 import { isQueueReorderIntent, LaneManager } from "./LaneManager.js";
+import { NeedsInfoStore } from "./NeedsInfoStore.js";
+import { buildNeedsInfoRuleBlock, isNeedsInfoQuestion } from "./needs-info.js";
 import { ScopeApprovalStore } from "./ScopeApprovalStore.js";
 import {
 	buildScopeConfirmGateBlock,
@@ -301,6 +303,7 @@ export class EdgeWorker extends EventEmitter {
 	private askUserQuestionHandler: AskUserQuestionHandler;
 	/** Per-issue scope-approval records for the scope-confirm gate (PON-150) */
 	private scopeApprovals: ScopeApprovalStore = new ScopeApprovalStore();
+	private needsInfo: NeedsInfoStore = new NeedsInfoStore();
 	/** Operator-cockpit mirror (PON-151) — derived view, write-only from here */
 	private cockpitMirror!: CockpitMirror;
 	/**
@@ -1110,6 +1113,15 @@ export class EdgeWorker extends EventEmitter {
 					awaitingForMs: now - Date.parse(entry.proposedAt),
 				})),
 				all: this.scopeApprovals.serialize(),
+				// PON-172: open needs-info waits — the same invisible-wait
+				// guard, one door.
+				needsInfo: {
+					awaiting: this.needsInfo.listAwaiting().map((entry) => ({
+						...entry,
+						awaitingForMs: now - Date.parse(entry.askedAt),
+					})),
+					all: this.needsInfo.serialize(),
+				},
 			});
 		});
 
@@ -3965,7 +3977,10 @@ ${taskSection}`;
 		// — remove it so the pending list stays honest. Unassignment does NOT
 		// clear it: the approval belongs to the issue, and a re-delegated
 		// issue whose scope was approved must not re-ask.
-		if (this.scopeApprovals.remove(issueId)) {
+		// Needs-info (PON-172): same lifecycle — a terminal issue's wait is
+		// over regardless of whether an answer ever came.
+		const needsInfoRemoved = this.needsInfo.remove(issueId);
+		if (this.scopeApprovals.remove(issueId) || needsInfoRemoved) {
 			await this.persistScopeApprovals("issue_terminal");
 		}
 
@@ -5273,17 +5288,21 @@ ${taskSection}`;
 	 * `admitAnsweredSessionToLane`, so the one-active-session guarantee still
 	 * holds; the lane is simply not held during the wait.
 	 */
-	private releaseLaneWhileAwaitingInput(sessionId: string): void {
+	private releaseLaneWhileAwaitingInput(
+		sessionId: string,
+		reasonOverride?: string,
+	): void {
 		const workspaceId = this.laneManager.workspaceOf(sessionId);
 		if (!workspaceId || !this.laneManager.isActive(sessionId)) return;
 		// PON-150: while the issue's scope is unapproved, a wait on a human is
 		// a wait on scope confirmation — recorded distinctly so the cockpit
-		// can tell "blocked on an answer" from "blocked on the gate".
+		// can tell "blocked on an answer" from "blocked on the gate". The
+		// gate outranks any override (PON-172's needs-info reason included).
 		const issueId = this.sessionIssueId(sessionId);
 		const reason =
 			issueId && this.scopeGatePendingForIssue(workspaceId, issueId)
 				? "awaiting_scope_confirm"
-				: "awaiting_user_input";
+				: (reasonOverride ?? "awaiting_user_input");
 		this.releaseLaneAndContinue(workspaceId, sessionId, reason);
 	}
 
@@ -7263,6 +7282,14 @@ ${taskSection}`;
 			`Processing AskUserQuestion response for session ${agentSessionId}: "${userResponse}"`,
 		);
 
+		// PON-172: any client reply on an issue with an open needs-info wait
+		// IS the answer — mark it before the session resumes.
+		this.markNeedsInfoAnswered(
+			agentSession.issue?.id ?? this.sessionIssueId(agentSessionId),
+			webhook.organizationId,
+			agentSession.issue?.identifier,
+		);
+
 		// Pass the response to the handler to resolve the waiting promise
 		const handled = this.askUserQuestionHandler.handleUserResponse(
 			agentSessionId,
@@ -7278,6 +7305,41 @@ ${taskSection}`;
 				`AskUserQuestion response handled for session ${agentSessionId}`,
 			);
 		}
+	}
+
+	/**
+	 * Mark an open needs-info wait answered (PON-172). Idempotent: only the
+	 * real awaiting→answered transition logs, persists, and updates the
+	 * mirror — replayed webhooks change nothing. Called from BOTH answer
+	 * paths: the pending-question resolution and (post-restart, when the
+	 * pending question is gone from memory) the normal prompted path whose
+	 * resume carries the answer as context.
+	 */
+	private markNeedsInfoAnswered(
+		issueId: string | undefined,
+		workspaceId: string,
+		issueIdentifier?: string,
+	): void {
+		if (!issueId) return;
+		if (!this.needsInfo.recordAnswered(issueId)) return;
+		this.logger.event("needs_info_answered", {
+			issueId,
+			issueIdentifier:
+				issueIdentifier ?? this.needsInfo.get(issueId)?.issueIdentifier,
+			workspaceId,
+			askedAt: this.needsInfo.get(issueId)?.askedAt,
+			answeredAt: this.needsInfo.get(issueId)?.answeredAt,
+		});
+		void this.persistScopeApprovals("needs_info_answered");
+		void this.cockpitMirror.upsert(
+			{
+				issueId,
+				issueIdentifier:
+					issueIdentifier ?? this.needsInfo.get(issueId)?.issueIdentifier,
+			},
+			workspaceId,
+			"active",
+		);
 	}
 
 	/**
@@ -7304,6 +7366,11 @@ ${taskSection}`;
 			this.logger.warn("Cannot handle prompted activity without agentActivity");
 			return;
 		}
+
+		// PON-172: after a restart the pending question is gone from memory,
+		// so the client's answer arrives here as a normal prompt — the resume
+		// carries it as context. The open wait is answered either way.
+		this.markNeedsInfoAnswered(issue.id, linearWorkspaceId, issue.identifier);
 
 		const commentId = webhook.agentActivity.sourceCommentId;
 
@@ -8932,6 +8999,9 @@ ${taskSection}`;
 		// 4a. Client-surface rules (PON-168 / R2): every session whose output
 		// can reach a tenant surface carries the policy intrinsically.
 		systemPrompt += buildClientSurfaceRuleBlock();
+		// 4b. Needs-info rules (PON-172): mid-work asks for client-side
+		// inputs, deliverable-framed, one ask with everything needed.
+		systemPrompt += buildNeedsInfoRuleBlock();
 
 		// 4b. Scope-confirm gate (PON-150) — intrinsic, not enforced: an
 		// always-on prompt step for delegated sessions whose issue has no
@@ -9460,11 +9530,48 @@ ${input.userComment}
 					"awaiting-scope-confirm",
 				);
 			}
+			// PON-172: a needs-info ask gets its own bookkeeping — a distinct
+			// release reason, a cockpit state, and a persisted record so the
+			// wait survives restarts and stays visible. Recognition by exact
+			// canonical header; the scope gate takes precedence (pre-approval,
+			// missing info is scope discussion).
+			let releaseReason: string | undefined;
+			if (
+				gateQuestion &&
+				gateIssueId &&
+				isNeedsInfoQuestion(gateQuestion) &&
+				!this.scopeGatePendingForIssue(organizationId, gateIssueId)
+			) {
+				const session =
+					this.agentSessionManager.getSession(linearAgentSessionId);
+				this.needsInfo.recordAsked(gateIssueId, {
+					question: gateQuestion.question ?? "",
+					sessionId: linearAgentSessionId,
+					workspaceId: organizationId,
+					issueIdentifier: session?.issueContext?.issueIdentifier,
+				});
+				this.logger.event("needs_info_asked", {
+					issueId: gateIssueId,
+					issueIdentifier: session?.issueContext?.issueIdentifier,
+					workspaceId: organizationId,
+					sessionId: linearAgentSessionId,
+				});
+				await this.persistScopeApprovals("needs_info_asked");
+				releaseReason = "awaiting_client_info";
+				void this.cockpitMirror.upsert(
+					{
+						issueId: gateIssueId,
+						issueIdentifier: session?.issueContext?.issueIdentifier,
+					},
+					organizationId,
+					"needs-info",
+				);
+			}
 			// PON-113: hand back the lane before blocking on the human. The
 			// answer re-enters through lane admission, so this widens nothing
 			// — it only stops an unanswered question from freezing the
 			// client's whole queue.
-			this.releaseLaneWhileAwaitingInput(linearAgentSessionId);
+			this.releaseLaneWhileAwaitingInput(linearAgentSessionId, releaseReason);
 			// Note: We use linearAgentSessionId (from closure) instead of the passed sessionId
 			// because the passed sessionId is the Claude session ID, not the Linear agent session ID
 			return this.askUserQuestionHandler.handleAskUserQuestion(
@@ -9845,6 +9952,7 @@ ${input.userComment}
 			issueRepositoryCache,
 			lanes: this.laneManager.serialize(),
 			scopeApprovals: this.scopeApprovals.serialize(),
+			needsInfo: this.needsInfo.serialize(),
 			cockpitMirrors: this.cockpitMirror.serialize(),
 			pendingDeliveries: this.verificationGate.serialize(),
 			mentionSessionIds: [...this.mentionSessionIds],
@@ -9931,6 +10039,7 @@ ${input.userComment}
 		// reads as "no gate pending" — correct for issues already in flight
 		// when the gate shipped.
 		this.scopeApprovals.restore(state.scopeApprovals);
+		this.needsInfo.restore(state.needsInfo);
 
 		// Restore the cockpit mirror map (PON-151). Derived state — boot
 		// reconciliation repairs it against reality right after startup.
@@ -10330,7 +10439,9 @@ ${input.userComment}
 				resolvedWorkspaceId,
 				fullIssue.id,
 				sessionId,
-			) ?? "") + buildClientSurfaceRuleBlock();
+			) ?? "") +
+			buildClientSurfaceRuleBlock() +
+			buildNeedsInfoRuleBlock();
 		const promptType = systemPromptResult?.type;
 
 		// Build allowed and disallowed tools lists

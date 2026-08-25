@@ -21,6 +21,7 @@ export const COCKPIT_STATES = [
 	"awaiting-scope-confirm",
 	"queued",
 	"active",
+	"needs-info",
 	"in-verification",
 	"delivered",
 ] as const;

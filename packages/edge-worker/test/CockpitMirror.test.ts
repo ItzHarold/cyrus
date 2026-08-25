@@ -164,6 +164,7 @@ describe("CockpitMirror", () => {
 		).toEqual([
 			"awaiting-scope-confirm",
 			"active",
+			"needs-info",
 			"in-verification",
 			"delivered",
 		]);
