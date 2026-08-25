@@ -2059,6 +2059,29 @@ export class AgentSessionManager extends EventEmitter {
 	}
 
 	/**
+	 * PON-138: how far a session got, for the startup-death heuristic —
+	 * a session that dies with only a handful of entries never reached
+	 * real work and is a retry candidate.
+	 */
+	getEntryCount(sessionId: string): number {
+		return this.entries.get(sessionId)?.length ?? 0;
+	}
+
+	/**
+	 * PON-138: the last result entry's error text, or null when the session
+	 * has no result yet / ended cleanly.
+	 */
+	getLastResultError(sessionId: string): string | null {
+		const entries = this.entries.get(sessionId) ?? [];
+		for (let i = entries.length - 1; i >= 0; i--) {
+			const entry = entries[i];
+			if (entry?.type !== "result") continue;
+			return entry.metadata?.isError ? (entry.content ?? "") : null;
+		}
+		return null;
+	}
+
+	/**
 	 * Create an error activity
 	 */
 	async createErrorActivity(sessionId: string, body: string): Promise<void> {

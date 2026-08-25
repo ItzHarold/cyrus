@@ -42,6 +42,16 @@ export const CLIENT_MESSAGES = {
 		`result here as soon as it clears.`,
 
 	/**
+	 * PON-138: retries at session start ran out against a provider outage.
+	 * Honest, client-framed, and actionable without being alarming.
+	 */
+	sessionStartFailed: () =>
+		`We hit a temporary problem on our side starting this one, and ` +
+		`automatic retries didn't get through. The operator has been ` +
+		`notified. Nothing is needed from you — re-delegating the issue ` +
+		`later will also restart it.`,
+
+	/**
 	 * PON-179: the one generic status a quiet client stream shows instead of
 	 * working narration — liveness without the diary.
 	 */
