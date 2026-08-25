@@ -6610,7 +6610,199 @@ ${taskSection}`;
 		}
 	}
 
+	/**
+	 * Startup retry state (PON-138). Captured for every initializeAgentRunner
+	 * call; consulted when a session ends in error having produced almost no
+	 * entries — the 529/rate-limit startup-death signature (8 of 10 sessions
+	 * dead at 4 activities in the measured incident).
+	 */
+	private startupRetryState = new Map<
+		string,
+		{
+			args: Parameters<EdgeWorker["initializeAgentRunner"]>;
+			attempts: number;
+			firstFailureAt?: number;
+			timer?: NodeJS.Timeout;
+		}
+	>();
+
+	private static readonly STARTUP_RETRY_MAX_ATTEMPTS = 4;
+	private static readonly STARTUP_RETRY_BASE_DELAY_MS = 30_000;
+	private static readonly STARTUP_RETRY_MAX_ENTRIES = 8;
+	private static readonly STARTUP_RETRY_DEADLINE_MS = 30 * 60 * 1000;
+
+	/**
+	 * Transient vs permanent (PON-138). Only ENUMERATED transients retry:
+	 * 529/429/5xx/connection failures are normal operating weather for a
+	 * busy API. Auth and billing fail fast — retrying an invalid credential
+	 * just delays the truth, and billing errors are never retried (standing
+	 * rule). Unknown errors do not retry: looping a real bug helps nobody.
+	 */
+	private classifyStartupError(text: string): "transient" | "permanent" {
+		if (
+			/credit balance|billing|invalid.*api.?key|authentication|401|403/i.test(
+				text,
+			)
+		) {
+			return "permanent";
+		}
+		if (
+			/529|overloaded|rate.?limit|429|too many requests|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|fetch failed|\b50[0234]\b|internal server error/i.test(
+				text,
+			)
+		) {
+			return "transient";
+		}
+		return "permanent";
+	}
+
+	/**
+	 * Decide whether this session end is a retryable startup death, and if
+	 * so schedule the replay with exponential backoff and jitter. Returns
+	 * true when a retry (or the exhausted-path client message) took over —
+	 * the caller then skips the mirror end-of-work transitions.
+	 */
+	private maybeScheduleStartupRetry(sessionId: string): boolean {
+		const state = this.startupRetryState.get(sessionId);
+		if (!state) return false;
+
+		const errorText = this.agentSessionManager.getLastResultError(sessionId);
+		if (errorText === null) {
+			// Clean result — startup survived; stop tracking.
+			this.startupRetryState.delete(sessionId);
+			return false;
+		}
+		const entryCount = this.agentSessionManager.getEntryCount(sessionId);
+		if (entryCount > EdgeWorker.STARTUP_RETRY_MAX_ENTRIES) {
+			// Died mid-work, not at startup — a retry would replay a session
+			// that already did real (possibly repo-mutating) work.
+			this.startupRetryState.delete(sessionId);
+			return false;
+		}
+		if (this.classifyStartupError(errorText) !== "transient") {
+			this.startupRetryState.delete(sessionId);
+			this.logger.event("startup_error_permanent", {
+				sessionId,
+				error: errorText.slice(0, 160),
+			});
+			return false;
+		}
+
+		const issueId = this.sessionIssueId(sessionId);
+		// The failed attempt's raw API error must never become the held
+		// "completion summary" (gated workspaces hold error results too).
+		if (issueId && this.verificationGate.isPending(issueId)) {
+			this.verificationGate.reject(issueId);
+		}
+
+		state.firstFailureAt ??= Date.now();
+		if (state.attempts >= EdgeWorker.STARTUP_RETRY_MAX_ATTEMPTS) {
+			this.startupRetryState.delete(sessionId);
+			this.logger.event("startup_retries_exhausted", {
+				sessionId,
+				issueId,
+				attempts: state.attempts,
+				error: errorText.slice(0, 160),
+			});
+			// Silence is the specific failure being fixed: the client hears
+			// it as an error activity (policy-swept template; error activities
+			// post on quiet workspaces too).
+			void this.agentSessionManager.createErrorActivity(
+				sessionId,
+				CLIENT_MESSAGES.sessionStartFailed(),
+			);
+			return false;
+		}
+
+		state.attempts++;
+		const backoff =
+			EdgeWorker.STARTUP_RETRY_BASE_DELAY_MS * 2 ** (state.attempts - 1);
+		const delayMs = Math.round(backoff * (1 + Math.random() * 0.25));
+		this.logger.event("startup_retry_scheduled", {
+			sessionId,
+			issueId,
+			attempt: state.attempts,
+			delayMs,
+			error: errorText.slice(0, 160),
+		});
+		state.timer = setTimeout(() => {
+			state.timer = undefined;
+			this.runStartupRetry(sessionId).catch((error) => {
+				this.logger.error(
+					`Startup retry for session ${sessionId} failed to launch:`,
+					error,
+				);
+			});
+		}, delayMs);
+		state.timer.unref?.();
+		return true;
+	}
+
+	private async runStartupRetry(sessionId: string): Promise<void> {
+		const state = this.startupRetryState.get(sessionId);
+		if (!state) return;
+		// The session may have been cleaned up while we waited (issue went
+		// terminal, unassigned, stop signal) — a removed session never
+		// restarts itself (the PON-135 lesson).
+		if (!this.agentSessionManager.getSession(sessionId)) {
+			this.startupRetryState.delete(sessionId);
+			return;
+		}
+		const workspaceId = state.args[2];
+		// Re-acquire the lane: it was released with the failed attempt, and a
+		// queued session may hold it now. Lane-busy is not an API failure —
+		// wait another minute without consuming an attempt, up to a deadline.
+		if (
+			this.laneManager.isEnabled(workspaceId) &&
+			!this.laneManager.acquire(workspaceId, sessionId)
+		) {
+			if (
+				Date.now() - (state.firstFailureAt ?? Date.now()) >
+				EdgeWorker.STARTUP_RETRY_DEADLINE_MS
+			) {
+				this.startupRetryState.delete(sessionId);
+				this.logger.event("startup_retries_exhausted", {
+					sessionId,
+					reason: "lane_busy_past_deadline",
+				});
+				void this.agentSessionManager.createErrorActivity(
+					sessionId,
+					CLIENT_MESSAGES.sessionStartFailed(),
+				);
+				return;
+			}
+			state.timer = setTimeout(() => {
+				state.timer = undefined;
+				this.runStartupRetry(sessionId).catch(() => {});
+			}, 60_000);
+			state.timer.unref?.();
+			return;
+		}
+		this.logger.event("startup_retry_launched", {
+			sessionId,
+			attempt: state.attempts,
+		});
+		await this.initializeAgentRunner(...state.args);
+	}
+
 	private handleLaneSessionEnded(sessionId: string, reason: string): void {
+		// PON-138: a transient startup death schedules its own replay — the
+		// mirror stays as it was (the work is not over, it is retrying) and
+		// only the lane release below still applies.
+		if (
+			(reason === "result" || reason === "runner_error") &&
+			this.maybeScheduleStartupRetry(sessionId)
+		) {
+			const retryWorkspaceId = this.laneManager.workspaceOf(sessionId);
+			if (retryWorkspaceId && this.laneManager.isActive(sessionId)) {
+				this.releaseLaneAndContinue(
+					retryWorkspaceId,
+					sessionId,
+					"startup_retry",
+				);
+			}
+			return;
+		}
 		// Cockpit (PON-151): every reason reaching here is a real session end
 		// (result, runner_complete, runner_error, not_started) — but a
 		// session end is not always the END OF THE ISSUE'S WORK: a mention
@@ -6995,6 +7187,23 @@ ${taskSection}`;
 			this.logger.warn("Cannot initialize Claude runner without issue");
 			return;
 		}
+
+		// PON-138: capture the replay arguments. A retry re-enters here, so
+		// the attempt counter is preserved across replays.
+		const existingRetry = this.startupRetryState.get(sessionId);
+		this.startupRetryState.set(sessionId, {
+			args: [
+				agentSession,
+				repositories,
+				linearWorkspaceId,
+				guidance,
+				commentBody,
+				baseBranchOverrides,
+				routingMethod,
+			],
+			attempts: existingRetry?.attempts ?? 0,
+			firstFailureAt: existingRetry?.firstFailureAt,
+		});
 
 		const primaryRepo = repositories[0]!;
 
