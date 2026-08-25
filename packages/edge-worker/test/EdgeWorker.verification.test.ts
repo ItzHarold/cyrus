@@ -323,6 +323,97 @@ describe("EdgeWorker - verify-before-client-sees (PON-152)", () => {
 			expect(report).toContain("outside this session");
 		});
 
+		// PON-171: approve with notes — the delivery footer.
+		it("weaves preview, merge path, and the operator's notes into the client summary, in order", async () => {
+			privates(worker).mintGitHubTokenForRepo = vi.fn(async () => "gh-token");
+			const strictPost = vi.fn(async () => "activity-1");
+			privates(worker).agentSessionManager.postResponseActivityStrict =
+				strictPost;
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (_url: string, init: { body: string }) => {
+					const { query } = JSON.parse(init.body) as { query: string };
+					return {
+						ok: true,
+						status: 200,
+						json: async () =>
+							query.includes("markPullRequestReadyForReview")
+								? {
+										data: {
+											markPullRequestReadyForReview: {
+												pullRequest: { isDraft: false },
+											},
+										},
+									}
+								: {
+										data: {
+											repository: {
+												pullRequest: { id: "PR_1", isDraft: true },
+											},
+										},
+									},
+					};
+				}),
+			);
+
+			await privates(worker).deliverVerifiedWork(
+				ISSUE_ID,
+				"tested the export path end to end",
+			);
+			vi.unstubAllGlobals();
+
+			const body = strictPost.mock.calls[0]?.[1] as string;
+			const summaryAt = body.indexOf("All done.");
+			const previewAt = body.indexOf(
+				"**See it working:** https://webapp-git-x.vercel.app",
+			);
+			const mergeAt = body.indexOf(
+				"**To take it:** merge https://github.com/acme/webapp/pull/42",
+			);
+			const notesAt = body.indexOf(
+				"**Notes from our review:** tested the export path end to end",
+			);
+			expect(summaryAt).toBeGreaterThan(-1);
+			expect(previewAt).toBeGreaterThan(summaryAt);
+			expect(mergeAt).toBeGreaterThan(previewAt);
+			expect(notesAt).toBeGreaterThan(mergeAt);
+		});
+
+		it("bare approve delivers without a notes section", async () => {
+			privates(worker).mintGitHubTokenForRepo = vi.fn(async () => undefined);
+			const strictPost = vi.fn(async () => "activity-1");
+			privates(worker).agentSessionManager.postResponseActivityStrict =
+				strictPost;
+
+			await privates(worker).deliverVerifiedWork(ISSUE_ID);
+
+			const body = strictPost.mock.calls[0]?.[1] as string;
+			expect(body).toContain("All done.");
+			expect(body).not.toContain("Notes from our review");
+			// No token → PR left draft → no merge path shown to the client.
+			expect(body).not.toContain("**To take it:**");
+		});
+
+		it("a note containing an internal term refuses the WHOLE delivery before anything happens", async () => {
+			const mint = vi.fn(async () => "gh-token");
+			privates(worker).mintGitHubTokenForRepo = mint;
+			const strictPost = vi.fn(async () => "activity-1");
+			privates(worker).agentSessionManager.postResponseActivityStrict =
+				strictPost;
+
+			const report = await privates(worker).deliverVerifiedWork(
+				ISSUE_ID,
+				"checked it on the cyrus-community box under /root/deploys",
+			);
+
+			expect(report).toContain("Delivery refused");
+			// Nothing irreversible happened: no PR readied, nothing posted,
+			// still pending — the operator rephrases and approves again.
+			expect(mint).not.toHaveBeenCalled();
+			expect(strictPost).not.toHaveBeenCalled();
+			expect(privates(worker).verificationGate.isPending(ISSUE_ID)).toBe(true);
+		});
+
 		it("a replayed approval reports already-delivered and does nothing", async () => {
 			privates(worker).mintGitHubTokenForRepo = vi.fn(async () => undefined);
 			const strictPost = vi.fn(async () => "activity-1");
@@ -432,12 +523,29 @@ describe("EdgeWorker - verify-before-client-sees (PON-152)", () => {
 				ISSUE_ID,
 			);
 
-			expect(deliver).toHaveBeenCalledWith(ISSUE_ID);
+			// Bare approve carries no notes (PON-171).
+			expect(deliver).toHaveBeenCalledWith(ISSUE_ID, undefined);
 			const tracker = privates(worker).issueTrackers.get("cockpit-ws");
 			expect(tracker.createAgentActivity).toHaveBeenCalledWith(
 				expect.objectContaining({
 					content: expect.objectContaining({ body: "✅ delivered" }),
 				}),
+			);
+		});
+
+		it("approve with notes passes the remainder as the notes text (PON-171)", async () => {
+			const deliver = vi
+				.spyOn(privates(worker), "deliverVerifiedWork" as never)
+				.mockResolvedValue("✅ delivered" as never);
+
+			await privates(worker).handleMirrorAction(
+				mirrorAction("@cyrussh approve: looks great, tested the export path"),
+				ISSUE_ID,
+			);
+
+			expect(deliver).toHaveBeenCalledWith(
+				ISSUE_ID,
+				"looks great, tested the export path",
 			);
 		});
 
