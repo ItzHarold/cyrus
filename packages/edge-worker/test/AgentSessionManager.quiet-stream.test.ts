@@ -189,7 +189,7 @@ describe("AgentSessionManager - client-quiet stream (PON-179)", () => {
 		expect(worker).toContain("sanitizeClientSurfaceText(");
 	});
 
-	it("sanitizeClientSurfaceText redacts paths REPO-RELATIVE on quiet sessions only", () => {
+	it("sanitizeClientSurfaceText: full policy on quiet, path floor on non-quiet (PON-182)", () => {
 		const quiet = makeManager(true).manager;
 		const sanitized = quiet.sanitizeClientSurfaceText(
 			SESSION_ID,
@@ -198,12 +198,47 @@ describe("AgentSessionManager - client-quiet stream (PON-179)", () => {
 		);
 		expect(sanitized).toBe("Should I update app/page.tsx?");
 
+		// Non-quiet: paths are STILL sanitized (unconditional floor) — but
+		// names are left alone (dogfood narration says package names).
 		const loud = makeManager(false).manager;
-		const untouched = loud.sanitizeClientSurfaceText(
+		const floored = loud.sanitizeClientSurfaceText(
 			SESSION_ID,
 			"elicitation",
-			"path /root/.cyrus-community/worktrees/ws-1/FRO-99/app/page.tsx stays",
+			"Update cyrus-edge-worker config at /root/.cyrus-community/worktrees/ws-1/FRO-99/app/page.tsx?",
 		);
-		expect(untouched).toContain("/root/.cyrus-community");
+		expect(floored).toBe("Update cyrus-edge-worker config at app/page.tsx?");
+	});
+
+	// PON-182: the unconditional path floor on NON-quiet sessions.
+	it("non-quiet narration posts, but never with a box path — both posting paths", async () => {
+		const { manager, postActivity } = makeManager(false);
+
+		await manager.createActionActivity(
+			SESSION_ID,
+			"Edit",
+			"/root/.cyrus-community/worktrees/ws-1/FRO-99/SUPPORT.md",
+		);
+		const sync = (
+			manager as unknown as {
+				syncEntryToActivitySink: (
+					entry: Record<string, unknown>,
+					sessionId: string,
+				) => Promise<void>;
+			}
+		).syncEntryToActivitySink.bind(manager);
+		await sync(
+			{
+				type: "assistant",
+				content:
+					"Reading /root/.cyrus-community/worktrees/ws-1/FRO-99/README.md now",
+			},
+			SESSION_ID,
+		);
+
+		expect(postActivity).toHaveBeenCalledTimes(2);
+		const all = JSON.stringify(postActivity.mock.calls);
+		expect(all).not.toContain("/root/");
+		expect(all).toContain("SUPPORT.md");
+		expect(all).toContain("Reading README.md now");
 	});
 });

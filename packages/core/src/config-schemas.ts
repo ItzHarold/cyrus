@@ -290,6 +290,17 @@ export const LinearWorkspaceConfigSchema = z.object({
 	 */
 	verifyBeforeDelivery: z.boolean().optional(),
 	/**
+	 * Client-quiet activity stream (PON-179/182): suppress working narration
+	 * (thought/action activities) on this workspace's session threads —
+	 * clients see the ack, one generic status per invocation, elicitations,
+	 * and the final response. Independent of the gates: explicit value wins;
+	 * ABSENT falls back to "quiet if either client-flow gate is on", which
+	 * preserves pre-flag behaviour with zero config edits. Path hygiene is
+	 * NOT controlled by this flag — internal paths are sanitized on every
+	 * client-visible surface unconditionally.
+	 */
+	clientQuiet: z.boolean().optional(),
+	/**
 	 * How many sessions this workspace may run at once when serialized
 	 * (PON-139). Default 1.
 	 *

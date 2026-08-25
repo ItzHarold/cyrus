@@ -31,6 +31,7 @@ import {
 import {
 	findClientContentViolations,
 	redactClientContent,
+	sanitizeClientPaths,
 } from "./client-content-policy.js";
 import { CLIENT_MESSAGES } from "./client-messages.js";
 import {
@@ -478,17 +479,59 @@ export class AgentSessionManager extends EventEmitter {
 	}
 
 	/**
-	 * PON-179: policy-sanitize text bound for a client surface OUTSIDE this
-	 * manager's own posting funnel (the elicitation body). Applies only to
-	 * client-quiet (gated) sessions — non-gated surfaces are unchanged.
+	 * PON-179/182: policy-sanitize text bound for a client surface OUTSIDE
+	 * this manager's own posting funnel (the elicitation body). Quiet
+	 * sessions get the full policy; every other session still gets the
+	 * unconditional path floor — no absolute box path on any client surface.
 	 */
 	sanitizeClientSurfaceText(
 		sessionId: string,
 		surface: string,
 		text: string,
 	): string {
-		if (!this.isClientQuietSession?.(sessionId)) return text;
-		return this.applyClientContentPolicy(sessionId, surface, text);
+		if (this.isClientQuietSession?.(sessionId)) {
+			return this.applyClientContentPolicy(sessionId, surface, text);
+		}
+		const workspacePath = this.sessions.get(sessionId)?.workspace?.path;
+		return sanitizeClientPaths(text, {
+			stripPrefixes: workspacePath ? [workspacePath] : [],
+		}).text;
+	}
+
+	/**
+	 * PON-182: the unconditional path floor for activity payloads. Internal
+	 * absolute paths have no legitimate use on ANY client-visible surface —
+	 * quiet or not — so every string field that can carry one is rewritten
+	 * repo-relative (or …/basename off-workspace). Debug-logged, not
+	 * journaled per hit: paths in narration are routine on non-quiet
+	 * workspaces and per-hit WARNs would be noise.
+	 */
+	private sanitizePathsInContent<T extends Record<string, unknown>>(
+		sessionId: string,
+		content: T,
+	): T {
+		const workspacePath = this.sessions.get(sessionId)?.workspace?.path;
+		const options = {
+			stripPrefixes: workspacePath ? [workspacePath] : [],
+		};
+		let changed = false;
+		const out: Record<string, unknown> = { ...content };
+		for (const key of ["body", "action", "parameter", "result"]) {
+			const value = out[key];
+			if (typeof value === "string") {
+				const { text, redactions } = sanitizeClientPaths(value, options);
+				if (redactions.length > 0) {
+					out[key] = text;
+					changed = true;
+				}
+			}
+		}
+		if (changed) {
+			this.sessionLog(sessionId).debug(
+				"[event:client_path_sanitized] internal path(s) rewritten repo-relative in outbound activity",
+			);
+		}
+		return changed ? (out as T) : content;
 	}
 
 	/**
@@ -1626,6 +1669,10 @@ export class AgentSessionManager extends EventEmitter {
 				} as typeof content;
 			}
 
+			// PON-182: unconditional path floor on the streamed path too —
+			// non-quiet narration posts, but never with a box path in it.
+			content = this.sanitizePathsInContent(sessionId, content);
+
 			const result = await activitySink.postActivity(
 				session.externalSessionId,
 				content,
@@ -1882,6 +1929,15 @@ export class AgentSessionManager extends EventEmitter {
 						input.content.body,
 					),
 				},
+			};
+		}
+
+		// PON-182: unconditional path floor — applies to whatever is left
+		// posting, quiet or not (a no-op on already-clean content).
+		if (input.content && typeof input.content === "object") {
+			input = {
+				...input,
+				content: this.sanitizePathsInContent(sessionId, input.content),
 			};
 		}
 

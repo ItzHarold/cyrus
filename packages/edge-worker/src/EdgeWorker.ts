@@ -5345,11 +5345,14 @@ ${taskSection}`;
 			this.resolveWorkspaceIdForSession(sessionId) ??
 			this.laneManager.workspaceOf(sessionId);
 		if (!workspaceId) return false;
-		// RAW workspace flags, not verificationGateEnabled: that helper folds
-		// in cockpit topology, but a gated tenant without a cockpit must
-		// still never receive narration. Either gate marks the workspace as
-		// client-flow; both default ON, so new tenants are quiet by default.
 		const ws = this.config.linearWorkspaces?.[workspaceId];
+		// PON-182: the explicit per-workspace flag wins — narration
+		// suppression is independent of the gates. ABSENT falls back to the
+		// gate-derived default (RAW flags, not verificationGateEnabled: that
+		// helper folds in cockpit topology, but a gated tenant without a
+		// cockpit must still never receive narration), which preserves
+		// pre-flag behaviour with zero config edits.
+		if (ws?.clientQuiet !== undefined) return ws.clientQuiet;
 		return (
 			this.scopeGateEnabled(workspaceId) || ws?.verifyBeforeDelivery !== false
 		);

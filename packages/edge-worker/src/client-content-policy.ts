@@ -185,6 +185,45 @@ export function redactClientContent(
 }
 
 /**
+ * Path-ONLY sanitization (PON-182): internal absolute paths have no
+ * legitimate use on ANY client-visible surface, gated or not — so this
+ * runs unconditionally on activity payloads and elicitation bodies.
+ * Deliberately narrower than redactClientContent: internal names and model
+ * ids stay context-dependent (dogfood narration on the operator's own
+ * issues legitimately says package names) and remain scoped to quiet
+ * surfaces / the final-response tripwire.
+ */
+export function sanitizeClientPaths(
+	text: string,
+	options?: { stripPrefixes?: string[] },
+): { text: string; redactions: string[] } {
+	const redactions: string[] = [];
+	const urls: string[] = [];
+	let out = text.replace(URL_PATTERN, (m) => {
+		urls.push(m);
+		return `U${urls.length - 1}`;
+	});
+	const prefixes = (options?.stripPrefixes ?? []).filter(Boolean);
+	out = out.replace(
+		/(?:\/root\/|~\/\.[\w-]+\/|\/home\/[\w-]+\/)[\w./-]*/g,
+		(m) => {
+			redactions.push(m);
+			for (const prefix of prefixes) {
+				if (m.startsWith(prefix)) {
+					const relative = m.slice(prefix.length).replace(/^\/+/, "");
+					if (relative) return relative;
+					return "the project root";
+				}
+			}
+			const base = m.replace(/\/+$/, "").split("/").pop() ?? "";
+			return base ? `…/${base}` : "…";
+		},
+	);
+	out = out.replace(/U(\d+)/g, (_m, i) => urls[Number(i)] ?? "");
+	return { text: out, redactions };
+}
+
+/**
  * The intrinsic half: an always-on system-prompt rule for every session
  * whose output can reach a client surface.
  */
