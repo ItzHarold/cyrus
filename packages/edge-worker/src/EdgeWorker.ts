@@ -157,7 +157,10 @@ import { LiveChatRepositoryProvider } from "./ChatRepositoryProvider.js";
 import { ChatSessionHandler } from "./ChatSessionHandler.js";
 import { CockpitMirror } from "./CockpitMirror.js";
 import { ConfigManager, type RepositoryChanges } from "./ConfigManager.js";
-import { buildClientSurfaceRuleBlock } from "./client-content-policy.js";
+import {
+	buildClientSurfaceRuleBlock,
+	findClientContentViolations,
+} from "./client-content-policy.js";
 import { CLIENT_MESSAGES } from "./client-messages.js";
 import { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
 import { EgressProxy } from "./EgressProxy.js";
@@ -5987,6 +5990,16 @@ ${taskSection}`;
 		return true;
 	}
 
+	/**
+	 * The preview link for the delivery footer (PON-171): the first Vercel
+	 * deployment URL the held summary mentions. Absent = omitted honestly.
+	 */
+	private extractPreviewUrl(summary: string): string | undefined {
+		return /https?:\/\/[\w][\w.-]*vercel\.app[\w\-./?=&#%]*/i.exec(
+			summary,
+		)?.[0];
+	}
+
 	/** Upsert the cockpit mirror to in-verification, assigned, with the held summary. */
 	private mirrorInVerification(issueId: string): void {
 		const record = this.verificationGate.get(issueId);
@@ -6087,7 +6100,10 @@ ${taskSection}`;
 	 * never pointed at a draft. Returns a human-readable report for the
 	 * mirror thread.
 	 */
-	private async deliverVerifiedWork(issueId: string): Promise<string> {
+	private async deliverVerifiedWork(
+		issueId: string,
+		notes?: string,
+	): Promise<string> {
 		const record = this.verificationGate.get(issueId);
 		if (!record) {
 			return "Nothing is awaiting verification on this issue.";
@@ -6096,7 +6112,30 @@ ${taskSection}`;
 			return `Already delivered at ${record.deliveredAt}.`;
 		}
 
+		// PON-171: the operator's notes land on a CLIENT surface — the R2
+		// policy applies to them like any other outbound text, and here the
+		// operator is present to rephrase, so a violation refuses the whole
+		// delivery BEFORE anything irreversible (no PR readied, no post).
+		if (notes) {
+			const violations = findClientContentViolations(notes);
+			if (violations.length) {
+				const offending = [
+					...new Set(violations.map((violation) => violation.match)),
+				].slice(0, 3);
+				this.logger.event("delivery_notes_refused", {
+					issueId,
+					issueIdentifier: record.issueIdentifier,
+					rules: [
+						...new Set(violations.map((violation) => violation.rule)),
+					].join(","),
+				});
+				return `❌ Delivery refused: the notes contain internal terms the client must not see (${offending.join(", ")}). Rephrase the notes and approve again — nothing was delivered, the PR stays draft.`;
+			}
+		}
+
 		const report: string[] = [];
+		/** Own-repo PRs confirmed ready — the merge path shown to the client. */
+		const mergeablePrUrls: string[] = [];
 		// Only PRs in the session's OWN repository are acted on: the URL list
 		// comes from model-written free text, which can quote foreign PR
 		// links (review finding, 2026-08-24).
@@ -6124,6 +6163,7 @@ ${taskSection}`;
 					continue;
 				}
 				const outcome = await markPullRequestReady(token, parsed);
+				mergeablePrUrls.push(url);
 				report.push(
 					outcome === "ready"
 						? `✅ ${url} marked ready for review.`
@@ -6136,14 +6176,27 @@ ${taskSection}`;
 			}
 		}
 
-		// Post the held summary to the client's session thread — STRICTLY:
+		// PON-171: the client summary is the held summary (already
+		// deliverable-framed by R2's intrinsic rules) plus a delivery footer
+		// — preview, merge path, and the operator's notes when present.
+		const previewUrl = this.extractPreviewUrl(record.summary);
+		const footer = CLIENT_MESSAGES.deliveryFooter(
+			previewUrl,
+			mergeablePrUrls.join(" · ") || undefined,
+			notes || undefined,
+		);
+		const clientSummary = footer
+			? `${record.summary}\n\n${footer}`
+			: record.summary;
+
+		// Post the summary to the client's session thread — STRICTLY:
 		// the lenient posting paths swallow failures, and a swallowed failure
 		// here would mark work delivered that the client never saw (review
 		// finding, 2026-08-24: the previous catch was dead code).
 		try {
 			await this.agentSessionManager.postResponseActivityStrict(
 				record.sessionId,
-				record.summary,
+				clientSummary,
 			);
 			report.push("✅ Client summary posted.");
 		} catch (error) {
@@ -6289,11 +6342,16 @@ ${taskSection}`;
 		}
 
 		if (isApprove) {
+			// PON-171: everything after the keyword is the operator's notes,
+			// woven into the client summary. Bare approve still works.
+			const notes =
+				/^approve\b[:,-]?\s*([\s\S]*)$/i.exec(body)?.[1]?.trim() || undefined;
 			this.logger.event("verification_approve_action", {
 				clientIssueId,
 				actorId: action.actorId,
+				hasNotes: notes !== undefined,
 			});
-			const report = await this.deliverVerifiedWork(clientIssueId);
+			const report = await this.deliverVerifiedWork(clientIssueId, notes);
 			await reply(report);
 			return;
 		}
@@ -6314,7 +6372,7 @@ ${taskSection}`;
 			return;
 		}
 		await reply(
-			'This is a cockpit mirror — a derived view. Mention me with "approve" to deliver the completed work to the client, or "reject: <feedback>" to send it back. Discussion belongs on the client\u2019s issue.',
+			'This is a cockpit mirror — a derived view. Mention me with "approve" (or "approve: <notes for the client>") to deliver the completed work, or "reject: <feedback>" to send it back. Discussion belongs on the client\u2019s issue.',
 		);
 	}
 

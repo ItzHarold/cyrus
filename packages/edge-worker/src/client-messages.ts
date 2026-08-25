@@ -40,4 +40,22 @@ export const CLIENT_MESSAGES = {
 		`This one is taking longer than planned — the work is in final ` +
 		`verification on our side. No action needed from you; we'll post the ` +
 		`result here as soon as it clears.`,
+
+	/**
+	 * PON-171: the delivery footer appended to the held summary when the
+	 * operator approves. Sections render only when present; an empty call
+	 * renders nothing.
+	 */
+	deliveryFooter: (
+		previewUrl?: string,
+		mergeUrls?: string,
+		reviewNotes?: string,
+	) => {
+		const lines = [
+			previewUrl ? `**See it working:** ${previewUrl}` : "",
+			mergeUrls ? `**To take it:** merge ${mergeUrls}` : "",
+			reviewNotes ? `**Notes from our review:** ${reviewNotes}` : "",
+		].filter(Boolean);
+		return lines.length ? `---\n${lines.join("\n")}` : "";
+	},
 } as const;
