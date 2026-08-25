@@ -533,6 +533,76 @@ describe("EdgeWorker - verify-before-client-sees (PON-152)", () => {
 			);
 		});
 
+		// PON-173: reviewer sets.
+		it("any member of cockpit.reviewers can approve; the legacy assigneeId still works", async () => {
+			privates(worker).config.cockpit.reviewers = [
+				"approver-user-id",
+				"second-reviewer",
+			];
+			const deliver = vi
+				.spyOn(privates(worker), "deliverVerifiedWork" as never)
+				.mockResolvedValue("✅ delivered" as never);
+
+			await privates(worker).handleMirrorAction(
+				mirrorAction("@cyrussh approve", "second-reviewer"),
+				ISSUE_ID,
+			);
+			expect(deliver).toHaveBeenCalledTimes(1);
+
+			// Back-compat: with only assigneeId configured, that user approves.
+			privates(worker).config.cockpit.reviewers = undefined;
+			await privates(worker).handleMirrorAction(
+				mirrorAction("@cyrussh approve", "approver-user-id"),
+				ISSUE_ID,
+			);
+			expect(deliver).toHaveBeenCalledTimes(2);
+		});
+
+		it("a non-member still cannot approve, even with a reviewer set declared", async () => {
+			privates(worker).config.cockpit.reviewers = [
+				"approver-user-id",
+				"second-reviewer",
+			];
+			const deliver = vi
+				.spyOn(privates(worker), "deliverVerifiedWork" as never)
+				.mockResolvedValue("✅ delivered" as never);
+
+			await privates(worker).handleMirrorAction(
+				mirrorAction("@cyrussh approve", "intruder"),
+				ISSUE_ID,
+			);
+
+			expect(deliver).not.toHaveBeenCalled();
+			const tracker = privates(worker).issueTrackers.get("cockpit-ws");
+			expect(tracker.createAgentActivity).toHaveBeenCalledWith(
+				expect.objectContaining({
+					content: expect.objectContaining({
+						body: expect.stringContaining("Only the configured approver"),
+					}),
+				}),
+			);
+		});
+
+		it("a per-lane assignment routes the in-verification mirror to that tenant's reviewer", async () => {
+			privates(worker).config.cockpit.reviewers = ["approver-user-id"];
+			privates(worker).config.cockpit.assignments = {
+				[GATED_WS]: "lane-reviewer",
+			};
+			registerSession(worker);
+			privates(worker).laneManager.acquire(GATED_WS, SESSION_ID);
+			hold();
+			mirror.upsert.mockClear();
+
+			privates(worker).mirrorInVerification(ISSUE_ID);
+
+			expect(mirror.upsert).toHaveBeenCalledWith(
+				expect.objectContaining({ issueId: ISSUE_ID }),
+				GATED_WS,
+				"in-verification",
+				expect.objectContaining({ assigneeId: "lane-reviewer" }),
+			);
+		});
+
 		it("approve with notes passes the remainder as the notes text (PON-171)", async () => {
 			const deliver = vi
 				.spyOn(privates(worker), "deliverVerifiedWork" as never)

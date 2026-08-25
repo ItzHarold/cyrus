@@ -6010,6 +6010,31 @@ ${taskSection}`;
 	}
 
 	/**
+	 * The allowed-reviewer set (PON-173): `cockpit.reviewers` when declared
+	 * (first entry = default assignee), else the legacy single
+	 * `cockpit.assigneeId`. Empty = no approval surface.
+	 */
+	private cockpitReviewers(): string[] {
+		const cockpit = this.config.cockpit;
+		if (cockpit?.reviewers?.length) return cockpit.reviewers;
+		return cockpit?.assigneeId ? [cockpit.assigneeId] : [];
+	}
+
+	/**
+	 * The reviewer a tenant's mirrors are assigned to (PON-173): the
+	 * per-lane assignment when declared, else the default reviewer.
+	 */
+	private reviewerForWorkspace(
+		tenantWorkspaceId: string | undefined,
+	): string | undefined {
+		const cockpit = this.config.cockpit;
+		if (tenantWorkspaceId && cockpit?.assignments?.[tenantWorkspaceId]) {
+			return cockpit.assignments[tenantWorkspaceId];
+		}
+		return this.cockpitReviewers()[0];
+	}
+
+	/**
 	 * The preview link for the delivery footer (PON-171): the first Vercel
 	 * deployment URL the held summary mentions. Absent = omitted honestly.
 	 */
@@ -6043,7 +6068,9 @@ ${taskSection}`;
 			record.workspaceId,
 			"in-verification",
 			{
-				assigneeId: this.config.cockpit?.assigneeId,
+				// PON-173: the tenant's own reviewer when assigned, else the
+				// default reviewer.
+				assigneeId: this.reviewerForWorkspace(record.workspaceId),
 				note,
 				// The PR links join the persistent operator brief (PON-170) —
 				// unlike `note`, they survive later transitions.
@@ -6340,14 +6367,16 @@ ${taskSection}`;
 		const rejectMatch = /^reject\b[:,-]?\s*([\s\S]*)$/i.exec(body);
 		const isApprove = /^approve\b/i.test(body);
 		if (isApprove || rejectMatch) {
-			const approverId = this.config.cockpit?.assigneeId;
-			if (!approverId) {
+			// PON-173: an allowed-reviewer SET — `reviewers` when declared,
+			// the legacy single `assigneeId` otherwise.
+			const reviewers = this.cockpitReviewers();
+			if (reviewers.length === 0) {
 				await reply(
-					"Approve/reject requires `cockpit.assigneeId` in the config — the approver must be declared before anything can be delivered.",
+					"Approve/reject requires a configured reviewer (`cockpit.reviewers` or `cockpit.assigneeId`) — the approver must be declared before anything can be delivered.",
 				);
 				return;
 			}
-			if (action.actorId !== approverId) {
+			if (!action.actorId || !reviewers.includes(action.actorId)) {
 				this.logger.event("verification_action_refused", {
 					clientIssueId,
 					actorId: action.actorId,

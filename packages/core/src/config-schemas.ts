@@ -600,8 +600,22 @@ export const EdgeConfigSchema = z.object({
 			/**
 			 * User the mirror is assigned to when work reaches
 			 * in-verification (PON-152) — assignment is the notification.
+			 * Legacy single-reviewer form (PON-173): reads as
+			 * `reviewers: [assigneeId]` when `reviewers` is absent.
 			 */
 			assigneeId: z.string().optional(),
+			/**
+			 * Allowed-reviewer set (PON-173): any member may approve/reject
+			 * delivery; the first entry is the default assignee. Takes
+			 * precedence over `assigneeId` when both are set.
+			 */
+			reviewers: z.array(z.string()).optional(),
+			/**
+			 * Optional per-tenant-workspace reviewer assignment (PON-173):
+			 * that tenant's mirrors and in-verification notifications go to
+			 * their reviewer instead of the default.
+			 */
+			assignments: z.record(z.string(), z.string()).optional(),
 		})
 		.optional(),
 

@@ -15,6 +15,7 @@
  */
 
 import type { ILogger, SerializedCockpitMirror } from "cyrus-core";
+import { computeRoundRobinOrder, stateRankOf } from "./operator-ordering.js";
 
 /** The mirror's state labels, from the PON-151 design table. */
 export const COCKPIT_STATES = [
@@ -94,6 +95,23 @@ export class CockpitMirror {
 				projectId?: string;
 		  }
 		| undefined {
+		const config = this.guardedConfig();
+		if (!config) return undefined;
+		// Never mirror the cockpit's own workspace: the operator already
+		// lives there, and self-mirroring doubles every issue.
+		if (tenantWorkspaceId === config.linearWorkspaceId) return undefined;
+		return config;
+	}
+
+	/** The declared config, misconfiguration-guarded, token verified. */
+	private guardedConfig():
+		| {
+				linearWorkspaceId: string;
+				workspaceName: string;
+				teamId: string;
+				projectId?: string;
+		  }
+		| undefined {
 		const config = this.deps.getConfig();
 		if (!config) return undefined;
 		// The declared workspace NAME must agree with the configured entry
@@ -111,9 +129,6 @@ export class CockpitMirror {
 			}
 			return undefined;
 		}
-		// Never mirror the cockpit's own workspace: the operator already
-		// lives there, and self-mirroring doubles every issue.
-		if (tenantWorkspaceId === config.linearWorkspaceId) return undefined;
 		if (!this.deps.getToken(config.linearWorkspaceId)) return undefined;
 		return config;
 	}
@@ -255,7 +270,72 @@ export class CockpitMirror {
 				state: record.state,
 			});
 			await this.deps.persist();
+			// PON-173: every transition can change the fair order. Awaited so
+			// a transition's ordering effect is visible when its chain step
+			// resolves; the in-flight guard collapses concurrent chains'
+			// calls into a trailing rerun.
+			await this.resyncOperatorOrdering();
 		});
+	}
+
+	/** Ordering resync serialization (PON-173): one at a time, trailing rerun. */
+	private orderingInFlight = false;
+	private orderingQueued = false;
+
+	/**
+	 * Recompute the round-robin operator order (PON-173) and write it as
+	 * Linear sortOrder on every mirror whose rank changed. Fire-and-forget
+	 * from transitions; serialized against itself with a trailing rerun so
+	 * a burst of transitions converges on the final order.
+	 */
+	async resyncOperatorOrdering(): Promise<void> {
+		if (this.orderingInFlight) {
+			this.orderingQueued = true;
+			return;
+		}
+		this.orderingInFlight = true;
+		try {
+			do {
+				this.orderingQueued = false;
+				const config = this.guardedConfig();
+				if (!config) return;
+				const items = [...this.mirrors.entries()].map(
+					([issueId, record], seq) => ({
+						issueId,
+						tenantWorkspaceId: record.tenantWorkspaceId,
+						stateRank: stateRankOf(record.state),
+						seq,
+					}),
+				);
+				const order = computeRoundRobinOrder(items);
+				let changed = 0;
+				for (let rank = 0; rank < order.length; rank++) {
+					const record = this.mirrors.get(order[rank] as string);
+					if (!record?.mirrorIssueId) continue;
+					if (record.sortOrder === rank) continue;
+					await this.gql(
+						config.linearWorkspaceId,
+						`mutation($id: String!, $input: IssueUpdateInput!) {
+							issueUpdate(id: $id, input: $input) { success }
+						}`,
+						{ id: record.mirrorIssueId, input: { sortOrder: rank } },
+					);
+					record.sortOrder = rank;
+					changed++;
+				}
+				if (changed > 0) {
+					this.logger.event("cockpit_ordering_resynced", {
+						mirrors: order.length,
+						changed,
+					});
+					await this.deps.persist();
+				}
+			} while (this.orderingQueued);
+		} catch (error) {
+			this.logger.error("[cockpit] ordering resync failed:", error);
+		} finally {
+			this.orderingInFlight = false;
+		}
 	}
 
 	/**
@@ -322,6 +402,8 @@ export class CockpitMirror {
 				reason,
 			});
 			await this.deps.persist();
+			// PON-173: a departure re-ranks what remains.
+			await this.resyncOperatorOrdering();
 		});
 	}
 
@@ -416,6 +498,8 @@ export class CockpitMirror {
 				live: liveIds.size,
 				tracked: this.mirrors.size,
 			});
+			// PON-173: boot re-ranks the surviving mirrors.
+			await this.resyncOperatorOrdering();
 		} catch (error) {
 			this.logger.error("[cockpit] reconcile failed:", error);
 		}
