@@ -510,6 +510,9 @@
 					"verifyBeforeDelivery": {
 						"type": "boolean"
 					},
+					"clientQuiet": {
+						"type": "boolean"
+					},
 					"laneConcurrency": {
 						"type": "integer",
 						"minimum": 1,
