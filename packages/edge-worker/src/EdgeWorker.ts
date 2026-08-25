@@ -8389,7 +8389,12 @@ ${taskSection}`;
 		];
 	}
 
-	private resolveSessionFromCwd(cwd: string): ResolvedSession | null {
+	/**
+	 * Find the live session whose workspace contains `cwd` — exact worktree
+	 * or repo path first, then path-prefix. Shared by the cwd-keyed MCP
+	 * tools (`log_failure_mode`, `record_operator_note`).
+	 */
+	private sessionForCwd(cwd: string): CyrusAgentSession | null {
 		if (!cwd) return null;
 		const normalize = (p: string) => p.replace(/\/+$/, "");
 		const target = normalize(cwd);
@@ -8414,7 +8419,11 @@ ${taskSection}`;
 					return root && target.startsWith(`${root}/`);
 				});
 
-		const session = exact ?? prefix;
+		return exact ?? prefix ?? null;
+	}
+
+	private resolveSessionFromCwd(cwd: string): ResolvedSession | null {
+		const session = this.sessionForCwd(cwd);
 		if (!session) return null;
 
 		const runnerType = session.claudeSessionId
@@ -8480,7 +8489,68 @@ ${taskSection}`;
 				httpClient: failureModesClient,
 			};
 		}
+		// Operator-note channel (PON-169): the internal reading the gate
+		// keeps off the client's thread lands on the scope record and the
+		// cockpit mirror instead.
+		options.operatorNotes = {
+			deliver: (cwd: string, note: string) =>
+				this.deliverOperatorNote(cwd, note),
+		};
 		return options;
+	}
+
+	/**
+	 * Store a session's internal reading operator-side (PON-169): on the
+	 * issue's scope-approval record (persisted) and in the cockpit mirror
+	 * description (visible). Nothing here touches a tenant surface.
+	 */
+	private async deliverOperatorNote(
+		cwd: string,
+		note: string,
+	): Promise<{ ok: true } | { ok: false; error: string }> {
+		try {
+			const session = this.sessionForCwd(cwd);
+			if (!session) {
+				return {
+					ok: false,
+					error: `no session matches cwd=${cwd} — pass the session's actual working directory`,
+				};
+			}
+			const issueId = session.issueContext?.issueId ?? session.issueId;
+			if (!issueId) {
+				return { ok: false, error: "the session has no issue to record on" };
+			}
+			const issueIdentifier = session.issueContext?.issueIdentifier;
+			this.scopeApprovals.recordOperatorNote(issueId, note);
+			await this.persistScopeApprovals("operator_note_recorded");
+			// The note itself never goes to the journal — length only. It is
+			// internal detail, and logs travel further than the cockpit.
+			this.logger.event("operator_note_recorded", {
+				issueId,
+				issueIdentifier,
+				sessionId: session.id,
+				noteLength: note.length,
+			});
+			const workspaceId =
+				this.resolveWorkspaceIdForSession(session.id) ??
+				this.laneManager.workspaceOf(session.id);
+			if (workspaceId) {
+				// Best-effort like every other mirror write: a broken cockpit
+				// must not fail the recording — the persisted record is the
+				// authoritative copy.
+				void this.cockpitMirror.setOperatorNote(
+					{ issueId, issueIdentifier },
+					workspaceId,
+					note,
+				);
+			}
+			return { ok: true };
+		} catch (error) {
+			return {
+				ok: false,
+				error: error instanceof Error ? error.message : String(error),
+			};
+		}
 	}
 
 	private handleChildSessionMapping(

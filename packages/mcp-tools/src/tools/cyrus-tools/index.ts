@@ -12,6 +12,10 @@ import {
 	type ResolveSessionFromCwd,
 	registerLogFailureModeTool,
 } from "./log-failure-mode.js";
+import {
+	type OperatorNoteDelivery,
+	registerRecordOperatorNoteTool,
+} from "./record-operator-note.js";
 
 /**
  * Detect MIME type based on file extension
@@ -108,6 +112,12 @@ export interface CyrusToolsOptions {
 		resolveSessionFromCwd: ResolveSessionFromCwd;
 		httpClient: FailureModesHttpClient;
 	};
+
+	/**
+	 * Optional delivery hook for the `record_operator_note` tool (PON-169).
+	 * When omitted, the tool is not registered.
+	 */
+	operatorNotes?: OperatorNoteDelivery;
 }
 
 /**
@@ -994,6 +1004,12 @@ export function createCyrusToolsServer(
 			httpClient: options.failureModes.httpClient,
 			fallbackSessionId: options.parentSessionId,
 		});
+	}
+
+	// Operator-note channel (PON-169): registered only when the harness
+	// provides a delivery hook — CLI mode has no operator record to write to.
+	if (options.operatorNotes) {
+		registerRecordOperatorNoteTool(server, options.operatorNotes);
 	}
 
 	// Register OpenAI-based tools if OPENAI_API_KEY is available

@@ -446,4 +446,74 @@ describe("CockpitMirror", () => {
 		expect(restored.size).toBe(1);
 		expect(restored.serialize()[issue.issueId]?.mirrorIssueId).toBe("mirror-1");
 	});
+
+	// PON-169: the internal reading lands in the mirror description and
+	// survives every later state transition.
+	describe("operator note (PON-169)", () => {
+		it("setOperatorNote writes the reading into the description, keeping the current state", async () => {
+			makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
+			await mirror.upsert(issue, TENANT_WS, "active");
+			await mirror.setOperatorNote(
+				issue,
+				TENANT_WS,
+				"## Approach\nTouch api/export.ts; risk: pagination.",
+			);
+
+			const update = calls.filter((c) => c.query.includes("issueUpdate")).pop();
+			expect(update).toBeDefined();
+			const input = (update?.variables as { input: { description: string } })
+				.input;
+			expect(input.description).toContain("## Internal reading");
+			expect(input.description).toContain("Touch api/export.ts");
+			// State unchanged: the active label stays on the mirror.
+			expect((input as unknown as { labelIds: string[] }).labelIds).toContain(
+				"label-active",
+			);
+		});
+
+		it("a later state transition re-renders the description WITH the note", async () => {
+			makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
+			await mirror.upsert(issue, TENANT_WS, "active");
+			await mirror.setOperatorNote(issue, TENANT_WS, "internal reading text");
+			await mirror.upsert(issue, TENANT_WS, "in-verification");
+
+			const update = calls.filter((c) => c.query.includes("issueUpdate")).pop();
+			const input = (update?.variables as { input: { description: string } })
+				.input;
+			expect(input.description).toContain("internal reading text");
+			expect(input.description).toContain("in-verification");
+		});
+
+		it("creates the mirror as active when the note arrives before any mirror exists", async () => {
+			makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
+			await mirror.setOperatorNote(issue, TENANT_WS, "early reading");
+
+			const create = calls.find((c) => c.query.includes("issueCreate"));
+			expect(create).toBeDefined();
+			const input = (
+				create?.variables as {
+					input: { description: string; labelIds: string[] };
+				}
+			).input;
+			expect(input.description).toContain("early reading");
+			expect(input.labelIds).toContain("label-active");
+		});
+
+		it("the note survives serialize/restore", async () => {
+			makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
+			await mirror.upsert(issue, TENANT_WS, "active");
+			await mirror.setOperatorNote(issue, TENANT_WS, "persisted reading");
+			const snapshot = mirror.serialize();
+			expect(snapshot[issue.issueId]?.operatorNote).toBe("persisted reading");
+
+			const restored = makeMirror({
+				linearWorkspaceId: COCKPIT_WS,
+				teamId: TEAM_ID,
+			});
+			restored.restore(snapshot);
+			expect(restored.serialize()[issue.issueId]?.operatorNote).toBe(
+				"persisted reading",
+			);
+		});
+	});
 });
