@@ -45,6 +45,12 @@ export interface AskUserQuestionHandlerDeps {
 	 * @param organizationId - Linear organization/workspace ID
 	 */
 	getIssueTracker: (organizationId: string) => IIssueTrackerService | null;
+	/**
+	 * PON-179: policy-sanitize the elicitation body before it reaches the
+	 * client surface (repo-relative paths, no internal names). Optional —
+	 * absent means post verbatim, as before.
+	 */
+	sanitizeClientText?: (sessionId: string, text: string) => string;
 }
 
 /**
@@ -162,7 +168,13 @@ export class AskUserQuestionHandler {
 			.map((opt) => `• **${opt.label}**: ${opt.description}`)
 			.join("\n");
 
-		const elicitationBody = `${question.question}\n\n${optionsText}`;
+		const rawElicitationBody = `${question.question}\n\n${optionsText}`;
+		// PON-179: the elicitation lands on the client surface — sanitize.
+		const elicitationBody =
+			this.deps.sanitizeClientText?.(
+				linearAgentSessionId,
+				rawElicitationBody,
+			) ?? rawElicitationBody;
 
 		// Post elicitation to Linear
 		try {

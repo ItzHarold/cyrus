@@ -534,6 +534,14 @@ export class EdgeWorker extends EventEmitter {
 			getIssueTracker: (linearWorkspaceId: string) => {
 				return this.getIssueTrackerForWorkspace(linearWorkspaceId) ?? null;
 			},
+			// PON-179: elicitations on gated workspaces are policy-sanitized
+			// (repo-relative paths); non-gated surfaces post verbatim.
+			sanitizeClientText: (sessionId: string, text: string) =>
+				this.agentSessionManager.sanitizeClientSurfaceText(
+					sessionId,
+					"elicitation",
+					text,
+				),
 		});
 
 		// Operator cockpit (PON-151): a derived mirror of delegated issues in
@@ -629,6 +637,9 @@ export class EdgeWorker extends EventEmitter {
 				if (!tracker?.updateAgentSession) return false;
 				return await tracker.updateAgentSession(sessionId, fields);
 			},
+			// PON-179: in a gated (client-flow) workspace the activity stream
+			// is a client surface — narration must not post there.
+			(sessionId: string) => this.clientQuietSession(sessionId),
 		);
 		// Verify-before-client-sees (PON-152): the final completion response
 		// of a delegated session in a gated workspace is stored, not posted.
@@ -5319,6 +5330,28 @@ ${taskSection}`;
 		if (!workspaceId) return false;
 		return (
 			this.config.linearWorkspaces?.[workspaceId]?.scopeConfirmGate !== false
+		);
+	}
+
+	/**
+	 * PON-179: a session whose workspace runs EITHER client-flow gate is a
+	 * client-quiet session — its Linear activity stream reads as a client
+	 * surface, so working narration is suppressed and whatever still posts
+	 * is policy-sanitized. Non-gated workspaces (the dev box's, by Harold's
+	 * explicit choice) are untouched.
+	 */
+	private clientQuietSession(sessionId: string): boolean {
+		const workspaceId =
+			this.resolveWorkspaceIdForSession(sessionId) ??
+			this.laneManager.workspaceOf(sessionId);
+		if (!workspaceId) return false;
+		// RAW workspace flags, not verificationGateEnabled: that helper folds
+		// in cockpit topology, but a gated tenant without a cockpit must
+		// still never receive narration. Either gate marks the workspace as
+		// client-flow; both default ON, so new tenants are quiet by default.
+		const ws = this.config.linearWorkspaces?.[workspaceId];
+		return (
+			this.scopeGateEnabled(workspaceId) || ws?.verifyBeforeDelivery !== false
 		);
 	}
 

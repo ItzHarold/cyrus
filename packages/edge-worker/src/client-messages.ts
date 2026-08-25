@@ -42,6 +42,14 @@ export const CLIENT_MESSAGES = {
 		`result here as soon as it clears.`,
 
 	/**
+	 * PON-179: the one generic status a quiet client stream shows instead of
+	 * working narration — liveness without the diary.
+	 */
+	workingStatus: () =>
+		`On it. This thread will update when there's something for you to ` +
+		`review or answer.`,
+
+	/**
 	 * PON-171: the delivery footer appended to the held summary when the
 	 * operator approves. Sections render only when present; an empty call
 	 * renders nothing.

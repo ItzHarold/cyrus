@@ -30,6 +30,15 @@ export interface ClientContentViolation {
 	redactable: boolean;
 }
 
+/**
+ * Branch references ("name/ref" shape). The lookbehind keeps the exemption
+ * OUT of filesystem paths: in `/root/.cyrus-community/worktrees/…` the
+ * segment after the dot would otherwise match as a "branch ref" and swallow
+ * the path tail from redaction (found by PON-179's repo-relative tests —
+ * this had silently weakened path redaction since PON-168).
+ */
+const BRANCH_REF_PATTERN = /(?<![./\w-])cyrus[\w-]*\/[\w./-]+/gi;
+
 /** http(s) URLs — exempt as functional pointers (see the scanner comment). */
 const URL_PATTERN = /https?:\/\/[^\s<>")]+/gi;
 
@@ -91,7 +100,7 @@ export function findClientContentViolations(
 	// their own repository anyway, and rewriting a branch name would break
 	// the one thing it exists to identify. A "name/ref" shape (no leading
 	// slash) is a branch reference, not an internal path.
-	scanned = scanned.replace(/\bcyrus[\w-]*\/[\w./-]+/gi, " ");
+	scanned = scanned.replace(BRANCH_REF_PATTERN, " ");
 	for (const allowed of allowlist) {
 		if (allowed) scanned = scanned.split(allowed).join(" ");
 	}
@@ -111,7 +120,18 @@ export function findClientContentViolations(
  * what was rewritten so callers can LOG the redaction — a silent rewrite of
  * model output is its own kind of dishonesty.
  */
-export function redactClientContent(text: string): {
+export function redactClientContent(
+	text: string,
+	options?: {
+		/**
+		 * Path prefixes (the session's workspace root) whose matches are
+		 * rewritten REPO-RELATIVE instead of to a bare basename (PON-179):
+		 * the client should read `SUPPORT.md`, not an internal box path and
+		 * not an ambiguous `…/SUPPORT.md`.
+		 */
+		stripPrefixes?: string[];
+	},
+): {
 	text: string;
 	redactions: string[];
 } {
@@ -127,14 +147,23 @@ export function redactClientContent(text: string): {
 	// Same branch-reference exemption as the scanner: protect them before
 	// any rewriting, restore after.
 	const branchRefs: string[] = [];
-	out = out.replace(/\bcyrus[\w-]*\/[\w./-]+/gi, (m) => {
+	out = out.replace(BRANCH_REF_PATTERN, (m) => {
 		branchRefs.push(m);
 		return `\uE000BR${branchRefs.length - 1}\uE000`;
 	});
+	const prefixes = (options?.stripPrefixes ?? []).filter(Boolean);
 	out = out.replace(
 		/(?:\/root\/|~\/\.[\w-]+\/|\/home\/[\w-]+\/)[\w./-]*/g,
 		(m) => {
 			redactions.push(m);
+			for (const prefix of prefixes) {
+				if (m.startsWith(prefix)) {
+					const relative = m.slice(prefix.length).replace(/^\/+/, "");
+					if (relative) return relative;
+					// The workspace root itself: name it as such.
+					return "the project root";
+				}
+			}
 			const base = m.replace(/\/+$/, "").split("/").pop() ?? "";
 			return base ? `…/${base}` : "…";
 		},

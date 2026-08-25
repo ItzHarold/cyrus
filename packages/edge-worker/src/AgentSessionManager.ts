@@ -32,6 +32,7 @@ import {
 	findClientContentViolations,
 	redactClientContent,
 } from "./client-content-policy.js";
+import { CLIENT_MESSAGES } from "./client-messages.js";
 import {
 	formatPendingWorkThought,
 	formatScheduleWakeupResponse,
@@ -122,6 +123,17 @@ export class AgentSessionManager extends EventEmitter {
 	 */
 	private getWorkspaceIdForSession?: (sessionId: string) => string | undefined;
 
+	/**
+	 * PON-179: true when the session's workspace runs the client-flow gates
+	 * — its activity stream is a CLIENT surface, so working narration
+	 * (thought/action activities, tool-call renderings) must not post.
+	 * Supplied by EdgeWorker; absent = never quiet (non-gated unchanged).
+	 */
+	private isClientQuietSession?: (sessionId: string) => boolean;
+
+	/** Sessions whose quiet stream already carries the generic status. */
+	private quietStatusPosted = new Set<string>();
+
 	constructor(
 		getParentSessionId?: (childSessionId: string) => string | undefined,
 		resumeParentSession?: (
@@ -136,6 +148,7 @@ export class AgentSessionManager extends EventEmitter {
 			sessionId: string,
 			fields: AgentSessionUpdateFields,
 		) => Promise<boolean>,
+		isClientQuietSession?: (sessionId: string) => boolean,
 	) {
 		super();
 		this.updateSessionSurface = updateSessionSurface;
@@ -144,6 +157,7 @@ export class AgentSessionManager extends EventEmitter {
 		this.resumeParentSession = resumeParentSession;
 		this.onSessionEnded = onSessionEnded;
 		this.getWorkspaceIdForSession = getWorkspaceIdForSession;
+		this.isClientQuietSession = isClientQuietSession;
 	}
 
 	/**
@@ -451,11 +465,30 @@ export class AgentSessionManager extends EventEmitter {
 	): string {
 		const violations = findClientContentViolations(text);
 		if (violations.length === 0) return text;
-		const { text: redacted, redactions } = redactClientContent(text);
+		// PON-179: paths under the session's own workspace redact to
+		// REPO-RELATIVE form — the client reads `SUPPORT.md`, not a box path.
+		const workspacePath = this.sessions.get(sessionId)?.workspace?.path;
+		const { text: redacted, redactions } = redactClientContent(text, {
+			stripPrefixes: workspacePath ? [workspacePath] : [],
+		});
 		this.sessionLog(sessionId).warn(
 			`[event:client_content_policy_violation] surface=${surface} rules=${[...new Set(violations.map((v) => v.rule))].join(",")} redacted=${redactions.length} logged=${violations.length - redactions.length}`,
 		);
 		return redacted;
+	}
+
+	/**
+	 * PON-179: policy-sanitize text bound for a client surface OUTSIDE this
+	 * manager's own posting funnel (the elicitation body). Applies only to
+	 * client-quiet (gated) sessions — non-gated surfaces are unchanged.
+	 */
+	sanitizeClientSurfaceText(
+		sessionId: string,
+		surface: string,
+		text: string,
+	): string {
+		if (!this.isClientQuietSession?.(sessionId)) return text;
+		return this.applyClientContentPolicy(sessionId, surface, text);
 	}
 
 	/**
@@ -1760,6 +1793,56 @@ export class AgentSessionManager extends EventEmitter {
 				`Skipping ${label} - no external session ID (platform: ${session?.issueContext?.trackerId || "unknown"})`,
 			);
 			return null;
+		}
+
+		// PON-179: on a gated workspace the activity stream is a CLIENT
+		// surface. Working narration — thoughts, tool-call action renderings
+		// (which can carry internal paths, diffs, even the operator note's
+		// parameters) — does not post. Liveness comes from the ack, the
+		// per-invocation "Analyzing your request…" (which also re-arms the
+		// status), ONE generic status line, elicitations, and the final
+		// response. Everything else that still posts is policy-sanitized.
+		const contentType = input.content?.type;
+		if (
+			this.isClientQuietSession?.(sessionId) &&
+			(contentType === "thought" || contentType === "action")
+		) {
+			if (label === "analyzing thought") {
+				// Clean generic text; passing it re-arms the one status line
+				// for this invocation, so every prompt shows fresh liveness.
+				this.quietStatusPosted.delete(sessionId);
+			} else if (!this.quietStatusPosted.has(sessionId)) {
+				this.quietStatusPosted.add(sessionId);
+				log.info(
+					`[event:client_quiet_stream] first ${contentType} suppressed — posting the generic status instead`,
+				);
+				input = {
+					content: { type: "thought", body: CLIENT_MESSAGES.workingStatus() },
+				};
+				label = "quiet status";
+			} else {
+				log.debug(`Suppressed ${label} (client-quiet workspace)`);
+				return null;
+			}
+		} else if (
+			this.isClientQuietSession?.(sessionId) &&
+			contentType !== "response" &&
+			typeof input.content?.body === "string"
+		) {
+			// Backstop for anything else that still posts on the client
+			// surface (errors, status clears): the R2 policy, path-redaction
+			// repo-relative. The response path is covered upstream.
+			input = {
+				...input,
+				content: {
+					...input.content,
+					body: this.applyClientContentPolicy(
+						sessionId,
+						`activity:${contentType}`,
+						input.content.body,
+					),
+				},
+			};
 		}
 
 		try {
