@@ -110,6 +110,88 @@ describe("policy matching", () => {
 	});
 });
 
+/**
+ * PON-186, found by a dogfood run: the model-id rule matched this
+ * repository's own package directories, and the final-response tripwire
+ * turned `packages/claude-runner` into `packages/the model` inside a
+ * verification table. The exemption has to hold in BOTH directions — the
+ * artifact names pass, every real model id still redacts.
+ */
+describe("repository artifact names are not model ids", () => {
+	it.each([
+		"claude-runner",
+		"claude-parser",
+		"claude-agent-sdk",
+	])("%s is not a violation", (name) => {
+		expect(findClientContentViolations(`the fix lives in ${name}`)).toEqual([]);
+	});
+
+	it("a repo-relative package path scans clean", () => {
+		expect(
+			findClientContentViolations(
+				"Refreshed the tool list in packages/claude-runner/src/config.ts.",
+			),
+		).toEqual([]);
+	});
+
+	it("the artifact names survive redaction verbatim", () => {
+		const { text, redactions } = redactClientContent(
+			"Bumped @anthropic-ai/claude-agent-sdk, touched packages/claude-runner and packages/claude-parser.",
+		);
+		expect(text).toContain("@anthropic-ai/claude-agent-sdk");
+		expect(text).toContain("packages/claude-runner");
+		expect(text).toContain("packages/claude-parser");
+		expect(text).not.toContain("the model");
+		expect(redactions).toEqual([]);
+	});
+
+	// The model-id pattern is greedy over `[\w.-]`, so a name at the end of a
+	// sentence or in front of a file extension is matched WITH the trailing
+	// punctuation — the case a naive exact-name exemption misses.
+	it("a trailing period or extension does not break the exemption", () => {
+		const { text, redactions } = redactClientContent(
+			"See claude-runner. Also claude-parser.test.ts.",
+		);
+		expect(text).toBe("See claude-runner. Also claude-parser.test.ts.");
+		expect(redactions).toEqual([]);
+	});
+
+	it("our own cyrus-prefixed package name still redacts whole", () => {
+		const { text } = redactClientContent("imported from cyrus-claude-runner");
+		expect(text).toBe("imported from the agent");
+	});
+
+	it.each([
+		"claude-opus-5",
+		"claude-haiku-4-5-20251001",
+		"claude-sonnet-5",
+	])("%s is still flagged and redacted", (model) => {
+		expect(
+			findClientContentViolations(`ran on ${model}`).map((v) => v.rule),
+		).toContain("model-id");
+		const { text, redactions } = redactClientContent(`ran on ${model}`);
+		expect(text).toBe("ran on the model");
+		expect(redactions).toEqual([model]);
+	});
+
+	// The guard is trailing-only: it exempts the names we ship, not anything
+	// that merely starts with one.
+	it("a longer id that only starts like an artifact name still redacts", () => {
+		expect(
+			findClientContentViolations("ran on claude-runner-5").map((v) => v.rule),
+		).toContain("model-id");
+		expect(redactClientContent("ran on claude-runner-5").text).toBe(
+			"ran on the model",
+		);
+	});
+
+	it("the exemption does not reach the model-family-word rule", () => {
+		expect(
+			findClientContentViolations("this ran on claude").map((v) => v.rule),
+		).toEqual(["model-family-word"]);
+	});
+});
+
 describe("static sweep — registered client-facing templates are clean", () => {
 	it("every CLIENT_MESSAGES template passes the policy", () => {
 		for (const [name, template] of Object.entries(CLIENT_MESSAGES)) {
