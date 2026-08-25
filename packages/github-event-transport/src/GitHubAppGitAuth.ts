@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { createAppJwt } from "./GitHubAppTokenProvider.js";
+import { journalTokenMinted } from "./github-token-journal.js";
 
 /**
  * GitHub App authentication for **git operations**, as opposed to REST calls.
@@ -137,10 +138,24 @@ export async function findInstallationForRepo(
 	return String(data.id);
 }
 
-/** Mint an installation access token for a specific installation. */
+/**
+ * Mint an installation access token for a specific installation.
+ *
+ * Every repository-scoped mint in the process bottoms out here — the CLI's
+ * `self-add-repo` clone and both GitService instances' session-time fetches
+ * alike — so this is where the mint is journaled (PON-176). Putting the line
+ * here rather than at each caller makes observability a property of minting
+ * rather than a habit of callers: a future path that mints a token cannot forget
+ * to announce it.
+ *
+ * `context` is required for the same reason it carries `ref`: an installation id
+ * on its own does not answer *whose* credential this is, which is the only
+ * question the journal line exists to settle.
+ */
 export async function mintInstallationToken(
 	config: GitHubAppGitAuthConfig,
 	installationId: string,
+	context: { ref: GitHubRepoRef; operation?: GitHubOperation },
 ): Promise<string> {
 	const pem = await readFile(config.privateKeyPath, "utf-8");
 	const jwt = createAppJwt(config.appId, pem);
@@ -166,6 +181,7 @@ export async function mintInstallationToken(
 	}
 
 	const data = (await response.json()) as { token: string };
+	journalTokenMinted(installationId, context);
 	return data.token;
 }
 
@@ -185,7 +201,7 @@ export async function mintTokenForRepo(
 	if (!installationId) {
 		throw new NoInstallationForRepositoryError(ref.owner, ref.repo, operation);
 	}
-	return mintInstallationToken(config, installationId);
+	return mintInstallationToken(config, installationId, { ref, operation });
 }
 
 /** Absolute path to the askpass helper, resolved next to this module. */

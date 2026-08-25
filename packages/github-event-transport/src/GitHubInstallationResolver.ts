@@ -116,13 +116,21 @@ export class GitHubInstallationResolver {
 	 * Throws `NoInstallationForRepositoryError` when nothing covers it. Callers
 	 * must not catch that and reach for another credential — refusing is the
 	 * behaviour being bought here.
+	 *
+	 * The `github_token_minted` journal line comes from `mintInstallationToken`
+	 * itself (PON-176), so it covers this path and the CLI's clone identically.
+	 * Note that what this class caches is the installation *id*, not the token —
+	 * a cache hit here still mints, and still journals.
 	 */
 	async mintTokenForRef(
 		ref: GitHubRepoRef,
 		operation?: GitHubOperation,
 	): Promise<string> {
 		const installationId = await this.resolveInstallationId(ref, operation);
-		return mintInstallationToken(this.config, installationId);
+		return mintInstallationToken(this.config, installationId, {
+			ref,
+			operation,
+		});
 	}
 
 	/**

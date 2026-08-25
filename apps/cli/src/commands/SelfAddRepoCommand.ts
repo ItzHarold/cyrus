@@ -12,6 +12,7 @@ import {
 import {
 	GIT_NO_AMBIENT_CREDENTIALS,
 	gitAuthEnv,
+	journalAmbientTokenFallback,
 	mintTokenForRepo,
 	parseGitHubRepoUrl,
 } from "cyrus-github-event-transport";
@@ -333,6 +334,21 @@ export class SelfAddRepoCommand extends BaseCommand {
 					"   Not a GitHub remote — cloning without GitHub App credentials.",
 				);
 			}
+			// Journaled for the same reason the mint is (PON-176): "the clone
+			// worked" says nothing about which credential made it work, and on a
+			// box with an ambient helper configured that is precisely the case
+			// worth spotting. Named distinctly from the mint so the two are one
+			// grep apart, and the reason says which of the three branches ran
+			// rather than leaving it to be reconstructed from the environment.
+			const reason = !ref
+				? "not-github"
+				: !appId
+					? "no-app-configured"
+					: "no-app-private-key";
+			journalAmbientTokenFallback(reason, {
+				...(ref ? { ref } : {}),
+				operation: "clone",
+			});
 			execSync(`git clone ${url} ${repositoryPath}`, { stdio: "inherit" });
 			return;
 		}
