@@ -124,6 +124,10 @@ describe("EdgeWorker - cockpit mirror wiring (PON-151)", () => {
 			expect.objectContaining({ issueId: ISSUE_ID }),
 			GATED_WS,
 			"active",
+			// PON-170: approval also composes the operator brief.
+			expect.objectContaining({
+				brief: expect.objectContaining({ revisions: 0 }),
+			}),
 		);
 	});
 

@@ -203,6 +203,32 @@ describe("ScopeApprovalStore", () => {
 			expect(store.get("issue-1")?.operatorNote).toBe("post-approval update");
 		});
 
+		it("the client scope text is captured with the note and survives approval (PON-170)", () => {
+			const store = new ScopeApprovalStore();
+			store.recordOperatorNote(
+				"issue-1",
+				"internal",
+				"**Outcome** — export works.",
+			);
+			expect(store.get("issue-1")?.clientScope).toBe(
+				"**Outcome** — export works.",
+			);
+			store.recordProposed("issue-1");
+			store.recordApproved("issue-1");
+			expect(store.get("issue-1")?.clientScope).toBe(
+				"**Outcome** — export works.",
+			);
+		});
+
+		it("a note without client scope leaves the captured scope in place", () => {
+			const store = new ScopeApprovalStore();
+			store.recordOperatorNote("issue-1", "internal", "scope v1");
+			store.recordOperatorNote("issue-1", "revised internal");
+			expect(store.get("issue-1")?.clientScope).toBe("scope v1");
+			store.recordOperatorNote("issue-1", "internal again", "scope v2");
+			expect(store.get("issue-1")?.clientScope).toBe("scope v2");
+		});
+
 		it("the note round-trips through serialize/restore", () => {
 			const store = new ScopeApprovalStore();
 			store.recordProposed("issue-1");

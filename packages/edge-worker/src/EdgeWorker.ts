@@ -5459,11 +5459,25 @@ ${taskSection}`;
 					revisions: record?.revisions ?? 0,
 				});
 				await this.persistScopeApprovals("scope_confirmed");
-				// Cockpit (PON-151): approved — work resumes.
+				// Cockpit (PON-151): approved — work resumes. The mirror
+				// becomes the operator brief (PON-170): what the client
+				// approved, when, after how many revisions. The internal
+				// reading (PON-169) is already on the mirror record.
 				void this.cockpitMirror.upsert(
 					{ issueId: issueId as string, issueIdentifier: identifier },
 					workspaceId,
 					"active",
+					{
+						brief: {
+							...(record?.clientScope !== undefined
+								? { clientScope: record.clientScope }
+								: {}),
+							...(record?.approvedAt !== undefined
+								? { approvedAt: record.approvedAt }
+								: {}),
+							revisions: record?.revisions ?? 0,
+						},
+					},
 				);
 			}
 		} else if (verdict === "revision") {
@@ -5999,6 +6013,9 @@ ${taskSection}`;
 			{
 				assigneeId: this.config.cockpit?.assigneeId,
 				note,
+				// The PR links join the persistent operator brief (PON-170) —
+				// unlike `note`, they survive later transitions.
+				...(record.prUrls.length ? { brief: { addLinks: record.prUrls } } : {}),
 			},
 		);
 	}
@@ -8493,8 +8510,8 @@ ${taskSection}`;
 		// keeps off the client's thread lands on the scope record and the
 		// cockpit mirror instead.
 		options.operatorNotes = {
-			deliver: (cwd: string, note: string) =>
-				this.deliverOperatorNote(cwd, note),
+			deliver: (cwd: string, note: string, clientScope?: string) =>
+				this.deliverOperatorNote(cwd, note, clientScope),
 		};
 		return options;
 	}
@@ -8507,6 +8524,7 @@ ${taskSection}`;
 	private async deliverOperatorNote(
 		cwd: string,
 		note: string,
+		clientScope?: string,
 	): Promise<{ ok: true } | { ok: false; error: string }> {
 		try {
 			const session = this.sessionForCwd(cwd);
@@ -8521,7 +8539,7 @@ ${taskSection}`;
 				return { ok: false, error: "the session has no issue to record on" };
 			}
 			const issueIdentifier = session.issueContext?.issueIdentifier;
-			this.scopeApprovals.recordOperatorNote(issueId, note);
+			this.scopeApprovals.recordOperatorNote(issueId, note, clientScope);
 			await this.persistScopeApprovals("operator_note_recorded");
 			// The note itself never goes to the journal — length only. It is
 			// internal detail, and logs travel further than the cockpit.
@@ -8530,6 +8548,7 @@ ${taskSection}`;
 				issueIdentifier,
 				sessionId: session.id,
 				noteLength: note.length,
+				hasClientScope: clientScope !== undefined,
 			});
 			const workspaceId =
 				this.resolveWorkspaceIdForSession(session.id) ??
@@ -8542,6 +8561,7 @@ ${taskSection}`;
 					{ issueId, issueIdentifier },
 					workspaceId,
 					note,
+					clientScope,
 				);
 			}
 			return { ok: true };

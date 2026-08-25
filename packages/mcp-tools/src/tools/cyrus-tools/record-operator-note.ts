@@ -22,6 +22,7 @@ export interface OperatorNoteDelivery {
 	deliver(
 		cwd: string,
 		note: string,
+		clientScope?: string,
 	): Promise<{ ok: true } | { ok: false; error: string }>;
 }
 
@@ -46,10 +47,16 @@ export function registerRecordOperatorNoteTool(
 					.describe(
 						"The internal reading, as Markdown: approach, files/areas to touch, risks, interpretations. Full internal detail — this is for the operator, not the client.",
 					),
+				client_scope: z
+					.string()
+					.optional()
+					.describe(
+						"The exact deliverable-framed scope text you will post to the client, verbatim. Recording it here lets the operator later see precisely what the client approved.",
+					),
 			},
 		},
-		async ({ cwd, note }) => {
-			const result = await options.deliver(cwd, note);
+		async ({ cwd, note, client_scope }) => {
+			const result = await options.deliver(cwd, note, client_scope);
 			if (!result.ok) {
 				return {
 					content: [

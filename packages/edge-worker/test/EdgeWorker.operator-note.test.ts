@@ -89,6 +89,7 @@ describe("EdgeWorker - operator note delivery (PON-169)", () => {
 			{ issueId: ISSUE_ID, issueIdentifier: "DVV-42" },
 			GATED_WS,
 			"reading",
+			undefined,
 		);
 	});
 
@@ -105,6 +106,70 @@ describe("EdgeWorker - operator note delivery (PON-169)", () => {
 	it("the cyrus-tools options always carry the delivery hook", () => {
 		const options = privates(worker).createCyrusToolsOptions("parent-1");
 		expect(options.operatorNotes?.deliver).toBeTypeOf("function");
+	});
+
+	it("captures the client scope alongside the note and hands both to the mirror (PON-170)", async () => {
+		privates(worker).sessionRepositories.set(SESSION_ID, "repo-1");
+		privates(worker).repositories.set("repo-1", {
+			id: "repo-1",
+			linearWorkspaceId: GATED_WS,
+		});
+		const setOperatorNote = vi
+			.spyOn(privates(worker).cockpitMirror, "setOperatorNote")
+			.mockResolvedValue(undefined);
+
+		await privates(worker).deliverOperatorNote(
+			WORKSPACE_PATH,
+			"internal reading",
+			"**Outcome** — export works.",
+		);
+
+		expect(privates(worker).scopeApprovals.get(ISSUE_ID)?.clientScope).toBe(
+			"**Outcome** — export works.",
+		);
+		expect(setOperatorNote).toHaveBeenCalledWith(
+			{ issueId: ISSUE_ID, issueIdentifier: "DVV-42" },
+			GATED_WS,
+			"internal reading",
+			"**Outcome** — export works.",
+		);
+	});
+
+	it("scope approval composes the operator brief onto the mirror (PON-170)", async () => {
+		const upsert = vi
+			.spyOn(privates(worker).cockpitMirror, "upsert")
+			.mockResolvedValue(undefined);
+		await privates(worker).deliverOperatorNote(
+			WORKSPACE_PATH,
+			"internal reading",
+			"**Outcome** — export works.",
+		);
+
+		await privates(worker).interpretScopeConfirmReply({
+			type: "AgentSessionEvent",
+			action: "prompted",
+			organizationId: GATED_WS,
+			agentSession: {
+				id: SESSION_ID,
+				issue: { id: ISSUE_ID, identifier: "DVV-42" },
+			},
+			agentActivity: { content: { body: "Approve scope" } },
+		});
+
+		const record = privates(worker).scopeApprovals.get(ISSUE_ID);
+		expect(record?.state).toBe("approved");
+		expect(upsert).toHaveBeenCalledWith(
+			{ issueId: ISSUE_ID, issueIdentifier: "DVV-42" },
+			GATED_WS,
+			"active",
+			{
+				brief: {
+					clientScope: "**Outcome** — export works.",
+					approvedAt: record?.approvedAt,
+					revisions: 0,
+				},
+			},
+		);
 	});
 
 	it("a broken cockpit does not fail the recording (record is authoritative)", async () => {

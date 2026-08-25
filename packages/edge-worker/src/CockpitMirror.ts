@@ -136,6 +136,17 @@ export class CockpitMirror {
 			 * stored on the record and carried across every later transition.
 			 */
 			operatorNote?: string;
+			/**
+			 * Operator-brief fields (PON-170), merged into the record: scalars
+			 * overwrite when provided, `addLinks` unions. Carried across every
+			 * later transition like the operator note.
+			 */
+			brief?: {
+				clientScope?: string;
+				approvedAt?: string;
+				revisions?: number;
+				addLinks?: string[];
+			};
 		},
 	): Promise<void> {
 		return this.chain(issue.issueId, async () => {
@@ -145,6 +156,12 @@ export class CockpitMirror {
 			if (!setup) return;
 
 			const existing = this.mirrors.get(issue.issueId);
+			const mergedLinks = [
+				...new Set([
+					...(existing?.briefLinks ?? []),
+					...(detail?.brief?.addLinks ?? []),
+				]),
+			];
 			const record: SerializedCockpitMirror = {
 				mirrorIssueId: existing?.mirrorIssueId ?? "",
 				tenantWorkspaceId,
@@ -158,6 +175,18 @@ export class CockpitMirror {
 				...((detail?.operatorNote ?? existing?.operatorNote) !== undefined
 					? { operatorNote: detail?.operatorNote ?? existing?.operatorNote }
 					: {}),
+				...((detail?.brief?.clientScope ?? existing?.clientScope) !== undefined
+					? {
+							clientScope: detail?.brief?.clientScope ?? existing?.clientScope,
+						}
+					: {}),
+				...((detail?.brief?.approvedAt ?? existing?.approvedAt) !== undefined
+					? { approvedAt: detail?.brief?.approvedAt ?? existing?.approvedAt }
+					: {}),
+				...((detail?.brief?.revisions ?? existing?.revisions) !== undefined
+					? { revisions: detail?.brief?.revisions ?? existing?.revisions }
+					: {}),
+				...(mergedLinks.length ? { briefLinks: mergedLinks } : {}),
 			};
 			const description =
 				this.renderDescription(record, tenantWorkspaceId) +
@@ -172,7 +201,18 @@ export class CockpitMirror {
 				const noteChanged =
 					detail?.operatorNote !== undefined &&
 					detail.operatorNote !== existing.operatorNote;
-				if (existing.state === record.state && !detail?.note && !noteChanged)
+				const briefChanged =
+					record.clientScope !== existing.clientScope ||
+					record.approvedAt !== existing.approvedAt ||
+					record.revisions !== existing.revisions ||
+					(record.briefLinks?.length ?? 0) !==
+						(existing.briefLinks?.length ?? 0);
+				if (
+					existing.state === record.state &&
+					!detail?.note &&
+					!noteChanged &&
+					!briefChanged
+				)
 					return; // nothing changed
 				await this.gql(
 					config.linearWorkspaceId,
@@ -227,6 +267,7 @@ export class CockpitMirror {
 		issue: CockpitIssueRef,
 		tenantWorkspaceId: string,
 		note: string,
+		clientScope?: string,
 	): Promise<void> {
 		const existing = this.mirrors.get(issue.issueId);
 		// Preserve the current state; strip a queued-position suffix — the
@@ -238,6 +279,7 @@ export class CockpitMirror {
 			: "active";
 		return this.upsert(issue, tenantWorkspaceId, state, {
 			operatorNote: note,
+			...(clientScope !== undefined ? { brief: { clientScope } } : {}),
 		});
 	}
 
@@ -672,10 +714,24 @@ export class CockpitMirror {
 			"",
 			`**State:** ${record.state} · ${new Date().toISOString()}`,
 			`**Client issue:** ${record.issueUrl ?? "(no url recorded)"} — session thread, PR and preview links live there.`,
-			// The internal reading (PON-169) renders on every re-render, so a
-			// later transition never erases it from the operator's view.
+			// The operator brief (PON-170): what the client approved, when,
+			// after how many revisions. Renders on every re-render, so a
+			// later transition never erases it.
+			...(record.clientScope
+				? ["", "## Client scope", "", record.clientScope]
+				: []),
+			...(record.approvedAt
+				? [
+						"",
+						`**Approved:** ${record.approvedAt} · **Revisions:** ${record.revisions ?? 0}`,
+					]
+				: []),
+			// The internal reading (PON-169).
 			...(record.operatorNote
 				? ["", "## Internal reading", "", record.operatorNote]
+				: []),
+			...(record.briefLinks?.length
+				? ["", "## Links", "", ...record.briefLinks.map((link) => `- ${link}`)]
 				: []),
 		].join("\n");
 	}
