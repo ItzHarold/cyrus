@@ -45,11 +45,26 @@ describe("record_operator_note tool", () => {
 		expect(delivery.deliver).toHaveBeenCalledWith(
 			"/work/DVV-12",
 			"## Approach\nRefactor the export module; touch api/export.ts.",
+			undefined,
 		);
 		const payload = JSON.parse(result.content[0].text);
 		// Bare success only: no ids or internal handles the model could quote
 		// onto a client surface.
 		expect(payload).toEqual({ success: true });
+	});
+
+	it("passes the client_scope capture through to the harness (PON-170)", async () => {
+		const handler = getHandler(server, "record_operator_note");
+		await handler({
+			cwd: "/work/DVV-12",
+			note: "internal reading",
+			client_scope: "**Outcome** — the export works.",
+		});
+		expect(delivery.deliver).toHaveBeenCalledWith(
+			"/work/DVV-12",
+			"internal reading",
+			"**Outcome** — the export works.",
+		);
 	});
 
 	it("surfaces a delivery failure as an explicit NOT-recorded error", async () => {

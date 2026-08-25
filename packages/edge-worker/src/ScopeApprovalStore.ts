@@ -88,6 +88,11 @@ export class ScopeApprovalStore {
 						operatorNoteAt: existing.operatorNoteAt,
 					}
 				: {}),
+			// So does the client-facing scope text (PON-170): approval is the
+			// moment it becomes "what the client approved".
+			...(existing?.clientScope !== undefined
+				? { clientScope: existing.clientScope }
+				: {}),
 			workspaceId: context?.workspaceId ?? existing?.workspaceId,
 			issueIdentifier: context?.issueIdentifier ?? existing?.issueIdentifier,
 		});
@@ -130,12 +135,17 @@ export class ScopeApprovalStore {
 	 * only ever moves the proposal timestamp seconds early, never late.
 	 * Allowed after approval too — a mid-work update stays visible.
 	 */
-	recordOperatorNote(issueId: string, note: string): void {
+	recordOperatorNote(
+		issueId: string,
+		note: string,
+		clientScope?: string,
+	): void {
 		const existing = this.records.get(issueId);
 		const now = new Date().toISOString();
 		if (existing) {
 			existing.operatorNote = note;
 			existing.operatorNoteAt = now;
+			if (clientScope !== undefined) existing.clientScope = clientScope;
 			return;
 		}
 		this.records.set(issueId, {
@@ -143,6 +153,7 @@ export class ScopeApprovalStore {
 			proposedAt: now,
 			operatorNote: note,
 			operatorNoteAt: now,
+			...(clientScope !== undefined ? { clientScope } : {}),
 		});
 	}
 

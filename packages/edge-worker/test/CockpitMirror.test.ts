@@ -499,6 +499,62 @@ describe("CockpitMirror", () => {
 			expect(input.labelIds).toContain("label-active");
 		});
 
+		it("the operator brief renders all sections and survives transitions (PON-170)", async () => {
+			makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
+			await mirror.upsert(issue, TENANT_WS, "active");
+			await mirror.setOperatorNote(
+				issue,
+				TENANT_WS,
+				"internal reading",
+				"**Outcome** — CSV export works.",
+			);
+			await mirror.upsert(issue, TENANT_WS, "active", {
+				brief: { approvedAt: "2026-08-25T10:00:00.000Z", revisions: 2 },
+			});
+			await mirror.upsert(issue, TENANT_WS, "in-verification", {
+				brief: { addLinks: ["https://github.com/x/y/pull/9"] },
+			});
+
+			const update = calls.filter((c) => c.query.includes("issueUpdate")).pop();
+			const description = (
+				update?.variables as { input: { description: string } }
+			).input.description;
+			expect(description).toContain("## Client scope");
+			expect(description).toContain("**Outcome** — CSV export works.");
+			expect(description).toContain(
+				"**Approved:** 2026-08-25T10:00:00.000Z · **Revisions:** 2",
+			);
+			expect(description).toContain("## Internal reading");
+			expect(description).toContain("internal reading");
+			expect(description).toContain("## Links");
+			expect(description).toContain("- https://github.com/x/y/pull/9");
+		});
+
+		it("brief links union — a repeated link is not duplicated", async () => {
+			makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
+			await mirror.upsert(issue, TENANT_WS, "active", {
+				brief: { addLinks: ["https://a", "https://b"] },
+			});
+			await mirror.upsert(issue, TENANT_WS, "in-verification", {
+				brief: { addLinks: ["https://b", "https://c"] },
+			});
+			expect(mirror.serialize()[issue.issueId]?.briefLinks).toEqual([
+				"https://a",
+				"https://b",
+				"https://c",
+			]);
+		});
+
+		it("a brief-only change on an unchanged state still writes", async () => {
+			makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
+			await mirror.upsert(issue, TENANT_WS, "active");
+			const before = calls.length;
+			await mirror.upsert(issue, TENANT_WS, "active", {
+				brief: { approvedAt: "2026-08-25T10:00:00.000Z" },
+			});
+			expect(calls.length).toBeGreaterThan(before);
+		});
+
 		it("the note survives serialize/restore", async () => {
 			makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
 			await mirror.upsert(issue, TENANT_WS, "active");

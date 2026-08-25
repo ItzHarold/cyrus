@@ -129,6 +129,15 @@ export interface SerializedCockpitMirror {
 	 * Carried across state transitions; latest note wins.
 	 */
 	operatorNote?: string;
+	/**
+	 * Operator brief (PON-170), composed at scope approval: what the client
+	 * approved, when, after how many revisions, plus PR/preview links as
+	 * they become known. All carried across transitions like the note.
+	 */
+	clientScope?: string;
+	approvedAt?: string;
+	revisions?: number;
+	briefLinks?: string[];
 }
 
 /**
@@ -157,6 +166,12 @@ export interface SerializedScopeApprovalRecord {
 	operatorNote?: string;
 	/** When the operator note was last recorded/replaced */
 	operatorNoteAt?: string;
+	/**
+	 * The deliverable-framed scope text as posted to the client (PON-170):
+	 * captured at proposal time so the operator brief can show what the
+	 * client actually approved. Latest wins, like the note.
+	 */
+	clientScope?: string;
 }
 
 /**
