@@ -75,7 +75,13 @@ describe("CockpitMirror", () => {
 			};
 		}
 		if (call.query.includes("issueCreate")) {
-			return { issueCreate: { success: true, issue: { id: "mirror-1" } } };
+			issueCreateCounter++;
+			return {
+				issueCreate: {
+					success: true,
+					issue: { id: `mirror-${issueCreateCounter}` },
+				},
+			};
 		}
 		if (call.query.includes("issueUpdate")) {
 			return { issueUpdate: { success: true } };
@@ -109,9 +115,12 @@ describe("CockpitMirror", () => {
 		return mirror;
 	};
 
+	let issueCreateCounter = 0;
+
 	beforeEach(() => {
 		calls = [];
 		linearMirrorIssues = [];
+		issueCreateCounter = 0;
 		vi.stubGlobal(
 			"fetch",
 			vi.fn(async (_url: string, init: { body: string }) => {
@@ -218,7 +227,11 @@ describe("CockpitMirror", () => {
 		await mirror.upsert(issue, TENANT_WS, "active");
 		await mirror.close(issue.issueId, "runner_complete");
 
-		const update = calls.find((c) => c.query.includes("issueUpdate"));
+		const update = calls.find(
+			(c) =>
+				c.query.includes("issueUpdate") &&
+				(c.variables.input as { stateId?: string }).stateId !== undefined,
+		);
 		expect((update?.variables.input as { stateId: string }).stateId).toBe(
 			"state-done",
 		);
@@ -294,7 +307,8 @@ describe("CockpitMirror", () => {
 		const staleClose = calls.find(
 			(c) =>
 				c.query.includes("issueUpdate") &&
-				(c.variables.id as string) === "mirror-stale",
+				(c.variables.id as string) === "mirror-stale" &&
+				(c.variables.input as { stateId?: string }).stateId !== undefined,
 		);
 		expect((staleClose?.variables.input as { stateId: string }).stateId).toBe(
 			"state-done",
@@ -460,7 +474,14 @@ describe("CockpitMirror", () => {
 				"## Approach\nTouch api/export.ts; risk: pagination.",
 			);
 
-			const update = calls.filter((c) => c.query.includes("issueUpdate")).pop();
+			const update = calls
+				.filter(
+					(c) =>
+						c.query.includes("issueUpdate") &&
+						(c.variables.input as { description?: string }).description !==
+							undefined,
+				)
+				.pop();
 			expect(update).toBeDefined();
 			const input = (update?.variables as { input: { description: string } })
 				.input;
@@ -478,7 +499,14 @@ describe("CockpitMirror", () => {
 			await mirror.setOperatorNote(issue, TENANT_WS, "internal reading text");
 			await mirror.upsert(issue, TENANT_WS, "in-verification");
 
-			const update = calls.filter((c) => c.query.includes("issueUpdate")).pop();
+			const update = calls
+				.filter(
+					(c) =>
+						c.query.includes("issueUpdate") &&
+						(c.variables.input as { description?: string }).description !==
+							undefined,
+				)
+				.pop();
 			const input = (update?.variables as { input: { description: string } })
 				.input;
 			expect(input.description).toContain("internal reading text");
@@ -516,7 +544,14 @@ describe("CockpitMirror", () => {
 				brief: { addLinks: ["https://github.com/x/y/pull/9"] },
 			});
 
-			const update = calls.filter((c) => c.query.includes("issueUpdate")).pop();
+			const update = calls
+				.filter(
+					(c) =>
+						c.query.includes("issueUpdate") &&
+						(c.variables.input as { description?: string }).description !==
+							undefined,
+				)
+				.pop();
 			const description = (
 				update?.variables as { input: { description: string } }
 			).input.description;
@@ -554,6 +589,42 @@ describe("CockpitMirror", () => {
 				brief: { approvedAt: "2026-08-25T10:00:00.000Z" },
 			});
 			expect(calls.length).toBeGreaterThan(before);
+		});
+
+		it("transitions write the round-robin operator order as sortOrder (PON-173)", async () => {
+			const TENANT_B = "tenant-ws-2";
+			makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
+			await mirror.upsert(
+				{ issueId: "a1", issueIdentifier: "DVV-1" },
+				TENANT_WS,
+				"active",
+			);
+			await mirror.upsert(
+				{ issueId: "b1", issueIdentifier: "GCD-1" },
+				TENANT_B,
+				"active",
+			);
+			await mirror.upsert(
+				{ issueId: "a2", issueIdentifier: "DVV-2" },
+				TENANT_WS,
+				"in-verification",
+			);
+
+			// Within tenant A, in-verification outranks the older active; B
+			// interleaves in the first cycle: a2, b1, a1.
+			const snapshot = mirror.serialize();
+			expect(snapshot.a2?.sortOrder).toBe(0);
+			expect(snapshot.b1?.sortOrder).toBe(1);
+			expect(snapshot.a1?.sortOrder).toBe(2);
+		});
+
+		it("an unchanged rank writes nothing on resync (PON-173)", async () => {
+			makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
+			await mirror.upsert(issue, TENANT_WS, "active");
+			await mirror.resyncOperatorOrdering();
+			const before = calls.length;
+			await mirror.resyncOperatorOrdering();
+			expect(calls.length).toBe(before);
 		});
 
 		it("the note survives serialize/restore", async () => {

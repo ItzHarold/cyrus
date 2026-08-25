@@ -1037,6 +1037,21 @@
 				},
 				"assigneeId": {
 					"type": "string"
+				},
+				"reviewers": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"assignments": {
+					"type": "object",
+					"propertyNames": {
+						"type": "string"
+					},
+					"additionalProperties": {
+						"type": "string"
+					}
 				}
 			},
 			"required": ["linearWorkspaceId", "workspaceName", "teamId"],

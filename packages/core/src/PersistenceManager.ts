@@ -140,6 +140,11 @@ export interface SerializedCockpitMirror {
 	approvedAt?: string;
 	revisions?: number;
 	briefLinks?: string[];
+	/**
+	 * Last round-robin rank written as the mirror's Linear sortOrder
+	 * (PON-173) — cached so unchanged ranks skip the write.
+	 */
+	sortOrder?: number;
 }
 
 /**
