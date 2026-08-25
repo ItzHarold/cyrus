@@ -82,6 +82,32 @@ describe("policy matching", () => {
 		);
 		expect(text).toContain("cyrussh/pon-166-stub");
 	});
+
+	// URLs are functional pointers — found live (PON-175 audit, 2026-08-25):
+	// the tripwire rewrote the app username inside a Vercel preview host
+	// (dashed branch form, so the slash-shaped exemption missed it) and
+	// handed the client "https://pontedigital-git-the agent.vercel.app".
+	it("URLs are exempt from scanning — a dashed preview host is not a violation", () => {
+		expect(
+			findClientContentViolations(
+				"Preview: https://pontedigital-git-cyrussh-pon-175-add-a-contact.vercel.app",
+			),
+		).toEqual([]);
+		expect(
+			findClientContentViolations("Docs: https://example.com/root/guide"),
+		).toEqual([]);
+	});
+
+	it("redaction preserves URLs verbatim while still redacting outside them", () => {
+		const { text, redactions } = redactClientContent(
+			"Cyrus deployed it. Preview: https://pontedigital-git-cyrussh-pon-175-add-a-contact.vercel.app",
+		);
+		expect(text).toContain(
+			"https://pontedigital-git-cyrussh-pon-175-add-a-contact.vercel.app",
+		);
+		expect(text).toContain("the agent deployed it.");
+		expect(redactions).toEqual(["Cyrus"]);
+	});
 });
 
 describe("static sweep — registered client-facing templates are clean", () => {
