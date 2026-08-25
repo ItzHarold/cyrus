@@ -232,7 +232,8 @@ export class ActivityPoster {
 			return null;
 		}
 
-		return "The setup script does not run with sudo privileges. Keep `cyrus-setup.sh` to repo-local setup. For hosted Cyrus, add required npm or apt packages in the Cyrus Dashboard at Settings > Packages (`/settings/packages`); for self-hosted Cyrus, preinstall privileged dependencies in the runtime or host.";
+		// R2 (PON-168): no product-internal names on tenant surfaces.
+		return "The setup script does not run with sudo privileges. Keep `cyrus-setup.sh` to repo-local setup; packages that need privileged installation must be preinstalled on the runtime by the operator.";
 	}
 
 	private looksLikeSudoFailure(output: string): boolean {

@@ -28,7 +28,10 @@ import {
 	type SerializedCyrusAgentSessionEntry,
 	type Workspace,
 } from "cyrus-core";
-
+import {
+	findClientContentViolations,
+	redactClientContent,
+} from "./client-content-policy.js";
 import {
 	formatPendingWorkThought,
 	formatScheduleWakeupResponse,
@@ -436,6 +439,25 @@ export class AgentSessionManager extends EventEmitter {
 	 * Complete a session from Claude result message.
 	 * Posts the final result to the issue tracker and handles child session completion.
 	 */
+	/**
+	 * PON-168 / R2: run client-visible model output through the content
+	 * policy. Violations are journaled; the unambiguous ones are redacted —
+	 * loudly, never silently. Returns the text to post.
+	 */
+	private applyClientContentPolicy(
+		sessionId: string,
+		surface: string,
+		text: string,
+	): string {
+		const violations = findClientContentViolations(text);
+		if (violations.length === 0) return text;
+		const { text: redacted, redactions } = redactClientContent(text);
+		this.sessionLog(sessionId).warn(
+			`[event:client_content_policy_violation] surface=${surface} rules=${[...new Set(violations.map((v) => v.rule))].join(",")} redacted=${redactions.length} logged=${violations.length - redactions.length}`,
+		);
+		return redacted;
+	}
+
 	/**
 	 * PON-152: when set, the final completion response runs through this
 	 * before posting; returning true suppresses the client-facing post (the
@@ -937,6 +959,16 @@ export class AgentSessionManager extends EventEmitter {
 		if (!content.trim()) {
 			return;
 		}
+
+		// Client content policy (PON-168): the completion summary is the
+		// highest-volume model-authored client surface. Checked before the
+		// verification interceptor so a held-then-delivered summary is
+		// already clean.
+		content = this.applyClientContentPolicy(
+			sessionId,
+			"final-response",
+			content,
+		);
 
 		// Verify-before-client-sees (PON-152): a gated workspace's completion
 		// summary is held for operator approval instead of posted. The
@@ -1820,12 +1852,17 @@ export class AgentSessionManager extends EventEmitter {
 		if (!activitySink) {
 			throw new Error("no activity sink registered for the session");
 		}
+		const checkedBody = this.applyClientContentPolicy(
+			sessionId,
+			"delivery",
+			body,
+		);
 		const result = await activitySink.postActivity(
 			session.externalSessionId,
 			// Same literal shape the lenient path sends (it passes through an
 			// `any`-typed field; the sink accepts the string literal at
 			// runtime).
-			{ type: "response", body } as never,
+			{ type: "response", body: checkedBody } as never,
 			{},
 		);
 		if (!result?.activityId) {

@@ -710,7 +710,10 @@ describe("EdgeWorker - scope-confirm gate (PON-150)", () => {
 				),
 			).rejects.toThrow("STOP_AFTER_CAPTURE");
 
-			expect(captured[0]?.[3]).toBeUndefined();
+			// The R2 client-surface rules are always appended on resume; only
+			// the scope gate must be absent for an approved issue.
+			expect(String(captured[0]?.[3])).not.toContain("<scope_confirm_gate>");
+			expect(String(captured[0]?.[3])).toContain("<client_surface_rules>");
 		});
 	});
 
