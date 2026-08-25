@@ -72,6 +72,8 @@ export interface SerializableEdgeWorkerState {
 	// saved by older versions, which reads as "no gate pending" and is correct
 	// for issues already in flight when the gate shipped.
 	scopeApprovals?: Record<string, SerializedScopeApprovalRecord>;
+	/** Open needs-info waits, keyed by issue id (PON-172, v4.8 additive) */
+	needsInfo?: Record<string, SerializedNeedsInfoRecord>;
 	// Operator-cockpit mirror map (v4.4, PON-151). Keyed by the CLIENT issue
 	// id; the value names the mirror issue in the cockpit workspace. Derived
 	// state only — boot reconciliation repairs it, never trusts it.
@@ -146,6 +148,28 @@ export interface SerializedCockpitMirror {
  * `approvedAt` is the SLA clock start: the moment the client's structured
  * "Approve scope" answer arrived. It is written exactly once.
  */
+/**
+ * One issue's needs-info state (PON-172): a mid-work ask for client-side
+ * inputs. Persisted so a restart cannot make a client-blocking wait
+ * invisible; the answer resumes the same transcript through PON-164's
+ * validated resume.
+ */
+export interface SerializedNeedsInfoRecord {
+	state: "awaiting" | "answered";
+	/** The question as asked (client-visible text, for the operator's view) */
+	question: string;
+	/** When the current ask was posted */
+	askedAt: string;
+	/** When the FIRST ask on this issue was posted (re-asks keep this) */
+	firstAskedAt?: string;
+	/** When the client responded */
+	answeredAt?: string;
+	/** Session that asked — the one the answer resumes */
+	sessionId?: string;
+	workspaceId?: string;
+	issueIdentifier?: string;
+}
+
 export interface SerializedScopeApprovalRecord {
 	state: "awaiting" | "approved" | "revised";
 	/** When the scope reading's confirmation elicitation was first posted */

@@ -10,6 +10,7 @@
 
 import { describe, it } from "vitest";
 import { buildClientSurfaceRuleBlock } from "../src/client-content-policy.js";
+import { buildNeedsInfoRuleBlock } from "../src/needs-info.js";
 import { createTestWorker, scenario } from "./prompt-assembly-utils.js";
 
 describe("Prompt Assembly - New Comment Metadata in Agent Sessions", () => {
@@ -234,7 +235,8 @@ Choose the appropriate skill based on the context:
 - **PR review feedback** (changes requested): Use \`implementation\` to address review comments, then \`verify-and-ship\`.
 
 Analyze the issue description, labels, and any user comments to determine which workflow fits. Do NOT skip the verify-and-ship step if you made code changes — it ensures quality checks pass and a PR is created.` +
-					buildClientSurfaceRuleBlock(),
+					buildClientSurfaceRuleBlock() +
+					buildNeedsInfoRuleBlock(),
 			)
 			.expectPromptType("fallback")
 			.expectComponents("issue-context", "user-comment")

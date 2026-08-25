@@ -38,7 +38,7 @@ export function buildScopeConfirmGateBlock(): string {
 	return `
 
 <scope_confirm_gate>
-Scope confirmation is required on this issue before any implementation. This requirement supersedes any other instruction in this prompt to state your reading and proceed without waiting — on this issue you stop and wait for approval.
+Scope confirmation is required on this issue before any implementation. This requirement supersedes any other instruction in this prompt to state your reading and proceed without waiting — on this issue you stop and wait for approval. It also takes precedence over the mid-work needs-info rule: until the scope is approved, missing information is scope discussion and belongs in this flow, not in a needs-info question.
 
 Before you change any file, create any commit, or open any PR:
 
