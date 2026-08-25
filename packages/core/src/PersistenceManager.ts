@@ -123,6 +123,12 @@ export interface SerializedCockpitMirror {
 	issueUrl?: string;
 	/** Client issue title (for re-rendering) */
 	title?: string;
+	/**
+	 * The session's internal reading (PON-169), rendered into the mirror
+	 * description so the operator sees the approach before approving.
+	 * Carried across state transitions; latest note wins.
+	 */
+	operatorNote?: string;
 }
 
 /**
@@ -143,6 +149,14 @@ export interface SerializedScopeApprovalRecord {
 	workspaceId?: string;
 	/** Human-readable issue identifier (for the queryable list) */
 	issueIdentifier?: string;
+	/**
+	 * The internal reading recorded for the operator (PON-169): approach,
+	 * files, risks, interpretations. Operator-side only — never posted on
+	 * a tenant surface. Latest note replaces the previous one.
+	 */
+	operatorNote?: string;
+	/** When the operator note was last recorded/replaced */
+	operatorNoteAt?: string;
 }
 
 /**

@@ -13,3 +13,7 @@ export {
 	type ResolveSessionFromCwd,
 	registerLogFailureModeTool,
 } from "./tools/cyrus-tools/log-failure-mode.js";
+export {
+	type OperatorNoteDelivery,
+	registerRecordOperatorNoteTool,
+} from "./tools/cyrus-tools/record-operator-note.js";

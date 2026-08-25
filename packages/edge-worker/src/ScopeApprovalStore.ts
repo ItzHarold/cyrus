@@ -80,6 +80,14 @@ export class ScopeApprovalStore {
 			...(existing?.revisions !== undefined
 				? { revisions: existing.revisions }
 				: {}),
+			// The operator note survives approval — it is the record of what
+			// the operator approved against (PON-169).
+			...(existing?.operatorNote !== undefined
+				? {
+						operatorNote: existing.operatorNote,
+						operatorNoteAt: existing.operatorNoteAt,
+					}
+				: {}),
 			workspaceId: context?.workspaceId ?? existing?.workspaceId,
 			issueIdentifier: context?.issueIdentifier ?? existing?.issueIdentifier,
 		});
@@ -109,6 +117,33 @@ export class ScopeApprovalStore {
 		existing.state = "revised";
 		existing.revisions = (existing.revisions ?? 0) + 1;
 		return true;
+	}
+
+	/**
+	 * Record the session's internal reading for the operator (PON-169).
+	 * Latest note replaces the previous one — a revised scope re-records.
+	 *
+	 * The note may arrive BEFORE the confirmation elicitation is posted
+	 * (the gate instructs note-first, so the mirror carries the reading by
+	 * the time the client sees the ask): a missing record is created as
+	 * awaiting. `recordProposed` keeps the earliest `proposedAt`, so this
+	 * only ever moves the proposal timestamp seconds early, never late.
+	 * Allowed after approval too — a mid-work update stays visible.
+	 */
+	recordOperatorNote(issueId: string, note: string): void {
+		const existing = this.records.get(issueId);
+		const now = new Date().toISOString();
+		if (existing) {
+			existing.operatorNote = note;
+			existing.operatorNoteAt = now;
+			return;
+		}
+		this.records.set(issueId, {
+			state: "awaiting",
+			proposedAt: now,
+			operatorNote: note,
+			operatorNoteAt: now,
+		});
 	}
 
 	/** The issue reached a terminal state — its gate record is done. */

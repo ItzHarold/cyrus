@@ -48,6 +48,31 @@ describe("scope-confirm-gate (PON-150)", () => {
 			// gets two contradictory always-on instructions (review finding).
 			expect(buildScopeConfirmGateBlock()).toContain("supersedes");
 		});
+
+		// PON-169: deliverable framing — the internal reading goes to the
+		// operator, the client confirms what they will receive.
+		it("instructs the operator note BEFORE the client-facing confirmation", () => {
+			const block = buildScopeConfirmGateBlock();
+			const noteStep = block.indexOf("record_operator_note");
+			const clientStep = block.indexOf("DELIVERABLE-framed");
+			expect(noteStep).toBeGreaterThan(-1);
+			expect(clientStep).toBeGreaterThan(-1);
+			expect(noteStep).toBeLessThan(clientStep);
+		});
+
+		it("frames the client comment as the deliverable and bans implementation detail", () => {
+			const block = buildScopeConfirmGateBlock();
+			expect(block).toContain("**Outcome**");
+			expect(block).toContain("**You will receive**");
+			expect(block).toContain("**Interpreted**");
+			expect(block).toContain("No implementation detail");
+			expect(block).toContain("no file names");
+		});
+
+		it("a revision updates the operator note too, not just the client text", () => {
+			const block = buildScopeConfirmGateBlock();
+			expect(block).toContain("update the operator note");
+		});
 	});
 
 	describe("isScopeConfirmQuestion", () => {

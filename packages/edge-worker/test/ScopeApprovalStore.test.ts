@@ -161,4 +161,55 @@ describe("ScopeApprovalStore", () => {
 		expect(store.remove("issue-1")).toBe(false);
 		expect(store.get("issue-1")).toBeUndefined();
 	});
+
+	// PON-169: the operator note rides the record.
+	describe("operator note (PON-169)", () => {
+		it("records a note on an existing record; the latest note replaces the previous", () => {
+			const store = new ScopeApprovalStore();
+			store.recordProposed("issue-1");
+			store.recordOperatorNote("issue-1", "first reading");
+			store.recordOperatorNote("issue-1", "revised reading");
+			expect(store.get("issue-1")?.operatorNote).toBe("revised reading");
+			expect(store.get("issue-1")?.operatorNoteAt).toBeDefined();
+		});
+
+		it("a note before any proposal creates an awaiting record; recordProposed keeps its proposedAt", () => {
+			const store = new ScopeApprovalStore();
+			store.recordOperatorNote("issue-1", "note-first reading");
+			const early = store.get("issue-1");
+			expect(early?.state).toBe("awaiting");
+			expect(early?.operatorNote).toBe("note-first reading");
+
+			store.recordProposed("issue-1", { issueIdentifier: "DVV-12" });
+			expect(store.get("issue-1")?.proposedAt).toBe(early?.proposedAt);
+			expect(store.get("issue-1")?.operatorNote).toBe("note-first reading");
+		});
+
+		it("the note survives approval — it is what the operator approved against", () => {
+			const store = new ScopeApprovalStore();
+			store.recordProposed("issue-1");
+			store.recordOperatorNote("issue-1", "the internal reading");
+			expect(store.recordApproved("issue-1")).toBe(true);
+			expect(store.get("issue-1")?.operatorNote).toBe("the internal reading");
+			expect(store.get("issue-1")?.operatorNoteAt).toBeDefined();
+		});
+
+		it("a note after approval still records (mid-work update)", () => {
+			const store = new ScopeApprovalStore();
+			store.recordProposed("issue-1");
+			store.recordApproved("issue-1");
+			store.recordOperatorNote("issue-1", "post-approval update");
+			expect(store.get("issue-1")?.state).toBe("approved");
+			expect(store.get("issue-1")?.operatorNote).toBe("post-approval update");
+		});
+
+		it("the note round-trips through serialize/restore", () => {
+			const store = new ScopeApprovalStore();
+			store.recordProposed("issue-1");
+			store.recordOperatorNote("issue-1", "persist me");
+			const restored = new ScopeApprovalStore();
+			restored.restore(store.serialize());
+			expect(restored.get("issue-1")?.operatorNote).toBe("persist me");
+		});
+	});
 });

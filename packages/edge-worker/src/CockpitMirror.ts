@@ -131,6 +131,11 @@ export class CockpitMirror {
 			assigneeId?: string;
 			/** Extra description body (the held summary, PR links) */
 			note?: string;
+			/**
+			 * The session's internal reading (PON-169). Unlike `note`, this is
+			 * stored on the record and carried across every later transition.
+			 */
+			operatorNote?: string;
 		},
 	): Promise<void> {
 		return this.chain(issue.issueId, async () => {
@@ -150,6 +155,9 @@ export class CockpitMirror {
 				issueIdentifier: issue.issueIdentifier ?? existing?.issueIdentifier,
 				issueUrl: issue.url ?? existing?.issueUrl,
 				title: issue.title ?? existing?.title,
+				...((detail?.operatorNote ?? existing?.operatorNote) !== undefined
+					? { operatorNote: detail?.operatorNote ?? existing?.operatorNote }
+					: {}),
 			};
 			const description =
 				this.renderDescription(record, tenantWorkspaceId) +
@@ -161,7 +169,11 @@ export class CockpitMirror {
 				: {};
 
 			if (existing?.mirrorIssueId) {
-				if (existing.state === record.state && !detail?.note) return; // nothing changed
+				const noteChanged =
+					detail?.operatorNote !== undefined &&
+					detail.operatorNote !== existing.operatorNote;
+				if (existing.state === record.state && !detail?.note && !noteChanged)
+					return; // nothing changed
 				await this.gql(
 					config.linearWorkspaceId,
 					`mutation($id: String!, $input: IssueUpdateInput!) {
@@ -202,6 +214,30 @@ export class CockpitMirror {
 				state: record.state,
 			});
 			await this.deps.persist();
+		});
+	}
+
+	/**
+	 * Record the session's internal reading on the mirror (PON-169). The
+	 * mirror keeps its current state and labels — only the description
+	 * gains (or replaces) the reading. When no mirror exists yet, one is
+	 * created as `active` (the note arrives from a running session).
+	 */
+	setOperatorNote(
+		issue: CockpitIssueRef,
+		tenantWorkspaceId: string,
+		note: string,
+	): Promise<void> {
+		const existing = this.mirrors.get(issue.issueId);
+		// Preserve the current state; strip a queued-position suffix — the
+		// next queue sync re-adds it. Anything unrecognised falls back to
+		// active rather than inventing a label.
+		const baseState = (existing?.state ?? "active").replace(/ \(#\d+\)$/, "");
+		const state = (COCKPIT_STATES as readonly string[]).includes(baseState)
+			? (baseState as CockpitState)
+			: "active";
+		return this.upsert(issue, tenantWorkspaceId, state, {
+			operatorNote: note,
 		});
 	}
 
@@ -636,6 +672,11 @@ export class CockpitMirror {
 			"",
 			`**State:** ${record.state} · ${new Date().toISOString()}`,
 			`**Client issue:** ${record.issueUrl ?? "(no url recorded)"} — session thread, PR and preview links live there.`,
+			// The internal reading (PON-169) renders on every re-render, so a
+			// later transition never erases it from the operator's view.
+			...(record.operatorNote
+				? ["", "## Internal reading", "", record.operatorNote]
+				: []),
 		].join("\n");
 	}
 
