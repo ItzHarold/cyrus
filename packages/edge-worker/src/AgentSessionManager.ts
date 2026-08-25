@@ -1586,6 +1586,46 @@ export class AgentSessionManager extends EventEmitter {
 				return;
 			}
 
+			// PON-179: the STREAMED-entries path is the main narration artery
+			// (formatter output — tool-call actions, assistant thoughts). On a
+			// client-quiet workspace it obeys the same rule as the direct
+			// funnel: one generic status, then silence; the shared
+			// quietStatusPosted set means one status across BOTH paths.
+			if (
+				this.isClientQuietSession?.(sessionId) &&
+				(content.type === "thought" || content.type === "action")
+			) {
+				if (!this.quietStatusPosted.has(sessionId)) {
+					this.quietStatusPosted.add(sessionId);
+					log.info(
+						`[event:client_quiet_stream] first streamed ${content.type} suppressed — posting the generic status instead`,
+					);
+					content = {
+						type: "thought",
+						body: CLIENT_MESSAGES.workingStatus(),
+					};
+					options.ephemeral = undefined;
+				} else {
+					log.debug(`Suppressed streamed ${content.type} (client-quiet)`);
+					return;
+				}
+			} else if (
+				this.isClientQuietSession?.(sessionId) &&
+				content.type !== "response" &&
+				typeof (content as { body?: unknown }).body === "string"
+			) {
+				// Errors and other stragglers still post — policy-sanitized,
+				// paths repo-relative.
+				content = {
+					...content,
+					body: this.applyClientContentPolicy(
+						sessionId,
+						`activity:${content.type}`,
+						(content as { body: string }).body,
+					),
+				} as typeof content;
+			}
+
 			const result = await activitySink.postActivity(
 				session.externalSessionId,
 				content,
