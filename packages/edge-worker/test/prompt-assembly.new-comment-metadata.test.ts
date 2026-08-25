@@ -9,6 +9,7 @@
  */
 
 import { describe, it } from "vitest";
+import { buildClientSurfaceRuleBlock } from "../src/client-content-policy.js";
 import { createTestWorker, scenario } from "./prompt-assembly-utils.js";
 
 describe("Prompt Assembly - New Comment Metadata in Agent Sessions", () => {
@@ -174,7 +175,8 @@ No comments yet.
 This is a new comment on the issue
   </content>
 </user_comment>`)
-			.expectSystemPrompt(`<scope_assessment>
+			.expectSystemPrompt(
+				`<scope_assessment>
 FIRST, before anything else — before the task list, before planning, before
 reading beyond the issue and enough of the repo to judge — assess the scope of
 this issue and state what you concluded in one line.
@@ -231,7 +233,9 @@ Choose the appropriate skill based on the context:
 - **Question or research request**: Use \`investigate\` to search the codebase and provide an answer, then \`summarize\`.
 - **PR review feedback** (changes requested): Use \`implementation\` to address review comments, then \`verify-and-ship\`.
 
-Analyze the issue description, labels, and any user comments to determine which workflow fits. Do NOT skip the verify-and-ship step if you made code changes — it ensures quality checks pass and a PR is created.`)
+Analyze the issue description, labels, and any user comments to determine which workflow fits. Do NOT skip the verify-and-ship step if you made code changes — it ensures quality checks pass and a PR is created.` +
+					buildClientSurfaceRuleBlock(),
+			)
 			.expectPromptType("fallback")
 			.expectComponents("issue-context", "user-comment")
 			.verify();

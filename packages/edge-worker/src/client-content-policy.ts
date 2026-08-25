@@ -1,0 +1,153 @@
+/**
+ * Client-visible content policy (PON-168 / client-flow R2).
+ *
+ * On ANY client-visible surface — tenant Linear activity, PR titles/bodies,
+ * commit messages, branch names, error activities — internal vocabulary must
+ * never appear: the service's internal name, its package names, internal
+ * filesystem paths, and model names. This module is the SINGLE definition of
+ * those bans, used three ways:
+ *
+ *   1. the static sweep test runs every registered client-facing template
+ *      through it (a hit is a test failure);
+ *   2. the runtime tripwire checks model-authored outbound text, logs
+ *      violations, and redacts only the unambiguous cases — loudly, never
+ *      silently;
+ *   3. the intrinsic prompt block tells the model the rule up front, which
+ *      is what actually prevents most violations (intrinsic beats enforced).
+ */
+
+export interface ClientContentViolation {
+	/** Which ban matched */
+	rule:
+		| "internal-name"
+		| "internal-package"
+		| "internal-path"
+		| "model-id"
+		| "model-family-word";
+	/** The offending excerpt */
+	match: string;
+	/** Whether redactClientContent can rewrite this safely */
+	redactable: boolean;
+}
+
+const RULES: Array<{
+	rule: ClientContentViolation["rule"];
+	pattern: RegExp;
+	redactable: boolean;
+}> = [
+	// The internal service name, any casing, any word position — covers the
+	// bare word and cyrus-* package names alike.
+	{ rule: "internal-name", pattern: /cyrus[\w-]*/gi, redactable: true },
+	// Internal filesystem paths. The service home and worktree layout are
+	// operational detail no client should ever see.
+	{
+		rule: "internal-path",
+		pattern: /(?:\/root\/|~\/\.[\w-]+\/|\/home\/[\w-]+\/)[\w./-]*/g,
+		redactable: true,
+	},
+	// Concrete model ids are unambiguous.
+	{
+		rule: "model-id",
+		pattern: /claude-[\w.-]+/gi,
+		redactable: true,
+	},
+	// Bare model-family words in agent-authored text. NOT redactable — some
+	// are ordinary words ("magnum opus"), so the tripwire logs rather than
+	// rewrites; the static sweep still fails templates that contain them.
+	{
+		rule: "model-family-word",
+		pattern: /\b(?:claude|opus|sonnet|haiku|fable)\b/gi,
+		redactable: false,
+	},
+];
+
+/**
+ * Find every policy violation in a piece of client-visible text.
+ * `allowlist` removes expected matches (e.g. a branch prefix that IS the
+ * configured app username) before scanning.
+ */
+export function findClientContentViolations(
+	text: string,
+	allowlist: string[] = [],
+): ClientContentViolation[] {
+	let scanned = text;
+	// The per-repo hook script names are the CLIENT's own files, documented
+	// product conventions that live in their repository — reporting "ran
+	// cyrus-setup.sh" names their file, not our internals. (Renaming the
+	// convention itself is a product decision outside this policy.)
+	scanned = scanned.replace(/cyrus-(?:setup|teardown)\.sh/gi, " ");
+	// Branch references are exempt: Linear generates branch names from the
+	// app username (e.g. an internal-named dev app), the client sees them in
+	// their own repository anyway, and rewriting a branch name would break
+	// the one thing it exists to identify. A "name/ref" shape (no leading
+	// slash) is a branch reference, not an internal path.
+	scanned = scanned.replace(/\bcyrus[\w-]*\/[\w./-]+/gi, " ");
+	for (const allowed of allowlist) {
+		if (allowed) scanned = scanned.split(allowed).join(" ");
+	}
+	const violations: ClientContentViolation[] = [];
+	for (const { rule, pattern, redactable } of RULES) {
+		pattern.lastIndex = 0;
+		for (const match of scanned.matchAll(pattern)) {
+			violations.push({ rule, match: match[0], redactable });
+		}
+	}
+	return violations;
+}
+
+/**
+ * Rewrite the unambiguous violations: internal name → "the agent", model id
+ * → "the model", internal path → its basename. Returns the redacted text and
+ * what was rewritten so callers can LOG the redaction — a silent rewrite of
+ * model output is its own kind of dishonesty.
+ */
+export function redactClientContent(text: string): {
+	text: string;
+	redactions: string[];
+} {
+	const redactions: string[] = [];
+	// Same branch-reference exemption as the scanner: protect them before
+	// any rewriting, restore after.
+	const branchRefs: string[] = [];
+	let out = text.replace(/\bcyrus[\w-]*\/[\w./-]+/gi, (m) => {
+		branchRefs.push(m);
+		return `\uE000BR${branchRefs.length - 1}\uE000`;
+	});
+	out = out.replace(
+		/(?:\/root\/|~\/\.[\w-]+\/|\/home\/[\w-]+\/)[\w./-]*/g,
+		(m) => {
+			redactions.push(m);
+			const base = m.replace(/\/+$/, "").split("/").pop() ?? "";
+			return base ? `…/${base}` : "…";
+		},
+	);
+	out = out.replace(/cyrus[\w-]*/gi, (m) => {
+		redactions.push(m);
+		return "the agent";
+	});
+	out = out.replace(/claude-[\w.-]+/gi, (m) => {
+		redactions.push(m);
+		return "the model";
+	});
+	out = out.replace(
+		/\uE000BR(\d+)\uE000/g,
+		(_m, i) => branchRefs[Number(i)] ?? "",
+	);
+	return { text: out, redactions };
+}
+
+/**
+ * The intrinsic half: an always-on system-prompt rule for every session
+ * whose output can reach a client surface.
+ */
+export function buildClientSurfaceRuleBlock(): string {
+	return `
+
+<client_surface_rules>
+Everything you post to the issue, and everything that lands in the client's repository (PR titles and bodies, commit messages), is read by the client. On those surfaces:
+
+- Never mention internal tooling names, internal file paths, package names, or which model is running. Describe results, not machinery.
+- No running narration of what you are doing or thinking. Progress updates are short statements of state ("Building the export view", "Ready for review"), not a diary.
+- Write everything in terms of what the client receives and where they can see it.
+</client_surface_rules>`;
+}

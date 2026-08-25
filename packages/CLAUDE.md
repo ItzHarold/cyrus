@@ -86,3 +86,13 @@ In a gated workspace (`verifyBeforeDelivery !== false`, default on) a delegated 
 - **NEVER auto-release** (decided 2026-08-21): the ladder (10-min timer) only gets louder — one mirror-comment re-escalation after `remindAfterHours` (default 4), one honest delay note on the client's issue after `delayNoteAfterHours` (default 24). Nothing on a timer marks a PR ready or posts a summary, and restore never delivers.
 - `GET /admin/verification` (loopback) — pending count + ages, independent of the cockpit.
 - Config: `verifyBeforeDelivery` (workspace), `cockpit.assigneeId`, top-level `verificationEscalation` (in ConfigManager's both lists AND WorkerService's startup mapping — the systematic mapping test enforces the latter).
+
+### Client-visible content policy (PON-168 / client-flow R2)
+
+On any client-visible surface — tenant Linear activity, PR titles/bodies, commit messages, branch names, error activities — internal vocabulary never appears: the internal service name and its package names, internal filesystem paths, model ids, bare model-family words. `client-content-policy.ts` is the single definition, used three ways (intrinsic beats enforced, in that order of importance):
+
+- **Intrinsic**: `buildClientSurfaceRuleBlock()` (`<client_surface_rules>`) is appended to EVERY session system prompt — new sessions in `buildNewSessionPrompt` and resumes in `resumeAgentSession` (resumed runners do not inherit the previous invocation's appended prompt). It also bans narration diaries and mandates deliverable framing.
+- **Static sweep** (`client-content-policy.test.ts`): every `CLIENT_MESSAGES` template (all tenant-surface literals live in `client-messages.ts` — add new ones THERE, not inline), plus literal-extraction over ActivityPoster/RepositoryRouter/scope-confirm-gate. A registry-completeness test greps `src/` for posting APIs, so a new emitting module must either join the sweep or be documented operator-side — it cannot silently skip.
+- **Runtime tripwire**: `AgentSessionManager.applyClientContentPolicy` runs on the final-response path and on `postResponseActivityStrict` deliveries. Unambiguous matches (internal name, path, model id) are redacted loudly — every rewrite journaled as `[event:client_content_policy_violation]` — ambiguous family words are logged only, never rewritten.
+
+Deliberate exemptions, each load-bearing: branch references (`name/ref` shape) — Linear derives them from the app username, the client sees them in their own repo, rewriting one breaks the pointer; `cyrus-setup.sh`/`cyrus-teardown.sh` — the client's own documented convention files in THEIR repo (renaming the convention is a product decision, not a policy one).

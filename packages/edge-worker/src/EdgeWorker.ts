@@ -157,6 +157,8 @@ import { LiveChatRepositoryProvider } from "./ChatRepositoryProvider.js";
 import { ChatSessionHandler } from "./ChatSessionHandler.js";
 import { CockpitMirror } from "./CockpitMirror.js";
 import { ConfigManager, type RepositoryChanges } from "./ConfigManager.js";
+import { buildClientSurfaceRuleBlock } from "./client-content-policy.js";
+import { CLIENT_MESSAGES } from "./client-messages.js";
 import { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
 import { EgressProxy } from "./EgressProxy.js";
 import { GitService, WorktreeCreationRefusedError } from "./GitService.js";
@@ -4696,12 +4698,9 @@ ${taskSection}`;
 						agentSessionId: sessionId,
 						content: {
 							type: "error",
-							body:
-								`This session could not start: the latest code for ` +
-								`**${error.repositoryName}** could not be fetched, and ` +
-								`starting against a stale copy would be worse than not ` +
-								`starting. The operator has been notified — once ` +
-								`repository access is restored, re-delegate this issue.`,
+							body: CLIENT_MESSAGES.worktreeRefusedAtStart(
+								error.repositoryName,
+							),
 						},
 					})
 					.catch((postError) => {
@@ -6354,7 +6353,7 @@ ${taskSection}`;
 					if (tracker) {
 						try {
 							await tracker.createComment(entry.issueId, {
-								body: "This one is taking longer than planned — the work is in final verification on our side. No action needed from you; we'll post the result here as soon as it clears.",
+								body: CLIENT_MESSAGES.verificationDelayNote(),
 							});
 						} catch (error) {
 							this.logger.error(
@@ -8782,6 +8781,10 @@ ${taskSection}`;
 		// 4. Append agent context — dynamic values for skills to reference
 		systemPrompt += this.buildAgentContextBlock();
 
+		// 4a. Client-surface rules (PON-168 / R2): every session whose output
+		// can reach a tenant surface carries the policy intrinsically.
+		systemPrompt += buildClientSurfaceRuleBlock();
+
 		// 4b. Scope-confirm gate (PON-150) — intrinsic, not enforced: an
 		// always-on prompt step for delegated sessions whose issue has no
 		// approved scope yet. An approved issue never re-asks; child sessions
@@ -9187,11 +9190,7 @@ ${input.userComment}
 				await this.agentSessionManager
 					.createErrorActivity(
 						sessionId,
-						"This workspace is not configured to run sessions on this " +
-							"host — its Anthropic credential is missing or " +
-							"unavailable. The operator has been notified via the " +
-							"service journal; once configuration is fixed, " +
-							"re-delegate this issue.",
+						CLIENT_MESSAGES.workspaceNotConfigured(),
 					)
 					.catch((postError) => {
 						log.warn(
@@ -10123,10 +10122,7 @@ ${input.userComment}
 				// is terminal, not a workspace (adversarial review finding).
 				if (!workspaceIsRealCheckout(fresh)) {
 					await terminalResume(
-						`This session could not resume: a clean working copy of the ` +
-							`repository could not be prepared. The operator has been ` +
-							`notified — re-delegate this issue once the repository is ` +
-							`healthy again.`,
+						CLIENT_MESSAGES.workspaceUnpreparable(),
 						repository.name ?? repository.id,
 					);
 					return;
@@ -10146,11 +10142,7 @@ ${input.userComment}
 			} catch (error) {
 				if (error instanceof WorktreeCreationRefusedError) {
 					await terminalResume(
-						`This session could not resume: the latest code for ` +
-							`**${error.repositoryName}** could not be fetched, and ` +
-							`continuing against a stale or missing copy would be worse ` +
-							`than stopping. The operator has been notified — once ` +
-							`repository access is restored, re-delegate this issue.`,
+						CLIENT_MESSAGES.worktreeRefusedOnResume(error.repositoryName),
 						error.repositoryName,
 					);
 					return;
@@ -10184,12 +10176,13 @@ ${input.userComment}
 		// inherit the previous invocation's appended system prompt, so a
 		// restart mid-gate would otherwise remove the gate exactly when the
 		// client's answer arrives.
-		const systemPrompt = this.appendScopeGateIfPending(
-			systemPromptResult?.prompt,
-			resolvedWorkspaceId,
-			fullIssue.id,
-			sessionId,
-		);
+		const systemPrompt =
+			(this.appendScopeGateIfPending(
+				systemPromptResult?.prompt,
+				resolvedWorkspaceId,
+				fullIssue.id,
+				sessionId,
+			) ?? "") + buildClientSurfaceRuleBlock();
 		const promptType = systemPromptResult?.type;
 
 		// Build allowed and disallowed tools lists
