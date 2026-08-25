@@ -84,10 +84,20 @@ export class RefreshTokenCommand extends BaseCommand {
 			process.exit(1);
 		}
 
-		// Ask which workspace token to refresh
-		const answer = await CLIPrompts.ask(
-			'\nWhich workspace token would you like to refresh? (Enter number or "all"): ',
-		);
+		// PON-136: non-interactive runs (scripts, incidents, SSH one-liners)
+		// must not block on stdin — refresh every INVALID workspace via the
+		// silent grant and never open a browser.
+		const interactive = process.stdin.isTTY === true;
+		const answer = interactive
+			? await CLIPrompts.ask(
+					'\nWhich workspace token would you like to refresh? (Enter number or "all"): ',
+				)
+			: "all";
+		if (!interactive) {
+			console.log(
+				"\nNon-interactive mode: attempting the silent refresh grant for every workspace with an invalid token.",
+			);
+		}
 
 		const indicesToRefresh: number[] = [];
 
@@ -114,6 +124,74 @@ export class RefreshTokenCommand extends BaseCommand {
 			if (!ws) continue;
 
 			console.log(`\nRefreshing token for workspace ${ws.name} (${ws.id})...`);
+
+			// PON-136: the silent refresh grant FIRST — this is the 2-minute
+			// recovery the incidents actually needed (cases 3 and 4), and it
+			// is what the running service does on a 401. The browser ceremony
+			// is the fallback for a dead refresh token (case 2), and only
+			// when a human is present.
+			const storedRefresh =
+				config.linearWorkspaces?.[ws.id]?.linearRefreshToken;
+			const clientId = process.env.LINEAR_CLIENT_ID;
+			const clientSecret = process.env.LINEAR_CLIENT_SECRET;
+			if (storedRefresh && clientId && clientSecret) {
+				try {
+					const params = new URLSearchParams({
+						grant_type: "refresh_token",
+						client_id: clientId,
+						client_secret: clientSecret,
+						refresh_token: storedRefresh,
+					});
+					const response = await fetch("https://api.linear.app/oauth/token", {
+						method: "POST",
+						headers: {
+							"Content-Type": "application/x-www-form-urlencoded",
+						},
+						body: params.toString(),
+					});
+					if (response.ok) {
+						const data = (await response.json()) as {
+							access_token: string;
+							refresh_token?: string;
+						};
+						this.app.config.update((cfg) => {
+							const entry = cfg.linearWorkspaces?.[ws.id];
+							if (entry) {
+								entry.linearToken = data.access_token;
+								if (data.refresh_token) {
+									entry.linearRefreshToken = data.refresh_token;
+								}
+							}
+							return cfg;
+						});
+						this.logSuccess(
+							`Refreshed via the silent grant (rotated pair persisted) for ${ws.name}`,
+						);
+						continue;
+					}
+					console.log(
+						`Silent refresh grant rejected (${response.status}) — the stored refresh token is likely dead.`,
+					);
+				} catch (error) {
+					console.log(
+						`Silent refresh grant failed (${(error as Error).message}).`,
+					);
+				}
+			} else if (!storedRefresh) {
+				console.log("No stored refresh token for this workspace.");
+			} else {
+				console.log(
+					"LINEAR_CLIENT_ID / LINEAR_CLIENT_SECRET not in the environment — cannot use the silent grant.",
+				);
+			}
+
+			if (!interactive) {
+				this.logError(
+					`Workspace ${ws.name} needs the browser OAuth flow — run this command interactively (or self-auth-linear).`,
+				);
+				process.exitCode = 1;
+				continue;
+			}
 			console.log("Opening Linear OAuth flow in your browser...");
 
 			// Use the proxy's OAuth flow with a callback to localhost
@@ -209,5 +287,8 @@ export class RefreshTokenCommand extends BaseCommand {
 		}
 
 		this.logSuccess("Configuration saved");
+		// PON-136: explicit exit — the env-file watcher otherwise keeps the
+		// process alive forever (the incident-tooling hang, same fix as #16).
+		process.exit(process.exitCode === 1 ? 1 : 0);
 	}
 }
