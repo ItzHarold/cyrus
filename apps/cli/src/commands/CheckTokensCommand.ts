@@ -72,5 +72,11 @@ export class CheckTokensCommand extends BaseCommand {
 				console.log(`❌ Invalid - ${result.error}`);
 			}
 		}
+
+		// PON-136: explicit exit — the Application's env-file watcher keeps
+		// the event loop alive, so returning here HANGS the process (found
+		// unusable during the case-2 incident; same fix as
+		// check-workspace-auth in #16).
+		process.exit(0);
 	}
 }

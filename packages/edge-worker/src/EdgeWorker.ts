@@ -317,6 +317,9 @@ export class EdgeWorker extends EventEmitter {
 	private verificationGate: VerificationGate = new VerificationGate();
 	/** PON-152 escalation ladder timer */
 	private verificationLadderTimer: NodeJS.Timeout | undefined;
+	/** Workspace token liveness (PON-136) */
+	private workspaceLivenessTimer: NodeJS.Timeout | undefined;
+	private workspaceLivenessTickRunning = false;
 	/** User access control for whitelisting/blacklisting Linear users */
 	private userAccessControl: UserAccessControl;
 	private logger: ILogger;
@@ -1071,6 +1074,9 @@ export class EdgeWorker extends EventEmitter {
 
 		// 9. PON-152 escalation ladder — reminders only, never delivery.
 		this.armVerificationLadder();
+		// PON-136: the liveness clock — idle workspaces get the refresh that
+		// busy ones get from traffic.
+		this.armWorkspaceLiveness();
 	}
 
 	/**
@@ -3143,6 +3149,11 @@ ${taskSection}`;
 	async stop(): Promise<void> {
 		// Stop config file watcher
 		await this.configManager.stop();
+
+		if (this.workspaceLivenessTimer) {
+			clearInterval(this.workspaceLivenessTimer);
+			this.workspaceLivenessTimer = undefined;
+		}
 
 		// Cancel pending lane grace timers (PON-112); state is persisted below
 		// and recovery re-arms on next boot.
@@ -6465,6 +6476,78 @@ ${taskSection}`;
 	 * LOUDER — a second notification, then one honest delay note on the
 	 * client's issue. It never delivers anything.
 	 */
+	/**
+	 * Workspace token liveness (PON-136). Four live incidents proved the
+	 * thesis: refresh is traffic-driven, so an idle workspace's token dies
+	 * silently (they expire ~daily by design), and by the time anything
+	 * looks the refresh token may have aged out too — turning a silent
+	 * expiry into a full re-auth ceremony.
+	 *
+	 * The ping is deliberately just a new CLOCK for existing behaviour:
+	 * it routes through `tenantStillHasAccess`, whose tracker client
+	 * auto-refreshes on 401 (rotated pair persisted via onTokenRefresh) —
+	 * so the ping DRIVES the refresh, it does not merely detect death. At
+	 * this cadence a refresh token is never more than ~a day old, so the
+	 * case-2 shape (refresh token aged out with the access token) cannot
+	 * recur on a running box. A conclusive failure routes through the
+	 * PON-115 path (`handleTenantAccessLost` → deactivate); recovery after
+	 * re-auth arrives via config hot-reload, no restart. A passing ping is
+	 * silent (debug only).
+	 */
+	private armWorkspaceLiveness(): void {
+		if (this.workspaceLivenessTimer) return;
+		const raw = Number(process.env.CYRUS_LIVENESS_INTERVAL_MS);
+		const intervalMs =
+			Number.isFinite(raw) && raw > 0 ? Math.max(60_000, raw) : 10 * 60 * 1000;
+		this.workspaceLivenessTimer = setInterval(() => {
+			this.runWorkspaceLivenessTick().catch((error) => {
+				this.logger.error("Workspace liveness tick failed:", error);
+			});
+		}, intervalMs);
+		this.workspaceLivenessTimer.unref?.();
+		// First tick shortly after boot: a box that restarts onto a dead
+		// token should discover (and heal) it in seconds, not one interval.
+		const bootProbe = setTimeout(() => {
+			this.runWorkspaceLivenessTick().catch((error) => {
+				this.logger.error("Workspace liveness boot tick failed:", error);
+			});
+		}, 45_000);
+		bootProbe.unref?.();
+		this.logger.info(
+			`✅ Workspace token liveness armed (every ${Math.round(intervalMs / 60_000)}m)`,
+		);
+	}
+
+	private async runWorkspaceLivenessTick(): Promise<void> {
+		// Serialize: a slow tick (network trouble is exactly when pings are
+		// slow) must not stack behind itself.
+		if (this.workspaceLivenessTickRunning) return;
+		this.workspaceLivenessTickRunning = true;
+		try {
+			for (const [workspaceId, wsConfig] of Object.entries(
+				this.config.linearWorkspaces ?? {},
+			)) {
+				if (wsConfig.active === false) continue; // recovery is hot-reload's job
+				if (!this.issueTrackers.get(workspaceId)) continue;
+				const alive = await this.tenantStillHasAccess(workspaceId);
+				if (alive) {
+					this.logger.debug(`[liveness] workspace ${workspaceId} ping ok`);
+					continue;
+				}
+				// Conclusive failure — the probe's own 401 already triggered
+				// the transport's refresh attempt, and it could not repair.
+				await this.handleTenantAccessLost(
+					workspaceId,
+					new Error(
+						"liveness ping failed conclusively (auth failure a token refresh could not repair)",
+					),
+				);
+			}
+		} finally {
+			this.workspaceLivenessTickRunning = false;
+		}
+	}
+
 	private armVerificationLadder(): void {
 		if (this.verificationLadderTimer) return;
 		this.verificationLadderTimer = setInterval(
