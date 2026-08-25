@@ -115,6 +115,65 @@ describe("AgentSessionManager - client-quiet stream (PON-179)", () => {
 		);
 	});
 
+	it("the STREAMED-entries path is gated too — the main narration artery (live FRO-55 finding)", async () => {
+		const { manager, postActivity } = makeManager(true);
+		const sync = (
+			manager as unknown as {
+				syncEntryToActivitySink: (
+					entry: Record<string, unknown>,
+					sessionId: string,
+				) => Promise<void>;
+			}
+		).syncEntryToActivitySink.bind(manager);
+
+		// Assistant text → thought; tool call → action: the formatter output
+		// that leaked on FRO-55.
+		await sync(
+			{ type: "assistant", content: "Scope: single PR — appending a line." },
+			SESSION_ID,
+		);
+		await sync(
+			{
+				type: "assistant",
+				content: "/root/.cyrus-community/worktrees/ws-1/FRO-99/README.md",
+				metadata: {
+					toolUseId: "t1",
+					toolName: "Read",
+					toolInput: JSON.stringify({
+						file_path: "/root/.cyrus-community/worktrees/ws-1/FRO-99/README.md",
+					}),
+				},
+			},
+			SESSION_ID,
+		);
+		await sync({ type: "assistant", content: "Now editing…" }, SESSION_ID);
+
+		// Exactly one post: the generic status. No narration, no paths.
+		expect(postActivity).toHaveBeenCalledTimes(1);
+		const posted = JSON.stringify(postActivity.mock.calls[0]?.[1]);
+		expect(posted).toContain(CLIENT_MESSAGES.workingStatus());
+		expect(posted).not.toContain("/root/");
+	});
+
+	it("one status across BOTH paths — the shared set spans funnel and stream", async () => {
+		const { manager, postActivity } = makeManager(true);
+		await manager.createThoughtActivity(SESSION_ID, "funnel narration");
+		const sync = (
+			manager as unknown as {
+				syncEntryToActivitySink: (
+					entry: Record<string, unknown>,
+					sessionId: string,
+				) => Promise<void>;
+			}
+		).syncEntryToActivitySink.bind(manager);
+		await sync(
+			{ type: "assistant", content: "streamed narration" },
+			SESSION_ID,
+		);
+
+		expect(postActivity).toHaveBeenCalledTimes(1);
+	});
+
 	it("the elicitation body goes through the sanitizer (source wiring)", async () => {
 		const { readFileSync } = await import("node:fs");
 		const { join } = await import("node:path");
