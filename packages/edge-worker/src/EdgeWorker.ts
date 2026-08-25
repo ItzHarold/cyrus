@@ -110,6 +110,7 @@ import {
 	isIssueCommentPayload,
 	isPullRequestReviewCommentPayload,
 	isPullRequestReviewPayload,
+	journalAmbientTokenFallback,
 	parseGitHubRepoUrl,
 	stripMention,
 } from "cyrus-github-event-transport";
@@ -1745,6 +1746,16 @@ export class EdgeWorker extends EventEmitter {
 	): string | undefined {
 		const token = process.env.GITHUB_TOKEN;
 		if (token) {
+			// Two lines, deliberately. The event is the grep target that pairs
+			// with `github_token_minted` — asking "which credential served this
+			// request" must be one search, not a reading exercise (PON-176). The
+			// warn is the prose that says what to do about it, and it forwards at
+			// WARN severity, which the event does not.
+			journalAmbientTokenFallback(
+				reason,
+				{ ref, operation: "github-api" },
+				this.logger,
+			);
 			this.logger.warn(
 				`Falling back to the ambient GITHUB_TOKEN (reason: ${reason}` +
 					`${ref ? `, repo: ${ref.owner}/${ref.repo}` : ""}). ` +

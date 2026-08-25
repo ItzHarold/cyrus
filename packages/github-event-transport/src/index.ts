@@ -29,6 +29,12 @@ export { GitHubEventTransport } from "./GitHubEventTransport.js";
 export type { GitHubInstallationResolverOptions } from "./GitHubInstallationResolver.js";
 export { GitHubInstallationResolver } from "./GitHubInstallationResolver.js";
 export { GitHubMessageTranslator } from "./GitHubMessageTranslator.js";
+export type { TokenJournalContext } from "./github-token-journal.js";
+export {
+	journalAmbientTokenFallback,
+	journalTokenCacheHit,
+	journalTokenMinted,
+} from "./github-token-journal.js";
 export {
 	extractCommentAuthor,
 	extractCommentBody,

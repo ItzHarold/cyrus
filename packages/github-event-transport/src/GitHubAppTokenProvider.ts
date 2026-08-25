@@ -1,5 +1,9 @@
 import { createSign } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import {
+	journalTokenCacheHit,
+	journalTokenMinted,
+} from "./github-token-journal.js";
 
 export interface GitHubAppTokenProviderConfig {
 	appId: string;
@@ -29,10 +33,19 @@ export class GitHubAppTokenProvider {
 	/**
 	 * Get a valid installation access token.
 	 * Returns cached token if still valid, otherwise mints a new one.
+	 *
+	 * Unlike the repository-scoped path this caches the token itself, so it is
+	 * the one place where "served a token" and "minted a token" are different
+	 * facts. They are journaled as different events (PON-176) — the mint at
+	 * event level, the cache hit at debug — so a journal never implies a mint
+	 * that did not happen. Neither line carries the token.
 	 */
 	async getToken(): Promise<string> {
 		// Refresh 5 minutes before expiry
 		if (this.cachedToken && Date.now() < this.expiresAt - 5 * 60 * 1000) {
+			journalTokenCacheHit(this.config.installationId, {
+				operation: "github-api",
+			});
 			return this.cachedToken;
 		}
 
@@ -66,6 +79,10 @@ export class GitHubAppTokenProvider {
 
 		this.cachedToken = data.token;
 		this.expiresAt = new Date(data.expires_at).getTime();
+
+		journalTokenMinted(this.config.installationId, {
+			operation: "github-api",
+		});
 
 		return this.cachedToken;
 	}

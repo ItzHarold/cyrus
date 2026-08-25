@@ -519,6 +519,7 @@ When working on this codebase, follow these practices:
 - **Edge Worker**: `packages/edge-worker/src/EdgeWorker.ts`
 - **GitHub Token Resolution**: `EdgeWorker.resolveGitHubToken()` — three-tier fallback: proxy-forwarded installation token → self-minted GitHub App token (via `GitHubAppTokenProvider`) → `GITHUB_TOKEN` PAT. Self-hosted users with a GitHub App use the middle tier; cloud/proxy users get tokens forwarded; legacy users fall back to a PAT.
 - **GitHub App Token Minting**: `packages/github-event-transport/src/GitHubAppTokenProvider.ts` — signs JWTs with the App's private key and exchanges them for short-lived installation tokens. Caches tokens and refreshes 5 minutes before expiry.
+- **GitHub Credential Journal**: `packages/github-event-transport/src/github-token-journal.ts` — the only place the `github_token_minted` / `github_token_ambient_fallback` / `github_token_cache_hit` lines are defined. Repository-scoped mints emit from inside `mintInstallationToken`, which every such path bottoms out in, so a new minting caller cannot forget to announce itself. **Never add the token value to an attribute.** If you add a credential path, journal it through these helpers rather than a bespoke log line — telling App-minted from PAT-fallback must stay a grep (PON-176).
 - **OAuth Flow**: `apps/proxy/src/services/OAuthService.mjs`
 
 ## Testing MCP Linear Integration
