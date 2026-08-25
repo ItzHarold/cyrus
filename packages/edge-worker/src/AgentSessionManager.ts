@@ -34,6 +34,17 @@ import {
 	sanitizeClientPaths,
 } from "./client-content-policy.js";
 import { CLIENT_MESSAGES } from "./client-messages.js";
+
+/**
+ * Models the SDK legitimately uses on its own behalf (PON-147) — session
+ * titling and similar. Deliberately explicit and SHORT: verified against 12h
+ * of live model_verified lines on both boxes (only haiku-4-5 ever appears
+ * beside the pin) and 62 lines across 7 prior days. Exact-or-dated-suffix
+ * matching, same rule as the pin itself. Anything not here and not the pin
+ * fails the session regardless of token share.
+ */
+const KNOWN_INTERNAL_MODELS = ["claude-haiku-4-5"];
+
 import {
 	formatPendingWorkThought,
 	formatScheduleWakeupResponse,
@@ -875,6 +886,42 @@ export class AgentSessionManager extends EventEmitter {
 								);
 								throw new Error(
 									`PON-110 model drift: billed=${dominant} pinned=${pinned}`,
+								);
+							}
+							// PON-147: EVERY used model must be the pin or a known
+							// SDK-internal — the plurality check above lets an
+							// unpinned model do 49% of a session unexamined (one
+							// three-model session slipped through in the wild).
+							// Allowlist, not threshold: the question is which
+							// models are legitimate at all, not how much.
+							const totalTokens = usedModels.reduce(
+								(sum, m) => sum + weight(m),
+								0,
+							);
+							for (const used of usedModels) {
+								if (modelSatisfiesPin(used)) continue;
+								if (
+									KNOWN_INTERNAL_MODELS.some(
+										(internal) =>
+											used === internal || used.startsWith(`${internal}-`),
+									)
+								) {
+									continue;
+								}
+								const pinned = getPinnedModel();
+								const share =
+									totalTokens > 0
+										? Math.round((weight(used) / totalTokens) * 100)
+										: 0;
+								log.error(
+									`[event:model_drift] unexpected=${used} share=${share}% pinned=${pinned} used=${usedModels.join(",")} (PON-147)`,
+								);
+								await this.postModelNotificationThought(
+									sessionId,
+									`Model drift: ${used} carried ${share}% of this session's tokens but is neither the pinned model (${pinned}) nor a known internal helper. Failing this session (PON-147).`,
+								);
+								throw new Error(
+									`PON-147 model drift: unexpected=${used} share=${share}% pinned=${pinned}`,
 								);
 							}
 							log.info(
