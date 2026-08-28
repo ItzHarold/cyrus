@@ -219,34 +219,6 @@ export class ActivityPoster {
 		);
 	}
 
-	/**
-	 * The deliverable-framed scope, posted by the machinery as a top-level
-	 * issue COMMENT (PON-188, then PON-191).
-	 *
-	 * PON-188 made the machinery post this because the session's own attempt
-	 * is assistant text — narration — which quiet workspaces suppress, so the
-	 * client was asked to approve a scope with nothing to read. PON-191 then
-	 * moved it off the activity stream: Linear collapses session activities
-	 * under "Worked for N minutes", so the scope was readable only after a
-	 * click, and it never travelled in email or mobile notifications. A
-	 * comment is the surface a client actually receives.
-	 *
-	 * Returns true only when the comment was really created — the caller
-	 * treats anything else as "the scope did not land" and refuses to ask.
-	 */
-	async postClientScopeComment(
-		issueId: string,
-		sessionId: string,
-		workspaceId: string,
-		body: string,
-	): Promise<boolean> {
-		return this.postComment(issueId, body, workspaceId, {
-			kind: "sanctioned",
-			sessionId,
-			label: "client scope comment",
-		});
-	}
-
 	async postRepoSetupHookActivity(
 		sessionId: string,
 		workspaceId: string,

@@ -178,6 +178,7 @@ import { NeedsInfoStore } from "./NeedsInfoStore.js";
 import { buildNeedsInfoRuleBlock, isNeedsInfoQuestion } from "./needs-info.js";
 import { ScopeApprovalStore } from "./ScopeApprovalStore.js";
 import {
+	buildScopeAskBody,
 	buildScopeConfirmGateBlock,
 	interpretCanonicalScopeAnswer,
 	interpretScopeConfirmAnswer,
@@ -8282,7 +8283,9 @@ ${taskSection}`;
 	 */
 	private async handleIssueUnassigned(
 		issue: WebhookIssue,
-		linearWorkspaceId: string,
+		// Retained for the call signature; the farewell moved from a comment
+		// (which needed the workspace) to a per-session response (PON-196).
+		_linearWorkspaceId: string,
 	): Promise<void> {
 		const sessions = this.agentSessionManager.getSessionsByIssueId(issue.id);
 		const activeThreadCount = sessions.length;
@@ -8296,13 +8299,16 @@ ${taskSection}`;
 
 		// Post ONE farewell comment on the issue (not in any thread) if there were active sessions
 		if (activeThreadCount > 0) {
-			await this.postComment(
-				issue.id,
-				"I've been unassigned and am stopping work now.",
-				linearWorkspaceId,
-				// No parentId - post as a new comment on the issue
-				{ kind: "sanctioned", label: "unassignment farewell" },
-			);
+			// PON-196: zero comments on a client thread. This used to be one
+			// comment on the issue; it is now a response on each session that
+			// was actually stopped, which is where the client is looking and
+			// leaves no comment trail behind.
+			for (const session of sessions) {
+				await this.agentSessionManager.createResponseActivity(
+					session.id,
+					"I've been unassigned and am stopping work now.",
+				);
+			}
 		}
 
 		// Cockpit (PON-151): an unassigned issue is no longer delegated work —
@@ -8686,28 +8692,6 @@ ${taskSection}`;
 	//   }
 	//   await issueTracker.createComment(commentData)
 	// }
-
-	/**
-	 * Post a comment to Linear
-	 */
-	private async postComment(
-		issueId: string,
-		body: string,
-		linearWorkspaceId: string,
-		options: {
-			kind: ClientSurfaceKind;
-			sessionId?: string;
-			parentId?: string;
-			label?: string;
-		},
-	): Promise<boolean> {
-		return this.activityPoster.postComment(
-			issueId,
-			body,
-			linearWorkspaceId,
-			options,
-		);
-	}
 
 	/**
 	 * Format todos as Linear checklist markdown
@@ -9909,53 +9893,33 @@ ${input.userComment}
 	 * workspaces suppress. That is how ACM-10's client got an elicitation
 	 * pointing at "the scope above" with nothing above it.
 	 *
-	 * So the machinery posts it, from the `client_scope` text the gate already
-	 * made the session record (PON-170), as a top-level issue COMMENT
-	 * (PON-191) — not a session activity. Linear collapses activities under
-	 * "Worked for N minutes", so an activity made the client click to read
-	 * what they were approving and never reached their email or phone. A
-	 * comment is the surface a client actually receives.
+	 * So the machinery carries it, from the `client_scope` text the gate
+	 * already makes the session record (PON-170) — and it carries it INSIDE
+	 * the confirmation question (PON-196). Three surfaces were tried: as
+	 * narration it was suppressed and the client approved nothing (PON-188);
+	 * as a comment it was readable but left a comment trail on the client's
+	 * thread (PON-192). An elicitation is never collapsed, is always visible
+	 * in the panel, reads standalone in an email, and leaves nothing behind.
 	 *
-	 * Posting is keyed on the exact text: a revision differs and posts again,
-	 * a replay matches and does not. It runs on every gated session, quiet or
-	 * not — the comment surface does not depend on narration, so neither does
-	 * this.
-	 *
-	 * Returns false when the client cannot read the scope, which the caller
-	 * turns into a refusal to ask at all.
+	 * Returns the composed ask, or null when there is no scope to show —
+	 * which the caller turns into a refusal to ask at all. Nothing is posted
+	 * here; the ask itself is the delivery.
 	 */
-	private async ensureClientScopeVisible(
-		sessionId: string,
-		workspaceId: string,
-		issueId: string,
-	): Promise<boolean> {
+	private composeScopeAsk(sessionId: string, issueId: string): string | null {
 		const record = this.scopeApprovals.get(issueId);
 		const scope = record?.clientScope?.trim();
-		if (!scope) return false;
-		if (record?.clientScopePosted === scope) return true;
+		if (!scope) return null;
 
-		const body = this.agentSessionManager.sanitizeClientSurfaceText(
+		const session = this.agentSessionManager.getSession(sessionId);
+		const body = buildScopeAskBody(scope, {
+			identifier: session?.issueContext?.issueIdentifier,
+			title: session?.issue?.title,
+		});
+		return this.agentSessionManager.sanitizeClientSurfaceText(
 			sessionId,
-			"scope-proposal",
-			scope,
-		);
-		const posted = await this.activityPoster.postClientScopeComment(
-			issueId,
-			sessionId,
-			workspaceId,
+			"scope-ask",
 			body,
 		);
-		if (!posted) return false;
-
-		this.scopeApprovals.markClientScopePosted(issueId, scope);
-		await this.persistScopeApprovals("client_scope_posted");
-		this.logger.event("client_scope_posted", {
-			issueId,
-			workspaceId,
-			sessionId,
-			length: scope.length,
-		});
-		return true;
 	}
 
 	private createAskUserQuestionCallback(
@@ -9974,17 +9938,17 @@ ${input.userComment}
 				this.scopeGatePendingForIssue(organizationId, gateIssueId) &&
 				isScopeConfirmQuestion(gateQuestion)
 			) {
-				// PON-188: never ask a client to approve a scope they cannot
-				// read. The scope body's presence on the client surface is a
-				// hard precondition of the ask — if it did not land, the
-				// elicitation is not posted, nothing is stamped, and the
-				// session is told to record the scope and ask again.
-				const scopeVisible = await this.ensureClientScopeVisible(
+				// PON-188/196: never ask a client to approve a scope they
+				// cannot read. The scope IS the ask now — composed here from
+				// the recorded client_scope and spliced into the question, so
+				// there is no second surface to go missing. No recorded
+				// scope, no elicitation: nothing is posted, nothing stamped,
+				// and the session is told to record it and ask again.
+				const scopeAsk = this.composeScopeAsk(
 					linearAgentSessionId,
-					organizationId,
 					gateIssueId as string,
 				);
-				if (!scopeVisible) {
+				if (!scopeAsk) {
 					this.logger.event("scope_confirm_refused_no_scope", {
 						issueId: gateIssueId,
 						workspaceId: organizationId,
@@ -9996,11 +9960,27 @@ ${input.userComment}
 							"Not asked: the deliverable-framed scope has not reached the client, so this question would ask them to approve something they cannot read. Record the exact client-facing scope text with record_operator_note's client_scope input, then ask this question again.",
 					};
 				}
+				// The scope replaces the session's question text: the client
+				// reads the scope, then "Proceed?", then the options the session
+				// wrote for them.
+				gateQuestion.question = scopeAsk;
 				const session =
 					this.agentSessionManager.getSession(linearAgentSessionId);
 				this.scopeApprovals.recordProposed(gateIssueId as string, {
 					workspaceId: organizationId,
 					issueIdentifier: session?.issueContext?.issueIdentifier,
+				});
+				// Records the exact text put in front of the client, which is what
+				// the operator brief later reads back as "what they approved".
+				this.scopeApprovals.markClientScopePosted(
+					gateIssueId as string,
+					this.scopeApprovals.get(gateIssueId as string)?.clientScope ?? "",
+				);
+				this.logger.event("client_scope_in_ask", {
+					issueId: gateIssueId,
+					workspaceId: organizationId,
+					sessionId: linearAgentSessionId,
+					length: scopeAsk.length,
 				});
 				this.logger.event("scope_confirm_posted", {
 					issueId: gateIssueId,

@@ -18,6 +18,46 @@
 
 import type { AskUserQuestion } from "cyrus-core";
 
+/**
+ * The client-facing scope goes INSIDE the confirmation elicitation (PON-196).
+ *
+ * Three surfaces have now been tried. As narration it was suppressed and the
+ * client was asked to approve nothing (PON-188). As a comment it was readable
+ * but left a comment trail on the client's thread (PON-192). An elicitation is
+ * never collapsed, always visible in the panel, reads standalone in an email,
+ * and leaves nothing behind — so the scope travels in the ask itself.
+ *
+ * The client half is Outcome and You-will-receive. Interpretations are
+ * operator material: they go to the mirror through the operator note, not to
+ * the client. The gate block says so, and this strips them if a session sends
+ * them anyway — the recorded `clientScope` keeps the full text for the brief.
+ */
+export function buildScopeAskBody(
+	clientScope: string,
+	issue?: { identifier?: string; title?: string },
+): string {
+	const clientHalf = stripOperatorSections(clientScope).trim();
+	const subject = issue?.identifier
+		? issue.title
+			? `${issue.identifier} — ${issue.title}`
+			: issue.identifier
+		: "this issue";
+	return `This is the scope for ${subject}.\n\n${clientHalf}\n\nProceed?`;
+}
+
+/**
+ * Cut an "Interpreted"/"Assumptions" section and everything after it. The gate
+ * mandates the section order, so the section header is the honest boundary —
+ * and cutting to the end rather than to the next header means a trailing
+ * operator aside cannot survive by omitting one.
+ */
+function stripOperatorSections(text: string): string {
+	const match = text.match(
+		/^\s*(?:\*\*|##+\s*)?(interpreted|interpretations?|assumptions?)\b/im,
+	);
+	return match?.index === undefined ? text : text.slice(0, match.index);
+}
+
 /** Canonical option labels the gate instructs the session to use. */
 export const SCOPE_APPROVE_LABEL = "Approve scope";
 export const SCOPE_REVISE_LABEL = "Revise scope";
@@ -43,14 +83,16 @@ Scope confirmation is required on this issue before any implementation. This req
 Before you change any file, create any commit, or open any PR:
 
 1. Read the issue and the relevant code.
-2. Record your INTERNAL reading with the record_operator_note tool: implementation approach, the files and areas you expect to touch, risks, and every interpretation you made. Full technical detail — this goes to the operator only and is never shown on the issue. Pass the exact client-facing scope text you will post in the next step as the tool's client_scope input, so the operator later sees precisely what the client approved. If the issue is genuinely ambiguous, resolve the ambiguity first with the AskUserQuestion tool, then record the note.
-3. The client_scope text you recorded IS the scope comment: it is posted to the issue for you, as a comment, the moment you ask the confirmation question. Do not post it yourself, and do not repeat it in your own messages — write it once, in client_scope, as the whole thing the client will read. Structure it as: **Outcome** — what will exist and work when this is done, in the client's own terms; **You will receive** — where they will see it working and what they will get to merge; **Interpreted** — anything you had to interpret about the outcome itself, stated so they can correct it. No implementation detail anywhere in it: no file names, no code areas, no approach, no technical steps — that is what the operator note is for.
-4. Ask for confirmation with the AskUserQuestion tool — exactly one question, asking whether to proceed with the scope, with these options in this order: "${SCOPE_APPROVE_LABEL}", "${SCOPE_REVISE_LABEL}", "${SCOPE_CANCEL_LABEL}". Use those labels exactly, and never use the label "${SCOPE_APPROVE_LABEL}" on any other question.
+2. Record your INTERNAL reading with the record_operator_note tool: implementation approach, the files and areas you expect to touch, risks, and — importantly — every interpretation and assumption you made. Full technical detail. This goes to the operator only and is never shown on the issue, so the interpretations belong HERE, not in the client text. Pass the client-facing scope as the tool's client_scope input. If the issue is genuinely ambiguous about what the client wants, resolve that first with the AskUserQuestion tool, then record the note.
+3. Write client_scope as exactly two sections and nothing else: **Outcome** — what will exist and work when this is done, in the client's own terms; **You will receive** — where they will see it working and what they will get to merge. Keep it tight: this is the whole thing the client reads, and they read it inside the question. No implementation detail anywhere in it — no file names, no code areas, no approach, no technical steps — and no interpretations or assumptions section; those go in the operator note. Never post this text yourself, in a comment or anywhere else.
+4. Ask for confirmation with the AskUserQuestion tool — exactly one question, with these options in this order: "${SCOPE_APPROVE_LABEL}", "${SCOPE_REVISE_LABEL}", "${SCOPE_CANCEL_LABEL}". Use those labels exactly, and never use the label "${SCOPE_APPROVE_LABEL}" on any other question.
 
-   The question and its option descriptions must stand on their own. Assume the client sees them with no surrounding text and no memory of this thread: name the deliverable in the question itself rather than saying "the above", and make each option describe what happens if it is chosen. One sentence each is enough. The scope comment sits directly above the question, so you may point at it — but the ask must still make sense to someone who reads only the question.
+   Your question text is REPLACED by the scope itself — the client sees the scope you recorded, followed by "Proceed?", followed by your options — so put nothing load-bearing in the question field and never refer to a scope posted "above" or "in a comment": there is no comment, and the scope is inside the ask.
+
+   The option descriptions are yours and they must stand on their own. Assume the client reads them in an email with no surrounding text: each one says what happens if it is chosen, in one sentence.
 5. Act on the answer:
    - "${SCOPE_APPROVE_LABEL}": proceed with the work as described. Do not ask again.
-   - "${SCOPE_REVISE_LABEL}": incorporate the reply, update the operator note with your revised internal reading, post a revised deliverable-framed scope, and ask again.
+   - "${SCOPE_REVISE_LABEL}": incorporate the reply, re-record the operator note AND the revised client_scope, then ask again — the new ask carries the revised scope inline, which is how the client sees the revision.
    - "${SCOPE_CANCEL_LABEL}": post one short comment acknowledging the cancellation and stop.
    - Anything else is not an approval. Treat it as context, update the note, post a revised deliverable-framed scope, and ask again. Never start implementing without an explicit "${SCOPE_APPROVE_LABEL}".
 
