@@ -150,6 +150,11 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 			linearWorkspaces: {
 				"test-workspace": {
 					linearToken: "test-token",
+					// PON-194: both client-flow gates off, so these cases keep testing
+					// the priority chain rather than the Linear write floor (which a
+					// client workspace gets by default).
+					scopeConfirmGate: false,
+					verifyBeforeDelivery: false,
 					// PON-139: sessions refuse to start for an undeclared workspace, so
 					// every fixture that builds one must declare. apiKey rather than
 					// subscription: self-contained, no hidden env-var dependency.

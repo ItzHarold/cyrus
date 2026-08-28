@@ -1040,6 +1040,43 @@ export type IssueDeletedWebhook =
  *
  * Linear sends Issue entity webhooks with action "remove" when an issue is deleted.
  */
+/**
+ * Did an `Issue`/`update` entity webhook move the issue INTO a terminal state?
+ *
+ * The `AppUserNotification`/`issueStatusChanged` notification is the path the
+ * terminal cleanup was built on, and Linear only sends it when the app is
+ * notified — never for the app's own actions. So an issue cancelled by the
+ * agent itself (or by anything the app does not get notified about) left its
+ * scope-gate, needs-info and verification records open forever, and the
+ * queryable list of open gates quietly stopped being true (PON-195).
+ *
+ * The entity webhook always arrives. This reads the state it carries and
+ * treats completed/canceled as terminal, keyed on `updatedFrom.stateId` so it
+ * fires on the TRANSITION rather than on every later edit of a done issue.
+ * Cleanup is idempotent, so an issue that produces both signals is harmless.
+ *
+ * Narrower than `isIssueStateIdUpdateWebhook`, which matches ANY state change
+ * (it wakes parked blocked-by sessions). This one matches only the moves that
+ * end an issue's life.
+ */
+export function isIssueTerminalStateUpdateWebhook(
+	webhook: Webhook,
+): webhook is IssueUpdateWebhook {
+	if (webhook.type !== "Issue" || webhook.action !== "update") {
+		return false;
+	}
+	const entity = webhook as LinearSDK.LinearDocument.EntityWebhookPayload;
+	const updatedFrom = entity.updatedFrom as { stateId?: string } | undefined;
+	// No state change in this update — a title edit on a done issue is not a
+	// fresh terminal transition.
+	if (!updatedFrom || !("stateId" in updatedFrom)) {
+		return false;
+	}
+	const data = (entity as { data?: { state?: { type?: string } } }).data;
+	const stateType = data?.state?.type;
+	return stateType === "completed" || stateType === "canceled";
+}
+
 export function isIssueDeletedWebhook(
 	webhook: Webhook,
 ): webhook is IssueDeletedWebhook {

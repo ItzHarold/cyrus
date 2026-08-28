@@ -225,3 +225,85 @@ export function getDefaultAllowedTools(
 			return GITHUB_DEFAULT_ALLOWED_TOOLS;
 	}
 }
+
+/**
+ * The Linear MCP server's surface, split by what it does (PON-194).
+ *
+ * Enumerated live from `https://mcp.linear.app/mcp` (`tools/list`) on
+ * 2026-08-28: 57 tools, 35 read and 22 write. The split is kept explicit
+ * rather than pattern-matched on `save_`/`delete_` because a wrong guess here
+ * either hands a model write access to a client's tracker or silently removes
+ * a read it needs.
+ *
+ * Sessions on client-flow workspaces get READ only. Every message a client
+ * receives is composed by the machinery — the scope ask, the delivery summary,
+ * elicitations, needs-info, status — so a session has nothing legitimate to
+ * write into a client's Linear, and a model-authored write there would bypass
+ * every content policy we have.
+ */
+export const LINEAR_MCP_READ_TOOLS = [
+	"mcp__linear__get_attachment",
+	"mcp__linear__list_agent_skills",
+	"mcp__linear__get_agent_skill",
+	"mcp__linear__list_comments",
+	"mcp__linear__list_cycles",
+	"mcp__linear__get_document",
+	"mcp__linear__list_documents",
+	"mcp__linear__extract_images",
+	"mcp__linear__get_issue",
+	"mcp__linear__list_issues",
+	"mcp__linear__list_issue_statuses",
+	"mcp__linear__get_issue_status",
+	"mcp__linear__list_issue_labels",
+	"mcp__linear__list_projects",
+	"mcp__linear__get_project",
+	"mcp__linear__list_project_labels",
+	"mcp__linear__list_release_pipelines",
+	"mcp__linear__list_releases",
+	"mcp__linear__get_release",
+	"mcp__linear__list_release_notes",
+	"mcp__linear__get_release_note",
+	"mcp__linear__get_diff",
+	"mcp__linear__list_diffs",
+	"mcp__linear__get_diff_threads",
+	"mcp__linear__list_milestones",
+	"mcp__linear__get_milestone",
+	"mcp__linear__list_teams",
+	"mcp__linear__get_team",
+	"mcp__linear__list_templates",
+	"mcp__linear__get_template",
+	"mcp__linear__list_users",
+	"mcp__linear__get_user",
+	"mcp__linear__get_workspace",
+	"mcp__linear__search_documentation",
+	"mcp__linear__get_status_updates",
+] as const;
+
+/** The write half — denied on client-flow workspaces. */
+export const LINEAR_MCP_WRITE_TOOLS = [
+	"mcp__linear__save_comment",
+	"mcp__linear__delete_comment",
+	"mcp__linear__save_issue",
+	"mcp__linear__share_issue",
+	"mcp__linear__unshare_issue",
+	"mcp__linear__create_issue_label",
+	"mcp__linear__save_document",
+	"mcp__linear__save_project",
+	"mcp__linear__save_release",
+	"mcp__linear__save_release_note",
+	"mcp__linear__save_milestone",
+	"mcp__linear__save_status_update",
+	"mcp__linear__delete_status_update",
+	"mcp__linear__prepare_attachment_upload",
+	"mcp__linear__create_attachment_from_upload",
+	"mcp__linear__create_attachment",
+	"mcp__linear__delete_attachment",
+	"mcp__linear__save_diff_comment",
+	"mcp__linear__resolve_diff_thread",
+	"mcp__linear__delete_diff_comment",
+	"mcp__linear__submit_diff_review",
+	"mcp__linear__merge_diff",
+] as const;
+
+/** The whole-server grant the write floor replaces. */
+export const LINEAR_MCP_SERVER_PREFIX = "mcp__linear";

@@ -108,11 +108,38 @@ export class ActivityPoster {
 				changed = true;
 			}
 		}
-		if (!changed) return input;
+
+		// PON-194: select options are a client surface too — the label is the
+		// button they click — and nothing sanitized them on any path, because
+		// every sanitizer walked `content` only.
+		const guarded: AgentActivityCreateInput = changed
+			? { ...input, content: out as AgentActivityCreateInput["content"] }
+			: input;
+		const options = (
+			guarded as { signalMetadata?: { options?: { value?: unknown }[] } }
+		).signalMetadata?.options;
+		if (!Array.isArray(options)) return guarded;
+		let optionsChanged = false;
+		const sanitizedOptions = options.map((opt) => {
+			if (typeof opt?.value !== "string") return opt;
+			const value = this.clientSurface.sanitize(
+				sessionId,
+				`direct:${label}:option`,
+				opt.value,
+			);
+			if (value === opt.value) return opt;
+			optionsChanged = true;
+			return { ...opt, value };
+		});
+		if (!optionsChanged) return guarded;
 		return {
-			...input,
-			content: out as AgentActivityCreateInput["content"],
-		};
+			...guarded,
+			signalMetadata: {
+				...(guarded as { signalMetadata?: Record<string, unknown> })
+					.signalMetadata,
+				options: sanitizedOptions,
+			},
+		} as AgentActivityCreateInput;
 	}
 
 	async postActivityDirect(

@@ -156,6 +156,25 @@ export class AskUserQuestionHandler {
 
 		// Create the options for Linear's select signal
 		// Include an "Other" option to allow free-form input
+		// PON-194: option labels are model-authored and land as the buttons a
+		// client clicks. The body was sanitized (PON-179); these were not.
+		//
+		// A rewritten label is also written back onto the question, because
+		// the reply is resolved against the POSTED options (PON-142's rule).
+		// Sanitizing what we post while resolving against what the model wrote
+		// would silently turn a click into an unrecognised answer.
+		for (const opt of question.options) {
+			const sanitizedLabel = this.deps.sanitizeClientText?.(
+				linearAgentSessionId,
+				opt.label,
+			);
+			if (sanitizedLabel !== undefined && sanitizedLabel !== opt.label) {
+				this.logger.warn(
+					`Option label rewritten by the content policy for session ${linearAgentSessionId}`,
+				);
+				opt.label = sanitizedLabel;
+			}
+		}
 		const options = question.options.map((opt) => ({
 			value: opt.label,
 		}));

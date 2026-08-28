@@ -40,6 +40,7 @@ import {
 	isAgentSessionPromptedWebhook,
 	isIssueDeletedWebhook,
 	isIssueStateChangeWebhook,
+	isIssueTerminalStateUpdateWebhook,
 	isIssueTitleOrDescriptionUpdateWebhook,
 	isIssueUnassignedWebhook,
 	type Webhook,
@@ -99,6 +100,20 @@ export class LinearMessageTranslator
 
 		if (isIssueStateChangeWebhook(w)) {
 			return this.translateIssueStateChange(w, context);
+		}
+
+		// PON-195: the entity webhook is the only terminal signal for a state
+		// change the app itself made — the notification path never fires for
+		// our own actions. Checked before the title/description branch, which
+		// would otherwise swallow it.
+		if (isIssueTerminalStateUpdateWebhook(w)) {
+			return this.buildTerminalStateMessage(
+				w.data as unknown as Parameters<
+					typeof this.buildTerminalStateMessage
+				>[0],
+				w.organizationId,
+				w.createdAt,
+			);
 		}
 
 		if (isIssueDeletedWebhook(w)) {

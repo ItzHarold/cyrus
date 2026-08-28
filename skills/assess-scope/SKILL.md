@@ -60,7 +60,16 @@ The first is the more common failure, so weight against proposing.
 
 ## After the client answers
 
-**Approved** — create the sub-issues, then close the loop:
+**Approved** — create the sub-issues, then close the loop.
+
+> **If `mcp__linear__save_issue` is not available to you, stop at the proposal.**
+> On a client's workspace you can read Linear but not write to it: every message
+> a client receives is composed by the machinery, so sessions hold no write
+> access to a client's tracker. Post your final response with the approved split
+> — numbered, each with its title and one-line scope, in execution order — and
+> say the pieces will be raised as separate issues. Create nothing, delegate
+> nothing. The operator raises them from the approved list. The rest of this
+> section applies only where the tool is available.
 
 - Create each one with `mcp__linear__save_issue`: omit `id` to create, set
   `parentId` to the original issue, and `team` to the original's team.

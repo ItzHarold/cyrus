@@ -8,6 +8,7 @@ import {
 	type RepositoryConfig,
 	type Webhook,
 } from "cyrus-core";
+import { CLIENT_MESSAGES } from "./client-messages.js";
 
 /**
  * Repository routing result types
@@ -56,6 +57,11 @@ export interface RepositoryRouterDeps {
 
 	/** Get issue tracker service for a workspace */
 	getIssueTracker: (workspaceId: string) => IIssueTrackerService | undefined;
+	/**
+	 * PON-194: policy-sanitize text bound for a client surface. Optional —
+	 * absent means post verbatim, as before.
+	 */
+	sanitizeClientText?: (sessionId: string, text: string) => string;
 }
 
 /**
@@ -659,7 +665,10 @@ export class RepositoryRouter {
 		// what a human should see in the selector and exactly what the matcher
 		// resolves, so a click answers by construction.
 		const options = workspaceRepos.map((repo) => ({
-			value: repo.name,
+			// PON-194: a select option is a client surface — the label is what
+			// they click — and nothing sanitized these on any path.
+			value:
+				this.deps.sanitizeClientText?.(agentSessionId, repo.name) ?? repo.name,
 		}));
 
 		// Post elicitation activity
@@ -703,13 +712,18 @@ export class RepositoryRouter {
 	): Promise<void> {
 		const errorObj = error as Error;
 		const errorMessage = errorObj?.message || String(error);
+		// PON-194: the exception goes to the operator, never to the client. It
+		// is whatever the SDK/GraphQL/undici threw one statement earlier —
+		// stack text, payloads, sometimes request URLs — and the static sweep
+		// cannot see an interpolation.
+		this.logger.error(`[event:repository_selection_failed] ${errorMessage}`);
 
 		try {
 			await issueTracker.createAgentActivity({
 				agentSessionId,
 				content: {
 					type: "error",
-					body: `Failed to display repository selection: ${errorMessage}`,
+					body: CLIENT_MESSAGES.repositorySelectionUnavailable(),
 				},
 			});
 			this.logger.info(
