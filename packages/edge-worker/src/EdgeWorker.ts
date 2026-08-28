@@ -4769,21 +4769,26 @@ ${taskSection}`;
 				// close the cockpit mirror, and rethrow: the caller's lane
 				// backstop releases the slot (not_started), and no runner
 				// ever starts.
-				await this.getIssueTrackerForWorkspace(linearWorkspaceId)
-					?.createAgentActivity({
-						agentSessionId: sessionId,
-						content: {
-							type: "error",
-							body: CLIENT_MESSAGES.worktreeRefusedAtStart(
-								error.repositoryName,
-							),
+				// PON-194: through the floor like every other direct post.
+				const refusalTracker =
+					this.getIssueTrackerForWorkspace(linearWorkspaceId);
+				if (refusalTracker) {
+					await this.postActivityDirect(
+						refusalTracker,
+						{
+							agentSessionId: sessionId,
+							content: {
+								type: "error",
+								body: CLIENT_MESSAGES.worktreeRefusedAtStart(
+									error.repositoryName,
+								),
+							},
 						},
-					})
-					.catch((postError) => {
-						this.logger.warn(
-							`Failed to post worktree-refusal activity: ${(postError as Error).message}`,
-						);
-					});
+						"worktree refusal",
+						"sanctioned",
+						linearWorkspaceId,
+					);
+				}
 				void this.cockpitMirror.close(issue.id, "not_started");
 				this.logger.event("worktree_refusal_terminal", {
 					issueId: issue.id,
@@ -9171,13 +9176,24 @@ ${taskSection}`;
 				: `Received feedback from orchestrator:\n\n---\n\n${message}\n\n---`;
 
 			try {
-				const result = await issueTracker.createAgentActivity({
-					agentSessionId: childSessionId,
-					content: {
-						type: "thought",
-						body: feedbackThought,
+				// PON-194: the mirror image of the child->parent receipt, which
+				// got the floor and this did not. The body is free text the
+				// PARENT agent wrote — internal direction, on the child issue's
+				// client thread.
+				const activityId = await this.postActivityDirect(
+					issueTracker,
+					{
+						agentSessionId: childSessionId,
+						content: {
+							type: "thought",
+							body: feedbackThought,
+						},
 					},
-				});
+					"orchestrator feedback receipt",
+					"narration",
+					childWorkspaceId,
+				);
+				const result = { success: true, activityId };
 
 				if (result.success) {
 					console.log(
@@ -10538,12 +10554,14 @@ ${input.userComment}
 		input: AgentActivityCreateInput,
 		label: string,
 		kind: ClientSurfaceKind,
+		workspaceId?: string,
 	): Promise<string | null> {
 		return this.activityPoster.postActivityDirect(
 			issueTracker,
 			input,
 			label,
 			kind,
+			workspaceId,
 		);
 	}
 

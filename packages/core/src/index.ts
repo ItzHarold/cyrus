@@ -68,6 +68,9 @@ export {
 	GITHUB_DEFAULT_ALLOWED_TOOLS,
 	getDefaultAllowedTools,
 	LINEAR_DEFAULT_ALLOWED_TOOLS,
+	LINEAR_MCP_READ_TOOLS,
+	LINEAR_MCP_SERVER_PREFIX,
+	LINEAR_MCP_WRITE_TOOLS,
 	SLACK_DEFAULT_ALLOWED_TOOLS,
 } from "./allowed-tools-defaults.js";
 export type {
@@ -193,6 +196,7 @@ export {
 	isIssueNewCommentWebhook,
 	isIssueStateChangeWebhook,
 	isIssueStateIdUpdateWebhook,
+	isIssueTerminalStateUpdateWebhook,
 	isIssueTitleOrDescriptionUpdateWebhook,
 	isIssueUnassignedEvent,
 	isIssueUnassignedWebhook,

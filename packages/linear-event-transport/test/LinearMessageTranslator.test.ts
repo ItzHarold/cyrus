@@ -571,4 +571,55 @@ describe("LinearMessageTranslator", () => {
 			expect(result.reason).toContain("Unsupported webhook type");
 		});
 	});
+
+	/**
+	 * PON-195: terminal cleanup hung off AppUserNotification/issueStatusChanged,
+	 * which Linear does not send for the app's own actions. An issue the agent
+	 * cancelled kept its scope-gate record forever — observed live on prod,
+	 * where two Canceled transitions produced Issue/update webhooks and no
+	 * cleanup. The entity webhook always arrives, so it is translated too.
+	 */
+	describe("translate - Issue/update reaching a terminal state", () => {
+		const webhook = {
+			type: "Issue",
+			action: "update",
+			data: {
+				id: "issue-1",
+				identifier: "FRO-57",
+				title: "Add a SUPPORT.md",
+				team: { id: "team-1", key: "FRO", name: "FrontDoor" },
+				teamId: "team-1",
+				url: "https://linear.app/x/issue/FRO-57",
+				state: { id: "s2", name: "Canceled", type: "canceled" },
+			},
+			updatedFrom: { stateId: "s1" },
+			organizationId: "org-1",
+			createdAt: "2026-08-28T18:16:51Z",
+		} as unknown as LinearWebhookPayload;
+
+		it("produces the terminal-state cleanup message", () => {
+			const result = translator.translate(webhook);
+			expect(result.success).toBe(true);
+			if (!result.success) return;
+			// The discriminator is `action`; `isTerminal` is what the cleanup
+			// handler keys on.
+			expect(result.message.action).toBe("issue_state_change");
+			expect(result.message.workItemIdentifier).toBe("FRO-57");
+			expect((result.message as { isTerminal?: boolean }).isTerminal).toBe(
+				true,
+			);
+		});
+
+		it("does not fire for a non-terminal state change", () => {
+			const started = {
+				...(webhook as unknown as Record<string, unknown>),
+				data: {
+					...(webhook as unknown as { data: Record<string, unknown> }).data,
+					state: { id: "s3", name: "In Progress", type: "started" },
+				},
+			} as unknown as LinearWebhookPayload;
+			const result = translator.translate(started);
+			expect(result.success).toBe(false);
+		});
+	});
 });

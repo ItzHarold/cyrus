@@ -7,6 +7,9 @@ import type { EdgeWorkerConfig, ILogger, RepositoryConfig } from "cyrus-core";
 import {
 	GITHUB_DEFAULT_ALLOWED_TOOLS,
 	LINEAR_DEFAULT_ALLOWED_TOOLS,
+	LINEAR_MCP_READ_TOOLS,
+	LINEAR_MCP_SERVER_PREFIX,
+	LINEAR_MCP_WRITE_TOOLS,
 	SLACK_DEFAULT_ALLOWED_TOOLS,
 } from "cyrus-core";
 
@@ -137,7 +140,10 @@ export class ToolPermissionResolver {
 		const perRepoTools = repoArray.map((repo) =>
 			this.buildAllowedToolsForRepo(repo, promptType),
 		);
-		const unionTools = [...new Set(perRepoTools.flat())];
+		const unionTools = this.applyLinearWriteFloor(
+			[...new Set(perRepoTools.flat())],
+			repoArray,
+		);
 
 		const repoNames = repoArray.map((r) => r.name).join(", ");
 		this.logger.debug(
@@ -180,6 +186,66 @@ export class ToolPermissionResolver {
 	 * Resolve allowed tools for a single repository (Linear/GitHub priority
 	 * chain — chat sessions go through `buildChatAllowedTools`).
 	 */
+	/**
+	 * Is this repository's workspace one where the machinery composes every
+	 * client-facing message? (PON-194)
+	 *
+	 * Either client-flow gate being on means yes. Both default ON, so a
+	 * workspace nobody has configured is treated as a client's — the safe
+	 * direction. A workspace that has explicitly opted out of both gates (the
+	 * dev partnership teams) is ours, and keeps the whole server.
+	 */
+	private isClientFlowWorkspace(repository: RepositoryConfig): boolean {
+		const workspaceId = repository.linearWorkspaceId;
+		if (!workspaceId) return false;
+		const ws = this.config.linearWorkspaces?.[workspaceId];
+		if (!ws) return false;
+		return ws.scopeConfirmGate !== false || ws.verifyBeforeDelivery !== false;
+	}
+
+	/**
+	 * Replace the whole-server Linear grant with its read half (PON-194).
+	 *
+	 * The model holds the TENANT's own Linear OAuth token through this server,
+	 * so a bare `mcp__linear` grant let a session write comments and issues
+	 * into a client's tracker outside every content policy, every quiet
+	 * suppression and every static sweep — the one client surface no funnel
+	 * could see. Now that the machinery composes the scope ask, the delivery
+	 * summary, elicitations and needs-info, a session has nothing legitimate
+	 * to write there.
+	 *
+	 * This is a floor, not a default: it applies after operator configuration,
+	 * because the point is that no config path can hand a model write access
+	 * to a client's tracker. Reads are untouched.
+	 */
+	private applyLinearWriteFloor(
+		allowed: string[],
+		repositories: RepositoryConfig[],
+	): string[] {
+		// Allowed lists are UNIONED across a multi-repo session, so the floor
+		// has to be applied to the union: if any repository in the session
+		// belongs to a client, the session cannot write to Linear at all.
+		// The strictest repo wins, which is the only safe direction here.
+		if (!repositories.some((repo) => this.isClientFlowWorkspace(repo))) {
+			return allowed;
+		}
+		const writes = new Set<string>(LINEAR_MCP_WRITE_TOOLS);
+		const out: string[] = [];
+		let replacedServerGrant = false;
+		for (const tool of allowed) {
+			if (tool === LINEAR_MCP_SERVER_PREFIX) {
+				replacedServerGrant = true;
+				continue;
+			}
+			if (writes.has(tool)) continue;
+			out.push(tool);
+		}
+		if (replacedServerGrant) {
+			out.push(...LINEAR_MCP_READ_TOOLS);
+		}
+		return out;
+	}
+
 	private buildAllowedToolsForRepo(
 		repository: RepositoryConfig,
 		promptType?: PromptType,
@@ -254,6 +320,15 @@ export class ToolPermissionResolver {
 			intersection = [...firstSet].filter((tool) =>
 				perRepoTools.every((repoTools) => repoTools.includes(tool)),
 			);
+		}
+
+		// PON-194: the Linear write tools are denied here as well as omitted
+		// from the allow list, so a future path that re-adds the whole-server
+		// grant still cannot write into a client's tracker. Added after the
+		// intersection for the same reason the allow floor is applied to the
+		// union — one client repository in the session is enough.
+		if (repoArray.some((repo) => this.isClientFlowWorkspace(repo))) {
+			intersection = [...new Set([...intersection, ...LINEAR_MCP_WRITE_TOOLS])];
 		}
 
 		if (intersection.length > 0) {

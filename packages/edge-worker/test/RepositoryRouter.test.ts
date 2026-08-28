@@ -1535,6 +1535,9 @@ describe("RepositoryRouter", () => {
 				expect(env.mockLinearClient.createAgentActivity).toHaveBeenCalledTimes(
 					2,
 				);
+				// PON-194: the client gets the state, not the exception. The raw
+				// error text (network stack, GraphQL payloads, sometimes request
+				// URLs) goes to the operator journal instead.
 				expect(
 					env.mockLinearClient.createAgentActivity,
 				).toHaveBeenNthCalledWith(
@@ -1543,11 +1546,14 @@ describe("RepositoryRouter", () => {
 						content: {
 							type: "error",
 							body: expect.stringContaining(
-								"Failed to display repository selection",
+								"could not confirm which repository",
 							),
 						},
 					}),
 				);
+				const posted = env.mockLinearClient.createAgentActivity.mock
+					.calls[1][0] as { content: { body: string } };
+				expect(posted.content.body).not.toContain("API error");
 			});
 
 			it("should clean up pending selection when both elicitation and error posting fail", async () => {

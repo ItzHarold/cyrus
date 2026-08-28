@@ -35,6 +35,17 @@ export const CLIENT_MESSAGES = {
 		`credential is missing or unavailable. The operator has been notified; ` +
 		`once configuration is fixed, re-delegate this issue.`,
 
+	/**
+	 * PON-194: the repository picker failed to post. The raw exception used to
+	 * be interpolated onto the client's thread — network stack text, GraphQL
+	 * payloads, sometimes request URLs. The client gets the state; the
+	 * operator gets the exception, in the journal.
+	 */
+	repositorySelectionUnavailable: () =>
+		`This issue could not be started: we could not confirm which ` +
+		`repository it belongs to. The operator has been notified — no action ` +
+		`needed from you.`,
+
 	/** PON-152 ladder: the honest delay note on the client's issue. */
 	verificationDelayNote: () =>
 		`This one is taking longer than planned — the work is in final ` +
