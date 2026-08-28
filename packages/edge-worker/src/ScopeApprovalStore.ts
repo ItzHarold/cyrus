@@ -93,6 +93,9 @@ export class ScopeApprovalStore {
 			...(existing?.clientScope !== undefined
 				? { clientScope: existing.clientScope }
 				: {}),
+			...(existing?.clientScopePosted !== undefined
+				? { clientScopePosted: existing.clientScopePosted }
+				: {}),
 			workspaceId: context?.workspaceId ?? existing?.workspaceId,
 			issueIdentifier: context?.issueIdentifier ?? existing?.issueIdentifier,
 		});
@@ -155,6 +158,21 @@ export class ScopeApprovalStore {
 			operatorNoteAt: now,
 			...(clientScope !== undefined ? { clientScope } : {}),
 		});
+	}
+
+	/**
+	 * The client scope reached the client thread (PON-188). Records the exact
+	 * text posted, which is what makes the post idempotent per proposal: a
+	 * revision carries different text and posts again, a replay carries the
+	 * same text and does not.
+	 *
+	 * Only ever called after a successful post, so a record showing
+	 * `clientScopePosted === clientScope` means the client can read it.
+	 */
+	markClientScopePosted(issueId: string, text: string): void {
+		const existing = this.records.get(issueId);
+		if (!existing) return;
+		existing.clientScopePosted = text;
 	}
 
 	/** The issue reached a terminal state — its gate record is done. */

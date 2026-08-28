@@ -26,6 +26,11 @@ describe("ActivityPoster", () => {
 				warn: vi.fn(),
 				info: vi.fn(),
 			} as unknown as ILogger,
+			// PON-189: the client-surface floor is a required dependency —
+			// a poster that can be constructed without one is a poster that
+			// will be constructed without one. Loud + verbatim here, so these
+			// cases keep asserting exactly what they asserted before.
+			{ isQuiet: () => false, sanitize: (_s, _surface, text) => text },
 		);
 	});
 

@@ -157,6 +157,36 @@ describe("static sweep — registered client-facing templates are clean", () => 
 		}
 	});
 
+	it("no module composes routing information for a client surface (PON-189)", () => {
+		// A client thread once opened with "**Routing** (Team routing) —
+		// Acme-Metrics → `main` (default)": repo name, branch, and our
+		// routing method, as the second thing that client ever saw from us.
+		// Routing is operator information. It belongs in the journal, and the
+		// journal is not swept for prose because nothing there is client-
+		// visible — so the ban is on composing routing prose at all in the
+		// modules that can post.
+		const ROUTING_VOCABULARY = [
+			/\bRouting\b\s*\(/i,
+			/\bTeam routing\b/i,
+			/\bLabel routing\b/i,
+			/\bProject routing\b/i,
+			/\bTeam prefix routing\b/i,
+			/\bWorkspace fallback\b/i,
+			/\bCatch-all\b/i,
+		];
+		for (const file of ["ActivityPoster.ts", "AgentSessionManager.ts"]) {
+			const source = readFileSync(join(SRC, file), "utf8");
+			for (const literal of extractStringLiterals(source)) {
+				for (const pattern of ROUTING_VOCABULARY) {
+					expect(
+						pattern.test(literal),
+						`${file} composes routing text for a client surface: ${literal.slice(0, 60)}`,
+					).toBe(false);
+				}
+			}
+		}
+	});
+
 	it("the intrinsic rule block itself is clean and present", () => {
 		const block = buildClientSurfaceRuleBlock();
 		expect(block).toContain("<client_surface_rules>");

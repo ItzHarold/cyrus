@@ -6,28 +6,115 @@ import type {
 	RepositoryConfig,
 } from "cyrus-core";
 
+/**
+ * How a direct post relates to the client (PON-189).
+ *
+ * `sanctioned` — the client is the intended reader: acknowledgments, queue
+ * positions, blocked-by notices, refusals. Always posts.
+ * `narration` — internal working detail that happens to be addressed at the
+ * session: tool output, prompt-selection, sub-issue transcripts. Obeys the
+ * same suppression as the other two posting paths on a client-quiet
+ * workspace.
+ *
+ * There is no default: every call site chooses, because the one that did not
+ * choose is the one that leaked.
+ */
+export type ClientSurfaceKind = "sanctioned" | "narration";
+
+/**
+ * The client-surface floor, injected so this module needs no knowledge of
+ * workspaces or content policy (PON-189).
+ */
+export interface ClientSurfaceGuard {
+	/** Is this session's workspace client-quiet (narration suppressed)? */
+	isQuiet(sessionId: string): boolean;
+	/** Path floor on every workspace; full content policy on quiet ones. */
+	sanitize(sessionId: string, surface: string, text: string): string;
+}
+
 export class ActivityPoster {
 	private issueTrackers: Map<string, IIssueTrackerService>;
 	private repositories: Map<string, RepositoryConfig>;
 	private logger: ILogger;
+	private clientSurface: ClientSurfaceGuard;
 
 	constructor(
 		issueTrackers: Map<string, IIssueTrackerService>,
 		repositories: Map<string, RepositoryConfig>,
 		logger: ILogger,
+		clientSurface: ClientSurfaceGuard,
 	) {
 		this.issueTrackers = issueTrackers;
 		this.repositories = repositories;
 		this.logger = logger;
+		this.clientSurface = clientSurface;
+	}
+
+	/**
+	 * Apply the client-surface floor to a direct post (PON-189).
+	 *
+	 * This module writes straight to `createAgentActivity`, bypassing both
+	 * gated paths in AgentSessionManager — which is exactly how routing
+	 * internals reached a client thread on a workspace whose very next
+	 * thought was suppressed. Every direct post now goes through the same
+	 * two rules the other paths obey: narration is suppressed on a quiet
+	 * workspace, and internal paths never survive on any workspace.
+	 *
+	 * Returns the input to post, or null when the post is suppressed.
+	 */
+	private applyClientSurfaceFloor(
+		input: AgentActivityCreateInput,
+		kind: ClientSurfaceKind,
+		label: string,
+	): AgentActivityCreateInput | null {
+		const sessionId = input.agentSessionId;
+		const content = input.content as Record<string, unknown> | undefined;
+		if (!content) return input;
+		const type = content.type;
+
+		if (
+			kind === "narration" &&
+			(type === "thought" || type === "action") &&
+			this.clientSurface.isQuiet(sessionId)
+		) {
+			this.logger.info(
+				`[event:client_quiet_stream] direct ${String(type)} suppressed (client-quiet): ${label}`,
+			);
+			return null;
+		}
+
+		let changed = false;
+		const out: Record<string, unknown> = { ...content };
+		for (const key of ["body", "action", "parameter", "result"]) {
+			const value = out[key];
+			if (typeof value !== "string") continue;
+			const sanitized = this.clientSurface.sanitize(
+				sessionId,
+				`direct:${label}`,
+				value,
+			);
+			if (sanitized !== value) {
+				out[key] = sanitized;
+				changed = true;
+			}
+		}
+		if (!changed) return input;
+		return {
+			...input,
+			content: out as AgentActivityCreateInput["content"],
+		};
 	}
 
 	async postActivityDirect(
 		issueTracker: IIssueTrackerService,
 		input: AgentActivityCreateInput,
 		label: string,
+		kind: ClientSurfaceKind,
 	): Promise<string | null> {
+		const guarded = this.applyClientSurfaceFloor(input, kind, label);
+		if (!guarded) return null;
 		try {
-			const result = await issueTracker.createAgentActivity(input);
+			const result = await issueTracker.createAgentActivity(guarded);
 			if (result.success) {
 				if (result.agentActivity) {
 					const activity = await result.agentActivity;
@@ -63,6 +150,7 @@ export class ActivityPoster {
 				content: { type: "thought", body },
 			},
 			"thought activity",
+			"sanctioned",
 		);
 	}
 
@@ -87,6 +175,7 @@ export class ActivityPoster {
 				},
 			},
 			"instant acknowledgment",
+			"sanctioned",
 		);
 	}
 
@@ -107,52 +196,55 @@ export class ActivityPoster {
 				content: { type: "thought", body: "Resuming from child session" },
 			},
 			"parent resume acknowledgment",
+			"narration",
 		);
 	}
 
-	async postRoutingActivity(
+	/**
+	 * The deliverable-framed scope, posted to the client thread by the
+	 * machinery (PON-188).
+	 *
+	 * The gate instructs the session to post this itself, but a session's only
+	 * way to say something mid-run is assistant text — which is narration, and
+	 * narration is suppressed on exactly the workspaces this gate runs on. The
+	 * client was left with "Shall I proceed with the scope above?" and no
+	 * scope above. So the text the session already recorded as `client_scope`
+	 * is posted from here instead: sanctioned, deterministic, and impossible
+	 * for a model to forget.
+	 *
+	 * Returns true only when the activity was actually created — the caller
+	 * treats anything else as "the scope did not land" and refuses to ask.
+	 */
+	async postClientScopeProposal(
 		sessionId: string,
 		workspaceId: string,
-		repoLines: string[],
-		routingMethod?: string,
-	): Promise<void> {
+		body: string,
+	): Promise<boolean> {
 		const issueTracker = this.issueTrackers.get(workspaceId);
 		if (!issueTracker) {
 			this.logger.warn(`No issue tracker found for workspace ${workspaceId}`);
-			return;
+			return false;
 		}
-
-		const methodDisplayMap: Record<string, string> = {
-			"user-selected": "User selection",
-			"description-tag": "[repo=...] tag",
-			"label-based": "Label routing",
-			"project-based": "Project routing",
-			"team-based": "Team routing",
-			"team-prefix": "Team prefix routing",
-			"catch-all": "Catch-all",
-			"workspace-fallback": "Workspace fallback",
-		};
-		const methodDisplay = routingMethod
-			? (methodDisplayMap[routingMethod] ?? routingMethod)
-			: undefined;
-
-		const header = methodDisplay
-			? `**Routing** (${methodDisplay})`
-			: "**Routing**";
-
-		const body = `${header}\n${repoLines.join("\n")}`;
-
-		await this.postActivityDirect(
-			issueTracker,
+		const guarded = this.applyClientSurfaceFloor(
 			{
 				agentSessionId: sessionId,
-				content: {
-					type: "thought",
-					body,
-				},
+				content: { type: "thought", body },
 			},
-			"routing",
+			"sanctioned",
+			"client scope proposal",
 		);
+		if (!guarded) return false;
+		try {
+			const result = await issueTracker.createAgentActivity(guarded);
+			if (!result.success) {
+				this.logger.error("Failed to post client scope proposal:", result);
+				return false;
+			}
+			return true;
+		} catch (error) {
+			this.logger.error("Error posting client scope proposal:", error);
+			return false;
+		}
 	}
 
 	async postRepoSetupHookActivity(
@@ -182,6 +274,7 @@ export class ActivityPoster {
 				},
 			},
 			"repository setup hook",
+			"narration",
 		);
 	}
 
@@ -345,6 +438,7 @@ export class ActivityPoster {
 				},
 			},
 			"system prompt selection",
+			"narration",
 		);
 	}
 
@@ -432,6 +526,7 @@ export class ActivityPoster {
 				content: { type: "response", body: "Removed from the queue." },
 			},
 			"queue removal notice",
+			"sanctioned",
 		);
 	}
 
@@ -484,6 +579,7 @@ export class ActivityPoster {
 				content: { type: "elicitation", body },
 			},
 			label,
+			"sanctioned",
 		);
 	}
 
@@ -510,6 +606,7 @@ export class ActivityPoster {
 				content: { type: "thought", body: message },
 			},
 			"prompted acknowledgment",
+			"sanctioned",
 		);
 	}
 
