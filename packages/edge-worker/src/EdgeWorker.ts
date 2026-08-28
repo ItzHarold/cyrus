@@ -114,6 +114,8 @@ import {
 	isPullRequestReviewPayload,
 	journalAmbientTokenFallback,
 	parseGitHubRepoUrl,
+	remoteUrlHasEmbeddedCredential,
+	stripEmbeddedCredential,
 	stripMention,
 } from "cyrus-github-event-transport";
 import type { GitLabWebhookEvent } from "cyrus-gitlab-event-transport";
@@ -5554,6 +5556,32 @@ ${taskSection}`;
 		} catch {
 			return null; // no remote: nothing to authenticate against
 		}
+		// PON-203: a credential embedded in the remote URL is a live token in
+		// .git/config — it outlives the process, lands in backups, and is
+		// readable by anything that can read the repository. Sessions used to
+		// improvise exactly this shape when they had no credential of their
+		// own. Strip it here, where every session's repository passes anyway,
+		// rather than trusting that nothing ever writes one again.
+		if (remoteUrlHasEmbeddedCredential(originUrl)) {
+			const clean = stripEmbeddedCredential(originUrl);
+			try {
+				execSync(`git remote set-url origin ${JSON.stringify(clean)}`, {
+					cwd: repositoryPath,
+					stdio: "pipe",
+				});
+				this.logger.warn(
+					`[event:embedded_credential_stripped] removed a credential from the origin URL of ${repositoryPath}`,
+				);
+			} catch (error) {
+				this.logger.error(
+					`[event:embedded_credential_strip_failed] ${repositoryPath}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			}
+			originUrl = clean;
+		}
+
 		const ref = parseGitHubRepoUrl(originUrl);
 		if (!ref) return null; // not GitHub: leave it alone
 
