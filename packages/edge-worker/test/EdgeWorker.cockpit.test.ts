@@ -89,6 +89,17 @@ describe("EdgeWorker - cockpit mirror wiring (PON-151)", () => {
 
 	it("scope-confirm proposal mirrors as awaiting-scope-confirm", async () => {
 		registerSession(worker);
+		// PON-188/191: the confirmation ask only goes out once the client
+		// scope has been commented on the issue, so the mirror transition now
+		// sits behind that precondition too.
+		privates(worker).scopeApprovals.recordOperatorNote(
+			ISSUE_ID,
+			"internal reading",
+			"**Outcome** — the thing works.",
+		);
+		privates(worker).activityPoster.postClientScopeComment = vi
+			.fn()
+			.mockResolvedValue(true);
 		const callback = privates(worker).createAskUserQuestionCallback(
 			SESSION_ID,
 			GATED_WS,

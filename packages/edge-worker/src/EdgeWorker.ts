@@ -785,7 +785,8 @@ export class EdgeWorker extends EventEmitter {
 			// two AgentSessionManager paths. Closures, not values — the
 			// session manager is wired after this constructor runs.
 			{
-				isQuiet: (sessionId: string) => this.clientQuietSession(sessionId),
+				isQuiet: (sessionId: string, workspaceId?: string) =>
+					this.clientQuietSession(sessionId, workspaceId),
 				sanitize: (sessionId: string, surface: string, text: string) => {
 					// The floor runs on the request path of live client
 					// sessions, so it must never throw: without a session
@@ -5389,10 +5390,20 @@ ${taskSection}`;
 	 * is policy-sanitized. Non-gated workspaces (the dev box's, by Harold's
 	 * explicit choice) are untouched.
 	 */
-	private clientQuietSession(sessionId: string): boolean {
+	private clientQuietSession(
+		sessionId: string,
+		workspaceIdFallback?: string,
+	): boolean {
+		// PON-191: the repo-setup hook posts from inside worktree creation,
+		// BEFORE the session is registered against its repository, so neither
+		// lookup below can answer yet and quietness resolved to "not quiet" —
+		// hook output (script tails, box paths) on a client thread. Callers
+		// that know their workspace pass it, and it is used when the session
+		// mapping cannot answer.
 		const workspaceId =
 			this.resolveWorkspaceIdForSession(sessionId) ??
-			this.laneManager.workspaceOf(sessionId);
+			this.laneManager.workspaceOf(sessionId) ??
+			workspaceIdFallback;
 		if (!workspaceId) return false;
 		const ws = this.config.linearWorkspaces?.[workspaceId];
 		// PON-182: the explicit per-workspace flag wins — narration
@@ -8290,6 +8301,7 @@ ${taskSection}`;
 				"I've been unassigned and am stopping work now.",
 				linearWorkspaceId,
 				// No parentId - post as a new comment on the issue
+				{ kind: "sanctioned", label: "unassignment farewell" },
 			);
 		}
 
@@ -8682,13 +8694,18 @@ ${taskSection}`;
 		issueId: string,
 		body: string,
 		linearWorkspaceId: string,
-		parentId?: string,
-	): Promise<void> {
+		options: {
+			kind: ClientSurfaceKind;
+			sessionId?: string;
+			parentId?: string;
+			label?: string;
+		},
+	): Promise<boolean> {
 		return this.activityPoster.postComment(
 			issueId,
 			body,
 			linearWorkspaceId,
-			parentId,
+			options,
 		);
 	}
 
@@ -9892,11 +9909,17 @@ ${input.userComment}
 	 * workspaces suppress. That is how ACM-10's client got an elicitation
 	 * pointing at "the scope above" with nothing above it.
 	 *
-	 * So on quiet workspaces the machinery posts it, from the `client_scope`
-	 * text the gate already made the session record (PON-170). Posting is
-	 * keyed on that exact text: a revision differs and posts again, a replay
-	 * matches and does not. A workspace that is NOT quiet needs nothing —
-	 * its narration carries the scope, and posting here would duplicate it.
+	 * So the machinery posts it, from the `client_scope` text the gate already
+	 * made the session record (PON-170), as a top-level issue COMMENT
+	 * (PON-191) — not a session activity. Linear collapses activities under
+	 * "Worked for N minutes", so an activity made the client click to read
+	 * what they were approving and never reached their email or phone. A
+	 * comment is the surface a client actually receives.
+	 *
+	 * Posting is keyed on the exact text: a revision differs and posts again,
+	 * a replay matches and does not. It runs on every gated session, quiet or
+	 * not — the comment surface does not depend on narration, so neither does
+	 * this.
 	 *
 	 * Returns false when the client cannot read the scope, which the caller
 	 * turns into a refusal to ask at all.
@@ -9906,8 +9929,6 @@ ${input.userComment}
 		workspaceId: string,
 		issueId: string,
 	): Promise<boolean> {
-		if (!this.clientQuietSession(sessionId)) return true;
-
 		const record = this.scopeApprovals.get(issueId);
 		const scope = record?.clientScope?.trim();
 		if (!scope) return false;
@@ -9918,7 +9939,8 @@ ${input.userComment}
 			"scope-proposal",
 			scope,
 		);
-		const posted = await this.activityPoster.postClientScopeProposal(
+		const posted = await this.activityPoster.postClientScopeComment(
+			issueId,
 			sessionId,
 			workspaceId,
 			body,

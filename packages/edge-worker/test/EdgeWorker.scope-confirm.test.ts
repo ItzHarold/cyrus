@@ -293,8 +293,18 @@ describe("EdgeWorker - scope-confirm gate (PON-150)", () => {
 	describe("proposal recording at AskUserQuestion time", () => {
 		it("records the proposal when the confirmation ask is posted", async () => {
 			registerSession(worker);
-			// The handler needs an issue tracker; without one it returns a
-			// denial — irrelevant here, the proposal records first.
+			// PON-188/191: the ask is refused unless the client scope has
+			// reached the client, so a recorded client_scope is now part of
+			// getting this far. The comment post itself is stubbed — this
+			// case is about the proposal record, not the surface.
+			privates(worker).scopeApprovals.recordOperatorNote(
+				ISSUE_ID,
+				"internal reading",
+				"**Outcome** — the thing works.",
+			);
+			privates(worker).activityPoster.postClientScopeComment = vi
+				.fn()
+				.mockResolvedValue(true);
 			const callback = privates(worker).createAskUserQuestionCallback(
 				SESSION_ID,
 				GATED_WS,
@@ -576,9 +586,19 @@ describe("EdgeWorker - scope-confirm gate (PON-150)", () => {
 	describe("real AskUserQuestion handler lifecycle", () => {
 		it("resolves the reply against the really-posted question, end to end", async () => {
 			registerSession(worker);
+			// PON-188/191: the scope comment is a precondition of the ask, so
+			// the end-to-end path now runs through createComment too. Kept
+			// real (not stubbed) so this case still exercises the whole chain.
+			const createComment = vi.fn().mockResolvedValue({ success: true });
 			privates(worker).issueTrackers.set(GATED_WS, {
 				createAgentActivity: vi.fn().mockResolvedValue(undefined),
+				createComment,
 			});
+			privates(worker).scopeApprovals.recordOperatorNote(
+				ISSUE_ID,
+				"internal reading",
+				"**Outcome** — the thing works.",
+			);
 
 			const callback = privates(worker).createAskUserQuestionCallback(
 				SESSION_ID,
@@ -600,6 +620,10 @@ describe("EdgeWorker - scope-confirm gate (PON-150)", () => {
 			expect(privates(worker).scopeApprovals.get(ISSUE_ID)?.state).toBe(
 				"awaiting",
 			);
+			// The scope reached the client as a comment before the ask went out.
+			expect(createComment).toHaveBeenCalledWith(ISSUE_ID, {
+				body: "**Outcome** — the thing works.",
+			});
 
 			// The client's structured reply, interpreted against the REAL
 			// pending question held by the REAL handler.
