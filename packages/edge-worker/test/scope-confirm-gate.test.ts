@@ -54,10 +54,25 @@ describe("scope-confirm-gate (PON-150)", () => {
 		it("instructs the operator note BEFORE the client-facing confirmation", () => {
 			const block = buildScopeConfirmGateBlock();
 			const noteStep = block.indexOf("record_operator_note");
-			const clientStep = block.indexOf("DELIVERABLE-framed");
+			// PON-191: the client-facing scope IS the recorded client_scope —
+			// the machinery comments it on the issue — so the step that used to
+			// say "post the DELIVERABLE-framed comment" now says client_scope
+			// carries it. The ordering it guards is unchanged.
+			const clientStep = block.indexOf("client_scope text you recorded");
 			expect(noteStep).toBeGreaterThan(-1);
 			expect(clientStep).toBeGreaterThan(-1);
 			expect(noteStep).toBeLessThan(clientStep);
+		});
+
+		it("tells the session NOT to post the scope itself — the machinery does", () => {
+			const block = buildScopeConfirmGateBlock();
+			expect(block).toContain("Do not post it yourself");
+		});
+
+		it("requires the ask to stand alone, not lean on surrounding text", () => {
+			const block = buildScopeConfirmGateBlock();
+			expect(block).toContain("must stand on their own");
+			expect(block).toContain("no surrounding text");
 		});
 
 		it("frames the client comment as the deliverable and bans implementation detail", () => {

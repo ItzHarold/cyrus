@@ -26,8 +26,17 @@ export type ClientSurfaceKind = "sanctioned" | "narration";
  * workspaces or content policy (PON-189).
  */
 export interface ClientSurfaceGuard {
-	/** Is this session's workspace client-quiet (narration suppressed)? */
-	isQuiet(sessionId: string): boolean;
+	/**
+	 * Is this session's workspace client-quiet (narration suppressed)?
+	 *
+	 * `workspaceId` is the fallback the session mapping cannot always
+	 * provide: the repo-setup hook posts from inside worktree creation,
+	 * before the session is registered against its repository, so resolving
+	 * quietness from the session alone answered "not quiet" and let hook
+	 * output through on a client thread. Every caller here knows its
+	 * workspace, so it passes it.
+	 */
+	isQuiet(sessionId: string, workspaceId?: string): boolean;
 	/** Path floor on every workspace; full content policy on quiet ones. */
 	sanitize(sessionId: string, surface: string, text: string): string;
 }
@@ -66,6 +75,7 @@ export class ActivityPoster {
 		input: AgentActivityCreateInput,
 		kind: ClientSurfaceKind,
 		label: string,
+		workspaceId?: string,
 	): AgentActivityCreateInput | null {
 		const sessionId = input.agentSessionId;
 		const content = input.content as Record<string, unknown> | undefined;
@@ -75,7 +85,7 @@ export class ActivityPoster {
 		if (
 			kind === "narration" &&
 			(type === "thought" || type === "action") &&
-			this.clientSurface.isQuiet(sessionId)
+			this.clientSurface.isQuiet(sessionId, workspaceId)
 		) {
 			this.logger.info(
 				`[event:client_quiet_stream] direct ${String(type)} suppressed (client-quiet): ${label}`,
@@ -110,8 +120,14 @@ export class ActivityPoster {
 		input: AgentActivityCreateInput,
 		label: string,
 		kind: ClientSurfaceKind,
+		workspaceId?: string,
 	): Promise<string | null> {
-		const guarded = this.applyClientSurfaceFloor(input, kind, label);
+		const guarded = this.applyClientSurfaceFloor(
+			input,
+			kind,
+			label,
+			workspaceId,
+		);
 		if (!guarded) return null;
 		try {
 			const result = await issueTracker.createAgentActivity(guarded);
@@ -151,6 +167,7 @@ export class ActivityPoster {
 			},
 			"thought activity",
 			"sanctioned",
+			workspaceId,
 		);
 	}
 
@@ -176,6 +193,7 @@ export class ActivityPoster {
 			},
 			"instant acknowledgment",
 			"sanctioned",
+			workspaceId,
 		);
 	}
 
@@ -197,54 +215,36 @@ export class ActivityPoster {
 			},
 			"parent resume acknowledgment",
 			"narration",
+			workspaceId,
 		);
 	}
 
 	/**
-	 * The deliverable-framed scope, posted to the client thread by the
-	 * machinery (PON-188).
+	 * The deliverable-framed scope, posted by the machinery as a top-level
+	 * issue COMMENT (PON-188, then PON-191).
 	 *
-	 * The gate instructs the session to post this itself, but a session's only
-	 * way to say something mid-run is assistant text — which is narration, and
-	 * narration is suppressed on exactly the workspaces this gate runs on. The
-	 * client was left with "Shall I proceed with the scope above?" and no
-	 * scope above. So the text the session already recorded as `client_scope`
-	 * is posted from here instead: sanctioned, deterministic, and impossible
-	 * for a model to forget.
+	 * PON-188 made the machinery post this because the session's own attempt
+	 * is assistant text — narration — which quiet workspaces suppress, so the
+	 * client was asked to approve a scope with nothing to read. PON-191 then
+	 * moved it off the activity stream: Linear collapses session activities
+	 * under "Worked for N minutes", so the scope was readable only after a
+	 * click, and it never travelled in email or mobile notifications. A
+	 * comment is the surface a client actually receives.
 	 *
-	 * Returns true only when the activity was actually created — the caller
+	 * Returns true only when the comment was really created — the caller
 	 * treats anything else as "the scope did not land" and refuses to ask.
 	 */
-	async postClientScopeProposal(
+	async postClientScopeComment(
+		issueId: string,
 		sessionId: string,
 		workspaceId: string,
 		body: string,
 	): Promise<boolean> {
-		const issueTracker = this.issueTrackers.get(workspaceId);
-		if (!issueTracker) {
-			this.logger.warn(`No issue tracker found for workspace ${workspaceId}`);
-			return false;
-		}
-		const guarded = this.applyClientSurfaceFloor(
-			{
-				agentSessionId: sessionId,
-				content: { type: "thought", body },
-			},
-			"sanctioned",
-			"client scope proposal",
-		);
-		if (!guarded) return false;
-		try {
-			const result = await issueTracker.createAgentActivity(guarded);
-			if (!result.success) {
-				this.logger.error("Failed to post client scope proposal:", result);
-				return false;
-			}
-			return true;
-		} catch (error) {
-			this.logger.error("Error posting client scope proposal:", error);
-			return false;
-		}
+		return this.postComment(issueId, body, workspaceId, {
+			kind: "sanctioned",
+			sessionId,
+			label: "client scope comment",
+		});
 	}
 
 	async postRepoSetupHookActivity(
@@ -275,6 +275,7 @@ export class ActivityPoster {
 			},
 			"repository setup hook",
 			"narration",
+			workspaceId,
 		);
 	}
 
@@ -439,6 +440,7 @@ export class ActivityPoster {
 			},
 			"system prompt selection",
 			"narration",
+			workspaceId,
 		);
 	}
 
@@ -527,6 +529,7 @@ export class ActivityPoster {
 			},
 			"queue removal notice",
 			"sanctioned",
+			workspaceId,
 		);
 	}
 
@@ -580,6 +583,7 @@ export class ActivityPoster {
 			},
 			label,
 			"sanctioned",
+			workspaceId,
 		);
 	}
 
@@ -607,26 +611,68 @@ export class ActivityPoster {
 			},
 			"prompted acknowledgment",
 			"sanctioned",
+			workspaceId,
 		);
 	}
 
+	/**
+	 * Post a plain Linear comment on the issue.
+	 *
+	 * A comment is the loudest client surface there is — it notifies, it
+	 * emails, it is never collapsed — so it takes the same floor as every
+	 * activity (PON-189/191). It had none until now: the floor added for
+	 * direct activity posts stopped at `postActivityDirect` and left this
+	 * method writing straight through to `createComment`.
+	 *
+	 * Returns whether the comment was posted; `false` also covers a
+	 * narration-class comment suppressed on a quiet workspace.
+	 */
 	async postComment(
 		issueId: string,
 		body: string,
 		workspaceId: string,
-		parentId?: string,
-	): Promise<void> {
+		options: {
+			kind: ClientSurfaceKind;
+			sessionId?: string;
+			parentId?: string;
+			label?: string;
+		},
+	): Promise<boolean> {
 		const issueTracker = this.issueTrackers.get(workspaceId);
 		if (!issueTracker) {
 			throw new Error(`No issue tracker found for workspace ${workspaceId}`);
 		}
-		const commentInput: { body: string; parentId?: string } = {
+		const label = options.label ?? "comment";
+		// Comments carry no activity type, so the floor is applied here in the
+		// terms that do apply: narration is suppressed on quiet workspaces,
+		// and the text is sanitized on every workspace.
+		if (
+			options.kind === "narration" &&
+			this.clientSurface.isQuiet(options.sessionId ?? "", workspaceId)
+		) {
+			this.logger.info(
+				`[event:client_quiet_stream] comment suppressed (client-quiet): ${label}`,
+			);
+			return false;
+		}
+		const sanitized = this.clientSurface.sanitize(
+			options.sessionId ?? "",
+			`comment:${label}`,
 			body,
+		);
+		const commentInput: { body: string; parentId?: string } = {
+			body: sanitized,
 		};
 		// Add parent ID if provided (for reply)
-		if (parentId) {
-			commentInput.parentId = parentId;
+		if (options.parentId) {
+			commentInput.parentId = options.parentId;
 		}
-		await issueTracker.createComment(issueId, commentInput);
+		try {
+			await issueTracker.createComment(issueId, commentInput);
+			return true;
+		} catch (error) {
+			this.logger.error(`Error posting ${label}:`, error);
+			return false;
+		}
 	}
 }

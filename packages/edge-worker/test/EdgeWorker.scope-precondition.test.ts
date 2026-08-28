@@ -3,7 +3,9 @@ import type { EdgeWorker } from "../src/EdgeWorker.js";
 import { createTestWorker } from "./prompt-assembly-utils.js";
 
 /**
- * PON-188: the client is never asked to approve a scope they cannot read.
+ * PON-188/191: the client is never asked to approve a scope they cannot read,
+ * and the scope arrives as a COMMENT — the surface that notifies, emails, and
+ * is never collapsed behind "Worked for N minutes".
  *
  * Found live on ACM-10: the session recorded its client scope and posted the
  * confirmation elicitation, but the scope body itself was assistant text —
@@ -69,18 +71,22 @@ function setup(
 	p.releaseLaneWhileAwaitingInput = vi.fn();
 
 	const postedScopes: string[] = [];
-	p.activityPoster.postClientScopeProposal = vi
+	const commentIssueIds: string[] = [];
+	p.activityPoster.postClientScopeComment = vi
 		.fn()
-		.mockImplementation(async (_s: string, _w: string, body: string) => {
-			postedScopes.push(body);
-			return true;
-		});
+		.mockImplementation(
+			async (issueId: string, _s: string, _w: string, body: string) => {
+				commentIssueIds.push(issueId);
+				postedScopes.push(body);
+				return true;
+			},
+		);
 
 	const asked = vi.fn().mockResolvedValue({ answered: true, answers: {} });
 	p.askUserQuestionHandler = { handleAskUserQuestion: asked };
 
 	const callback = p.createAskUserQuestionCallback(SESSION_ID, WS);
-	return { worker, p, callback, asked, postedScopes };
+	return { worker, p, callback, asked, postedScopes, commentIssueIds };
 }
 
 describe("EdgeWorker - scope body is a precondition of asking (PON-188)", () => {
@@ -90,13 +96,15 @@ describe("EdgeWorker - scope body is a precondition of asking (PON-188)", () => 
 		vi.spyOn(console, "error").mockImplementation(() => {});
 	});
 
-	it("posts the recorded client scope, then the elicitation — the ACM-10 fix", async () => {
-		const { p, callback, asked, postedScopes } = setup();
+	it("comments the recorded client scope on the ISSUE, then asks — the ACM-10 fix", async () => {
+		const { p, callback, asked, postedScopes, commentIssueIds } = setup();
 		p.scopeApprovals.recordOperatorNote(ISSUE_ID, "internal", SCOPE_TEXT);
 
 		await callback(SCOPE_QUESTION, "claude-session", undefined);
 
 		expect(postedScopes).toEqual([SCOPE_TEXT]);
+		// A comment on the issue, not an activity collapsed into the session.
+		expect(commentIssueIds).toEqual([ISSUE_ID]);
 		expect(asked).toHaveBeenCalledOnce();
 		expect(p.scopeApprovals.get(ISSUE_ID).clientScopePosted).toBe(SCOPE_TEXT);
 	});
@@ -120,7 +128,7 @@ describe("EdgeWorker - scope body is a precondition of asking (PON-188)", () => 
 	it("refuses when the post itself fails — better silent than asking blind", async () => {
 		const { p, callback, asked } = setup();
 		p.scopeApprovals.recordOperatorNote(ISSUE_ID, "internal", SCOPE_TEXT);
-		p.activityPoster.postClientScopeProposal = vi.fn().mockResolvedValue(false);
+		p.activityPoster.postClientScopeComment = vi.fn().mockResolvedValue(false);
 
 		const result = await callback(SCOPE_QUESTION, "claude-session", undefined);
 
@@ -151,7 +159,9 @@ describe("EdgeWorker - scope body is a precondition of asking (PON-188)", () => 
 		expect(postedScopes).toEqual([SCOPE_TEXT, revised]);
 	});
 
-	it("posts nothing on a non-quiet workspace — its narration already carries the scope", async () => {
+	it("comments the scope on a NON-quiet workspace too — a comment is not narration", async () => {
+		// PON-191 decoupled this from quietness: the scope comment is what the
+		// client is asked to approve, so it posts wherever the gate runs.
 		const { p, callback, asked, postedScopes } = setup({
 			linearToken: "t",
 			clientQuiet: false,
@@ -160,7 +170,7 @@ describe("EdgeWorker - scope body is a precondition of asking (PON-188)", () => 
 
 		await callback(SCOPE_QUESTION, "claude-session", undefined);
 
-		expect(postedScopes).toEqual([]);
+		expect(postedScopes).toEqual([SCOPE_TEXT]);
 		expect(asked).toHaveBeenCalledOnce();
 	});
 
