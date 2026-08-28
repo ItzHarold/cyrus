@@ -201,6 +201,13 @@ export interface SerializedScopeApprovalRecord {
 	 * client actually approved. Latest wins, like the note.
 	 */
 	clientScope?: string;
+	/**
+	 * The exact client-scope text last posted to the client thread by the
+	 * machinery (PON-188, v4.9). Compared against `clientScope` to decide
+	 * whether the scope still needs posting: a revision differs and re-posts,
+	 * a replay matches and does not double-post.
+	 */
+	clientScopePosted?: string;
 }
 
 /**

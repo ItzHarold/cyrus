@@ -168,11 +168,22 @@ export class RepositoryRouter {
 		const { issueId, teamKey, issueIdentifier } =
 			this.extractIssueInfo(webhook);
 
+		// Filter repos by workspace. This happens BEFORE every routing
+		// priority, including the active-session check: no routing path may
+		// ever consider a repository belonging to another tenant, however it
+		// matches (PON-189). Two tenants sharing a team key is normal — team
+		// keys are workspace-local, and "ACM" in one client's Linear has
+		// nothing to do with "ACM" in another's.
+		const workspaceRepos = repos.filter(
+			(repo) => repo.linearWorkspaceId === workspaceId,
+		);
+		if (workspaceRepos.length === 0) return { type: "none" };
+
 		// Priority 0: Check for existing active sessions
 		// TODO: Remove this priority check - existing session detection should not be a routing method
 		if (issueId) {
 			const activeRepos: RepositoryConfig[] = [];
-			for (const repo of repos) {
+			for (const repo of workspaceRepos) {
 				if (this.deps.hasActiveSession(issueId, repo.id)) {
 					activeRepos.push(repo);
 				}
@@ -188,12 +199,6 @@ export class RepositoryRouter {
 				};
 			}
 		}
-
-		// Filter repos by workspace
-		const workspaceRepos = repos.filter(
-			(repo) => repo.linearWorkspaceId === workspaceId,
-		);
-		if (workspaceRepos.length === 0) return { type: "none" };
 
 		// Priority 1: Check description tags [repo=...] (supports multiple, with optional #branch)
 		const descriptionTagResult = await this.findRepositoriesByDescriptionTag(

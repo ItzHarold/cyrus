@@ -150,6 +150,7 @@ import {
 	type SlackWebhookEvent,
 } from "cyrus-slack-event-transport";
 import { Sessions, streamableHttp } from "fastify-mcp";
+import type { ClientSurfaceKind } from "./ActivityPoster.js";
 import { ActivityPoster } from "./ActivityPoster.js";
 import { AgentSessionManager } from "./AgentSessionManager.js";
 import { AskUserQuestionHandler } from "./AskUserQuestionHandler.js";
@@ -161,6 +162,7 @@ import { ConfigManager, type RepositoryChanges } from "./ConfigManager.js";
 import {
 	buildClientSurfaceRuleBlock,
 	findClientContentViolations,
+	sanitizeClientPaths,
 } from "./client-content-policy.js";
 import { CLIENT_MESSAGES } from "./client-messages.js";
 import { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
@@ -779,6 +781,25 @@ export class EdgeWorker extends EventEmitter {
 			this.issueTrackers,
 			this.repositories,
 			this.logger,
+			// PON-189: direct posts obey the same client-surface floor as the
+			// two AgentSessionManager paths. Closures, not values — the
+			// session manager is wired after this constructor runs.
+			{
+				isQuiet: (sessionId: string) => this.clientQuietSession(sessionId),
+				sanitize: (sessionId: string, surface: string, text: string) => {
+					// The floor runs on the request path of live client
+					// sessions, so it must never throw: without a session
+					// manager it degrades to the same path rule minus the
+					// workspace-prefix stripping, never to no rule at all.
+					const manager = this.agentSessionManager as
+						| Partial<AgentSessionManager>
+						| undefined;
+					if (typeof manager?.sanitizeClientSurfaceText === "function") {
+						return manager.sanitizeClientSurfaceText(sessionId, surface, text);
+					}
+					return sanitizeClientPaths(text).text;
+				},
+			},
 		);
 		this.configManager = new ConfigManager(
 			this.config,
@@ -3445,6 +3466,7 @@ ${taskSection}`;
 					content: { type: "thought", body: resultThought },
 				},
 				"child result receipt",
+				"narration",
 			);
 		}
 
@@ -3677,6 +3699,7 @@ ${taskSection}`;
 										},
 									},
 									"repository removal",
+									"sanctioned",
 								);
 							}
 						} catch (error) {
@@ -4799,7 +4822,11 @@ ${taskSection}`;
 			agentSessionManager.setActivitySink(sessionId, activitySink);
 		}
 
-		// Post combined routing + base branch activity
+		// PON-189: routing is operator information, not client information.
+		// It used to post as a thought on the client thread — repo name,
+		// target branch and our routing method, as the second thing a client
+		// ever saw from us. It goes to the journal instead; nothing about
+		// routing reaches a client surface on any workspace.
 		{
 			const repoLines = repositories.map((repo) => {
 				const resolution = workspace.resolvedBaseBranches?.[repo.id];
@@ -4813,14 +4840,14 @@ ${taskSection}`;
 							: resolution.source === "parent-issue"
 								? (resolution.detail ?? "parent")
 								: "default";
-				return `- **${repo.name}** → \`${branch}\` (${sourceLabel})`;
+				return `${repo.name}→${branch}(${sourceLabel})`;
 			});
-			await this.postRoutingActivity(
+			this.logger.event("repository_routed", {
 				sessionId,
-				linearWorkspaceId,
-				repoLines,
+				workspaceId: linearWorkspaceId,
 				routingMethod,
-			);
+				repositories: repoLines.join(", "),
+			});
 		}
 
 		// Get the newly created session
@@ -9857,6 +9884,58 @@ ${input.userComment}
 	 * @param linearAgentSessionId - Linear agent session ID for tracking
 	 * @param organizationId - Linear organization/workspace ID
 	 */
+	/**
+	 * Is the deliverable-framed scope readable on the client thread? (PON-188)
+	 *
+	 * The gate tells the session to post the scope itself, and the session
+	 * does — as assistant text, which is narration, which client-quiet
+	 * workspaces suppress. That is how ACM-10's client got an elicitation
+	 * pointing at "the scope above" with nothing above it.
+	 *
+	 * So on quiet workspaces the machinery posts it, from the `client_scope`
+	 * text the gate already made the session record (PON-170). Posting is
+	 * keyed on that exact text: a revision differs and posts again, a replay
+	 * matches and does not. A workspace that is NOT quiet needs nothing —
+	 * its narration carries the scope, and posting here would duplicate it.
+	 *
+	 * Returns false when the client cannot read the scope, which the caller
+	 * turns into a refusal to ask at all.
+	 */
+	private async ensureClientScopeVisible(
+		sessionId: string,
+		workspaceId: string,
+		issueId: string,
+	): Promise<boolean> {
+		if (!this.clientQuietSession(sessionId)) return true;
+
+		const record = this.scopeApprovals.get(issueId);
+		const scope = record?.clientScope?.trim();
+		if (!scope) return false;
+		if (record?.clientScopePosted === scope) return true;
+
+		const body = this.agentSessionManager.sanitizeClientSurfaceText(
+			sessionId,
+			"scope-proposal",
+			scope,
+		);
+		const posted = await this.activityPoster.postClientScopeProposal(
+			sessionId,
+			workspaceId,
+			body,
+		);
+		if (!posted) return false;
+
+		this.scopeApprovals.markClientScopePosted(issueId, scope);
+		await this.persistScopeApprovals("client_scope_posted");
+		this.logger.event("client_scope_posted", {
+			issueId,
+			workspaceId,
+			sessionId,
+			length: scope.length,
+		});
+		return true;
+	}
+
 	private createAskUserQuestionCallback(
 		linearAgentSessionId: string,
 		organizationId: string,
@@ -9873,6 +9952,28 @@ ${input.userComment}
 				this.scopeGatePendingForIssue(organizationId, gateIssueId) &&
 				isScopeConfirmQuestion(gateQuestion)
 			) {
+				// PON-188: never ask a client to approve a scope they cannot
+				// read. The scope body's presence on the client surface is a
+				// hard precondition of the ask — if it did not land, the
+				// elicitation is not posted, nothing is stamped, and the
+				// session is told to record the scope and ask again.
+				const scopeVisible = await this.ensureClientScopeVisible(
+					linearAgentSessionId,
+					organizationId,
+					gateIssueId as string,
+				);
+				if (!scopeVisible) {
+					this.logger.event("scope_confirm_refused_no_scope", {
+						issueId: gateIssueId,
+						workspaceId: organizationId,
+						sessionId: linearAgentSessionId,
+					});
+					return {
+						answered: false,
+						message:
+							"Not asked: the deliverable-framed scope has not reached the client, so this question would ask them to approve something they cannot read. Record the exact client-facing scope text with record_operator_note's client_scope input, then ask this question again.",
+					};
+				}
 				const session =
 					this.agentSessionManager.getSession(linearAgentSessionId);
 				this.scopeApprovals.recordProposed(gateIssueId as string, {
@@ -10073,6 +10174,7 @@ ${input.userComment}
 					content: { type: "response", body: message },
 				},
 				"blocked user message",
+				"sanctioned",
 			);
 		}
 		// For "silent" behavior, we don't post any activity.
@@ -10433,8 +10535,14 @@ ${input.userComment}
 		issueTracker: IIssueTrackerService,
 		input: AgentActivityCreateInput,
 		label: string,
+		kind: ClientSurfaceKind,
 	): Promise<string | null> {
-		return this.activityPoster.postActivityDirect(issueTracker, input, label);
+		return this.activityPoster.postActivityDirect(
+			issueTracker,
+			input,
+			label,
+			kind,
+		);
 	}
 
 	/**
@@ -10460,23 +10568,6 @@ ${input.userComment}
 		return this.activityPoster.postParentResumeAcknowledgment(
 			sessionId,
 			linearWorkspaceId,
-		);
-	}
-
-	/**
-	 * Post combined routing activity showing repos selected + base branches resolved
-	 */
-	private async postRoutingActivity(
-		sessionId: string,
-		linearWorkspaceId: string,
-		repoLines: string[],
-		routingMethod?: string,
-	): Promise<void> {
-		return this.activityPoster.postRoutingActivity(
-			sessionId,
-			linearWorkspaceId,
-			repoLines,
-			routingMethod,
 		);
 	}
 
