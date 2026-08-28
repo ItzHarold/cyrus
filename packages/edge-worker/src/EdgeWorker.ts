@@ -53,6 +53,7 @@ import type {
 	WebhookIssue,
 } from "cyrus-core";
 import {
+	AgentSessionStatus,
 	CLIIssueTrackerService,
 	CLIRPCServer,
 	createLogger,
@@ -334,6 +335,18 @@ export class EdgeWorker extends EventEmitter {
 	private mcpConfigService: McpConfigService;
 	private runnerConfigBuilder: RunnerConfigBuilder;
 	private activityPoster: ActivityPoster;
+	/**
+	 * PON-200: in-flight assignment-recovery checks, keyed by issue. A client
+	 * flipping the assignee a few times must not queue several creations.
+	 */
+	private pendingAssignmentRecoveries = new Map<
+		string,
+		ReturnType<typeof setTimeout>
+	>();
+	/** Grace window for Linear to create the session itself. */
+	private assignmentRecoveryDelayMs = Number(
+		process.env.CYRUS_ASSIGNMENT_RECOVERY_MS ?? 15_000,
+	);
 	private configManager: ConfigManager;
 	private promptBuilder: PromptBuilder;
 	private defaultSkillsDeployer: DefaultSkillsDeployer;
@@ -3808,7 +3821,11 @@ ${taskSection}`;
 			if (isPermissionChangeWebhook(webhook)) {
 				await this.handlePermissionChange(webhook);
 			} else if (isIssueAssignedWebhook(webhook)) {
-				return;
+				// PON-200: NOT a no-op. Linear creates an AgentSession on the
+				// FIRST delegation only; re-delegating after an unassign sends
+				// this notification and nothing else, so the issue went silent
+				// forever. Observed live on ACM-10.
+				await this.handleIssueAssignedWebhook(webhook);
 			} else if (isIssueCommentMentionWebhook(webhook)) {
 				return;
 			} else if (isIssueNewCommentWebhook(webhook)) {
@@ -4096,6 +4113,79 @@ ${taskSection}`;
 	/**
 	 * Handle issue unassignment webhook
 	 */
+	/**
+	 * The agent was assigned (or re-delegated) to an issue (PON-200).
+	 *
+	 * Linear creates an AgentSession by itself on the FIRST delegation, and the
+	 * dispatch treated this notification as redundant for exactly that reason.
+	 * It is not redundant on a RE-delegation: an issue that already carries a
+	 * session gets the notification and no session, so a client who unassigns
+	 * and re-assigns — to pause, to retry, or by accident — gets silence with
+	 * no visible cause and no way to recover on that issue. Observed live on
+	 * ACM-10, where the client abandoned the issue and opened another.
+	 *
+	 * So this waits out the window in which Linear would have created the
+	 * session itself, and creates one only if none appeared. The wait is what
+	 * keeps the first delegation from racing into two sessions.
+	 */
+	private async handleIssueAssignedWebhook(
+		webhook: IssueUnassignedWebhook,
+	): Promise<void> {
+		const issue = webhook.notification?.issue;
+		if (!issue?.id) return;
+		const issueId = issue.id;
+		const workspaceId = webhook.organizationId;
+		if (!workspaceId) return;
+		if (this.pendingAssignmentRecoveries.has(issueId)) return;
+
+		const timer = setTimeout(() => {
+			this.pendingAssignmentRecoveries.delete(issueId);
+			void this.recoverMissingSessionForAssignment(
+				issueId,
+				issue.identifier,
+				workspaceId,
+			);
+		}, this.assignmentRecoveryDelayMs);
+		// Never hold the process open for a recovery check.
+		timer.unref?.();
+		this.pendingAssignmentRecoveries.set(issueId, timer);
+	}
+
+	/**
+	 * Create the session Linear did not (PON-200). Runs only when the grace
+	 * window closed with no live session for the issue.
+	 */
+	private async recoverMissingSessionForAssignment(
+		issueId: string,
+		issueIdentifier: string | undefined,
+		workspaceId: string,
+	): Promise<void> {
+		const live = this.agentSessionManager
+			.getSessionsByIssueId(issueId)
+			.filter((session) => session.status !== AgentSessionStatus.Complete);
+		if (live.length > 0) return;
+
+		const issueTracker = this.issueTrackers.get(workspaceId);
+		if (!issueTracker?.createAgentSessionOnIssue) return;
+
+		try {
+			await issueTracker.createAgentSessionOnIssue({ issueId });
+			this.logger.event("assignment_session_recovered", {
+				issueId,
+				issueIdentifier,
+				workspaceId,
+			});
+		} catch (error) {
+			// Best-effort: a failure here leaves exactly the behaviour that
+			// existed before, so it must never take anything else down.
+			this.logger.error(
+				`Failed to create a session for re-delegated issue ${issueIdentifier ?? issueId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
+	}
+
 	private async handleIssueUnassignedWebhook(
 		webhook: IssueUnassignedWebhook,
 	): Promise<void> {
@@ -8308,7 +8398,14 @@ ${taskSection}`;
 			// comment on the issue; it is now a response on each session that
 			// was actually stopped, which is where the client is looking and
 			// leaves no comment trail behind.
-			for (const session of sessions) {
+			//
+			// PON-200: only sessions that were actually RUNNING. Posting to
+			// every tracked session put a second farewell on an already-closed
+			// one each time the assignee was flipped — ACM-10 collected two
+			// apiece.
+			for (const session of sessions.filter(
+				(s) => s.status !== AgentSessionStatus.Complete,
+			)) {
 				await this.agentSessionManager.createResponseActivity(
 					session.id,
 					"I've been unassigned and am stopping work now.",
