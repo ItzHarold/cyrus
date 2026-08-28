@@ -586,14 +586,11 @@ describe("EdgeWorker - scope-confirm gate (PON-150)", () => {
 	describe("real AskUserQuestion handler lifecycle", () => {
 		it("resolves the reply against the really-posted question, end to end", async () => {
 			registerSession(worker);
-			// PON-188/191: the scope comment is a precondition of the ask, so
-			// the end-to-end path now runs through createComment too. Kept
-			// real (not stubbed) so this case still exercises the whole chain.
-			const createComment = vi.fn().mockResolvedValue({ success: true });
-			privates(worker).issueTrackers.set(GATED_WS, {
-				createAgentActivity: vi.fn().mockResolvedValue(undefined),
-				createComment,
-			});
+			// PON-188/196: a recorded client_scope is a precondition of the
+			// ask, and the scope travels inside the elicitation body — so the
+			// posted activity is the thing to inspect.
+			const createAgentActivity = vi.fn().mockResolvedValue(undefined);
+			privates(worker).issueTrackers.set(GATED_WS, { createAgentActivity });
 			privates(worker).scopeApprovals.recordOperatorNote(
 				ISSUE_ID,
 				"internal reading",
@@ -620,10 +617,14 @@ describe("EdgeWorker - scope-confirm gate (PON-150)", () => {
 			expect(privates(worker).scopeApprovals.get(ISSUE_ID)?.state).toBe(
 				"awaiting",
 			);
-			// The scope reached the client as a comment before the ask went out.
-			expect(createComment).toHaveBeenCalledWith(ISSUE_ID, {
-				body: "**Outcome** — the thing works.",
-			});
+			// The scope reached the client inside the ask itself — no comment.
+			const elicitation = createAgentActivity.mock.calls.find(
+				(c) => c[0]?.content?.type === "elicitation",
+			);
+			expect(elicitation?.[0]?.content?.body).toContain(
+				"**Outcome** — the thing works.",
+			);
+			expect(elicitation?.[0]?.content?.body).toContain("Proceed?");
 
 			// The client's structured reply, interpreted against the REAL
 			// pending question held by the REAL handler.

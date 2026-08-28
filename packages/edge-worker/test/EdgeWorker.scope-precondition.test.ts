@@ -3,17 +3,14 @@ import type { EdgeWorker } from "../src/EdgeWorker.js";
 import { createTestWorker } from "./prompt-assembly-utils.js";
 
 /**
- * PON-188/191: the client is never asked to approve a scope they cannot read,
- * and the scope arrives as a COMMENT — the surface that notifies, emails, and
- * is never collapsed behind "Worked for N minutes".
+ * PON-188/196: the client is never asked to approve a scope they cannot read,
+ * and the scope travels INSIDE the ask.
  *
- * Found live on ACM-10: the session recorded its client scope and posted the
- * confirmation elicitation, but the scope body itself was assistant text —
- * narration — and narration is suppressed on exactly the workspaces this gate
- * runs on. The client got "Shall I proceed with the scope above?" with
- * nothing above it.
- *
- * The scope body's presence is now a hard precondition of asking.
+ * Three surfaces were tried. Narration was suppressed and the client was asked
+ * to approve nothing (PON-188, found live on ACM-10). A comment was readable
+ * but left a trail on the client's thread (PON-192). The elicitation itself is
+ * never collapsed, always visible in the panel, standalone in an email, and
+ * leaves nothing behind.
  */
 
 const WS = "ws-scope-precondition";
@@ -22,12 +19,14 @@ const ISSUE_ID = "issue-scope-1";
 
 const SCOPE_TEXT =
 	"**Outcome** — the dashboard works on a phone.\n**You will receive** — a preview link and a PR to merge.";
+/** Operator material the client must never see in the ask. */
+const SCOPE_WITH_INTERPRETED = `${SCOPE_TEXT}\n\n**Interpreted** — I assumed the tables should scroll rather than shrink.`;
 
 function privates(worker: EdgeWorker): Record<string, any> {
 	return worker as never as Record<string, any>;
 }
 
-const SCOPE_QUESTION = {
+const SCOPE_QUESTION = () => ({
 	questions: [
 		{
 			question: "Shall I proceed with the scope above?",
@@ -40,7 +39,7 @@ const SCOPE_QUESTION = {
 			],
 		},
 	],
-};
+});
 
 function setup(
 	workspaceConfig: Record<string, unknown> = { linearToken: "t" },
@@ -70,52 +69,84 @@ function setup(
 	p.cockpitMirror = { upsert: vi.fn() };
 	p.releaseLaneWhileAwaitingInput = vi.fn();
 
-	const postedScopes: string[] = [];
-	const commentIssueIds: string[] = [];
-	p.activityPoster.postClientScopeComment = vi
+	// Any comment at all on a client thread is now a failure.
+	const comments: unknown[][] = [];
+	p.activityPoster.postComment = vi
 		.fn()
-		.mockImplementation(
-			async (issueId: string, _s: string, _w: string, body: string) => {
-				commentIssueIds.push(issueId);
-				postedScopes.push(body);
-				return true;
-			},
-		);
+		.mockImplementation(async (...args: unknown[]) => {
+			comments.push(args);
+			return true;
+		});
 
-	const asked = vi.fn().mockResolvedValue({ answered: true, answers: {} });
+	// The ask carries the scope, so the question text IS the delivery.
+	const askedBodies: string[] = [];
+	const asked = vi.fn().mockImplementation(async (input: any) => {
+		askedBodies.push(input.questions[0].question);
+		return { answered: true, answers: {} };
+	});
 	p.askUserQuestionHandler = { handleAskUserQuestion: asked };
 
 	const callback = p.createAskUserQuestionCallback(SESSION_ID, WS);
-	return { worker, p, callback, asked, postedScopes, commentIssueIds };
+	return { worker, p, callback, asked, askedBodies, comments };
 }
 
-describe("EdgeWorker - scope body is a precondition of asking (PON-188)", () => {
+describe("EdgeWorker - the scope travels inside the ask (PON-188/196)", () => {
 	beforeEach(() => {
 		vi.spyOn(console, "log").mockImplementation(() => {});
 		vi.spyOn(console, "warn").mockImplementation(() => {});
 		vi.spyOn(console, "error").mockImplementation(() => {});
 	});
 
-	it("comments the recorded client scope on the ISSUE, then asks — the ACM-10 fix", async () => {
-		const { p, callback, asked, postedScopes, commentIssueIds } = setup();
+	it("puts the scope in the question, ahead of the options, and posts no comment", async () => {
+		const { p, callback, asked, askedBodies, comments } = setup();
 		p.scopeApprovals.recordOperatorNote(ISSUE_ID, "internal", SCOPE_TEXT);
 
-		await callback(SCOPE_QUESTION, "claude-session", undefined);
+		await callback(SCOPE_QUESTION(), "claude-session", undefined);
 
-		expect(postedScopes).toEqual([SCOPE_TEXT]);
-		// A comment on the issue, not an activity collapsed into the session.
-		expect(commentIssueIds).toEqual([ISSUE_ID]);
 		expect(asked).toHaveBeenCalledOnce();
+		const body = askedBodies[0] as string;
+		expect(body).toContain("**Outcome** — the dashboard works on a phone.");
+		expect(body).toContain("**You will receive**");
+		expect(body).toContain("Proceed?");
+		// Opens with the scope, not with a pointer to something else.
+		expect(body).toMatch(/^This is the scope for ACM-10 — Dashboard/);
+		expect(body).not.toContain("above");
+		// Zero comments on the client thread.
+		expect(comments).toEqual([]);
 		expect(p.scopeApprovals.get(ISSUE_ID).clientScopePosted).toBe(SCOPE_TEXT);
 	});
 
-	it("REFUSES to ask when no scope was recorded — nothing posted, nothing stamped", async () => {
-		const { p, callback, asked, postedScopes } = setup();
+	it("keeps the Interpreted section out of the client's ask", async () => {
+		const { p, callback, askedBodies } = setup();
+		p.scopeApprovals.recordOperatorNote(
+			ISSUE_ID,
+			"internal",
+			SCOPE_WITH_INTERPRETED,
+		);
 
-		const result = await callback(SCOPE_QUESTION, "claude-session", undefined);
+		await callback(SCOPE_QUESTION(), "claude-session", undefined);
+
+		const body = askedBodies[0] as string;
+		expect(body).toContain("**Outcome**");
+		expect(body).not.toContain("Interpreted");
+		expect(body).not.toContain("I assumed");
+		// The operator brief still holds the whole thing.
+		expect(p.scopeApprovals.get(ISSUE_ID).clientScope).toBe(
+			SCOPE_WITH_INTERPRETED,
+		);
+	});
+
+	it("REFUSES to ask when no scope was recorded — nothing asked, nothing stamped", async () => {
+		const { p, callback, asked, comments } = setup();
+
+		const result = await callback(
+			SCOPE_QUESTION(),
+			"claude-session",
+			undefined,
+		);
 
 		expect(asked).not.toHaveBeenCalled();
-		expect(postedScopes).toEqual([]);
+		expect(comments).toEqual([]);
 		expect(result.answered).toBe(false);
 		expect(result.message).toMatch(/client_scope/);
 		// No proposal bookkeeping: the SLA clock and the cockpit state must not
@@ -125,57 +156,36 @@ describe("EdgeWorker - scope body is a precondition of asking (PON-188)", () => 
 		expect(p.releaseLaneWhileAwaitingInput).not.toHaveBeenCalled();
 	});
 
-	it("refuses when the post itself fails — better silent than asking blind", async () => {
-		const { p, callback, asked } = setup();
+	it("carries the revised scope in the re-issued ask", async () => {
+		const { p, callback, askedBodies } = setup();
 		p.scopeApprovals.recordOperatorNote(ISSUE_ID, "internal", SCOPE_TEXT);
-		p.activityPoster.postClientScopeComment = vi.fn().mockResolvedValue(false);
+		await callback(SCOPE_QUESTION(), "claude-session", undefined);
 
-		const result = await callback(SCOPE_QUESTION, "claude-session", undefined);
-
-		expect(asked).not.toHaveBeenCalled();
-		expect(result.answered).toBe(false);
-		expect(p.scopeApprovals.get(ISSUE_ID).clientScopePosted).toBeUndefined();
-	});
-
-	it("does not double-post a replayed identical proposal", async () => {
-		const { p, callback, postedScopes } = setup();
-		p.scopeApprovals.recordOperatorNote(ISSUE_ID, "internal", SCOPE_TEXT);
-
-		await callback(SCOPE_QUESTION, "claude-session", undefined);
-		await callback(SCOPE_QUESTION, "claude-session", undefined);
-
-		expect(postedScopes).toEqual([SCOPE_TEXT]);
-	});
-
-	it("posts again when the scope is revised — the client reads the new one", async () => {
-		const { p, callback, postedScopes } = setup();
-		p.scopeApprovals.recordOperatorNote(ISSUE_ID, "internal", SCOPE_TEXT);
-		await callback(SCOPE_QUESTION, "claude-session", undefined);
-
-		const revised = `${SCOPE_TEXT}\n**Interpreted** — tables scroll instead of shrinking.`;
+		const revised =
+			"**Outcome** — the dashboard works on a phone, navigation only.\n**You will receive** — a PR to merge.";
 		p.scopeApprovals.recordOperatorNote(ISSUE_ID, "internal v2", revised);
-		await callback(SCOPE_QUESTION, "claude-session", undefined);
+		await callback(SCOPE_QUESTION(), "claude-session", undefined);
 
-		expect(postedScopes).toEqual([SCOPE_TEXT, revised]);
+		expect(askedBodies).toHaveLength(2);
+		expect(askedBodies[1]).toContain("navigation only");
+		expect(askedBodies[1]).not.toContain("a preview link and a PR");
 	});
 
-	it("comments the scope on a NON-quiet workspace too — a comment is not narration", async () => {
-		// PON-191 decoupled this from quietness: the scope comment is what the
-		// client is asked to approve, so it posts wherever the gate runs.
-		const { p, callback, asked, postedScopes } = setup({
+	it("asks on a non-quiet workspace too — the ask is not narration", async () => {
+		const { p, callback, asked, askedBodies } = setup({
 			linearToken: "t",
 			clientQuiet: false,
 		});
 		p.scopeApprovals.recordOperatorNote(ISSUE_ID, "internal", SCOPE_TEXT);
 
-		await callback(SCOPE_QUESTION, "claude-session", undefined);
+		await callback(SCOPE_QUESTION(), "claude-session", undefined);
 
-		expect(postedScopes).toEqual([SCOPE_TEXT]);
 		expect(asked).toHaveBeenCalledOnce();
+		expect(askedBodies[0]).toContain("**Outcome**");
 	});
 
-	it("asks a NON-gate question freely — the precondition is scope-confirm only", async () => {
-		const { callback, asked, postedScopes } = setup();
+	it("leaves a NON-gate question exactly as the session wrote it", async () => {
+		const { callback, asked, askedBodies, comments } = setup();
 
 		await callback(
 			{
@@ -196,20 +206,21 @@ describe("EdgeWorker - scope body is a precondition of asking (PON-188)", () => 
 		);
 
 		expect(asked).toHaveBeenCalledOnce();
-		expect(postedScopes).toEqual([]);
+		expect(askedBodies[0]).toBe("Missing info: which currency?");
+		expect(comments).toEqual([]);
 	});
 
 	it("sanitizes the scope before it reaches the client", async () => {
-		const { p, callback, postedScopes } = setup();
+		const { p, callback, askedBodies } = setup();
 		p.scopeApprovals.recordOperatorNote(
 			ISSUE_ID,
 			"internal",
 			"**Outcome** — see /root/.cyrus-community/worktrees/ws/ACM-10/README.md",
 		);
 
-		await callback(SCOPE_QUESTION, "claude-session", undefined);
+		await callback(SCOPE_QUESTION(), "claude-session", undefined);
 
-		expect(postedScopes[0]).not.toContain("/root/");
-		expect(postedScopes[0]).toContain("README.md");
+		expect(askedBodies[0]).not.toContain("/root/");
+		expect(askedBodies[0]).toContain("README.md");
 	});
 });

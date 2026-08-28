@@ -129,30 +129,6 @@ describe("ActivityPoster - client-surface floor (PON-189)", () => {
 		expect(bodies()[0]).toBe("Working in src/app/page.tsx");
 	});
 
-	it("posts the client scope as an issue COMMENT, not an activity (PON-191)", async () => {
-		const { poster, createComment, createAgentActivity } = setup();
-		const ok = await poster.postClientScopeComment(
-			"issue-1",
-			QUIET_SESSION,
-			WS,
-			"**Outcome** — the dashboard works on a phone.",
-		);
-		expect(ok).toBe(true);
-		expect(createComment).toHaveBeenCalledWith("issue-1", {
-			body: "**Outcome** — the dashboard works on a phone.",
-		});
-		// Nothing lands on the activity stream, where Linear would collapse it.
-		expect(createAgentActivity).not.toHaveBeenCalled();
-	});
-
-	it("reports failure when the scope comment throws — the caller must not ask", async () => {
-		const { poster, createComment } = setup();
-		createComment.mockRejectedValueOnce(new Error("network"));
-		expect(
-			await poster.postClientScopeComment("issue-1", QUIET_SESSION, WS, "x"),
-		).toBe(false);
-	});
-
 	it("sanitizes a comment body on every workspace, and suppresses a narration comment when quiet", async () => {
 		const { poster, createComment } = setup();
 		await poster.postComment(

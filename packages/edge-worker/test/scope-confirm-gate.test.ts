@@ -54,39 +54,46 @@ describe("scope-confirm-gate (PON-150)", () => {
 		it("instructs the operator note BEFORE the client-facing confirmation", () => {
 			const block = buildScopeConfirmGateBlock();
 			const noteStep = block.indexOf("record_operator_note");
-			// PON-191: the client-facing scope IS the recorded client_scope —
-			// the machinery comments it on the issue — so the step that used to
-			// say "post the DELIVERABLE-framed comment" now says client_scope
-			// carries it. The ordering it guards is unchanged.
-			const clientStep = block.indexOf("client_scope text you recorded");
+			// PON-196: the client-facing scope IS the recorded client_scope,
+			// and it travels inside the ask. The ordering this guards — note
+			// first, client text second — is unchanged.
+			const clientStep = block.indexOf("Write client_scope");
 			expect(noteStep).toBeGreaterThan(-1);
 			expect(clientStep).toBeGreaterThan(-1);
 			expect(noteStep).toBeLessThan(clientStep);
 		});
 
-		it("tells the session NOT to post the scope itself — the machinery does", () => {
+		it("tells the session NOT to post the scope itself — the ask carries it", () => {
 			const block = buildScopeConfirmGateBlock();
-			expect(block).toContain("Do not post it yourself");
+			expect(block).toContain("Never post this text yourself");
+			expect(block).toContain("there is no comment");
 		});
 
-		it("requires the ask to stand alone, not lean on surrounding text", () => {
+		it("requires the options to stand alone, not lean on surrounding text", () => {
 			const block = buildScopeConfirmGateBlock();
 			expect(block).toContain("must stand on their own");
 			expect(block).toContain("no surrounding text");
 		});
 
-		it("frames the client comment as the deliverable and bans implementation detail", () => {
+		it("frames the client text as the deliverable and bans implementation detail", () => {
 			const block = buildScopeConfirmGateBlock();
 			expect(block).toContain("**Outcome**");
 			expect(block).toContain("**You will receive**");
-			expect(block).toContain("**Interpreted**");
 			expect(block).toContain("No implementation detail");
 			expect(block).toContain("no file names");
 		});
 
-		it("a revision updates the operator note too, not just the client text", () => {
+		it("routes interpretations to the operator note, NOT the client text (PON-196)", () => {
 			const block = buildScopeConfirmGateBlock();
-			expect(block).toContain("update the operator note");
+			expect(block).toContain("exactly two sections");
+			expect(block).toContain(
+				"no interpretations or assumptions section; those go in the operator note",
+			);
+		});
+
+		it("a revision re-records the operator note too, not just the client text", () => {
+			const block = buildScopeConfirmGateBlock();
+			expect(block).toContain("re-record the operator note");
 		});
 	});
 

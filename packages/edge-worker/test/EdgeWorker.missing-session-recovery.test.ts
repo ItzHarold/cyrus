@@ -416,10 +416,12 @@ describe("EdgeWorker - Missing Session/Repository Recovery (CYPACK-852)", () => 
 
 			// We need to verify that SOME activity is posted back to Linear
 			// so the user doesn't see a hanging state.
-			// Spy on any method that posts to Linear
+			// PON-196: EdgeWorker no longer has a postComment path at all —
+			// zero comments go on a client thread — so the surface to watch is
+			// ActivityPoster's guarded direct post.
 			const postCommentSpy = vi
-				.spyOn(edgeWorker as any, "postComment")
-				.mockResolvedValue(undefined);
+				.spyOn((edgeWorker as any).activityPoster, "postActivityDirect")
+				.mockResolvedValue(null);
 
 			// Act
 			await (edgeWorker as any).handleWebhook(webhook, [mockRepository]);
