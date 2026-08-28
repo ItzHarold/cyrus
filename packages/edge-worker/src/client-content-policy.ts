@@ -42,6 +42,22 @@ const BRANCH_REF_PATTERN = /(?<![./\w-])cyrus[\w-]*\/[\w./-]+/gi;
 /** http(s) URLs — exempt as functional pointers (see the scanner comment). */
 const URL_PATTERN = /https?:\/\/[^\s<>")]+/gi;
 
+/**
+ * Repository artifact names that are NOT model ids (PON-186). `claude-runner`
+ * and `claude-parser` are this repository's own package directories and
+ * `claude-agent-sdk` is the SDK dependency — the model-id rule matched all
+ * three, and the final-response tripwire rewrote `packages/claude-runner` to
+ * `packages/the model` in a dogfood report's verification table. These names
+ * only ever appear on operator-side (agent-dev / dogfood) surfaces, where
+ * naming them is exactly the point.
+ *
+ * The trailing guard is what keeps this narrow: real model ids share no
+ * prefix with these three, and anything that CONTINUES past the name
+ * (`claude-runner-5`) is not a name we ship, so it stays a match. Applied to
+ * the model-id rule only — a bare "claude" still flags as a family word.
+ */
+const REPO_ARTIFACT_PATTERN = /claude-(?:agent-sdk|runner|parser)(?![\w-])/gi;
+
 const RULES: Array<{
 	rule: ClientContentViolation["rule"];
 	pattern: RegExp;
@@ -101,6 +117,10 @@ export function findClientContentViolations(
 	// the one thing it exists to identify. A "name/ref" shape (no leading
 	// slash) is a branch reference, not an internal path.
 	scanned = scanned.replace(BRANCH_REF_PATTERN, " ");
+	// Repository artifact names are not model ids (PON-186). Masked AFTER the
+	// branch-ref pass so blanking a name inside a branch (`cyrussh/…`) cannot
+	// break that ref's own exemption.
+	scanned = scanned.replace(REPO_ARTIFACT_PATTERN, " ");
 	for (const allowed of allowlist) {
 		if (allowed) scanned = scanned.split(allowed).join(" ");
 	}
@@ -172,10 +192,21 @@ export function redactClientContent(
 		redactions.push(m);
 		return "the agent";
 	});
-	out = out.replace(/claude-[\w.-]+/gi, (m) => {
-		redactions.push(m);
-		return "the model";
-	});
+	// The artifact-name alternative comes FIRST and returns its match
+	// untouched (PON-186). It has to be part of this one pass rather than a
+	// pre-mask: the model-id pattern is greedy over `[\w.-]`, so it would
+	// otherwise swallow the name plus whatever follows (`claude-runner.ts`)
+	// and the exemption would never see a match it recognises. Running after
+	// the internal-name pass also keeps `cyrus-claude-runner` — a package of
+	// OURS — redacting whole.
+	out = out.replace(
+		new RegExp(`(${REPO_ARTIFACT_PATTERN.source})|claude-[\\w.-]+`, "gi"),
+		(m, repoArtifact?: string) => {
+			if (repoArtifact) return m;
+			redactions.push(m);
+			return "the model";
+		},
+	);
 	out = out.replace(
 		/\uE000BR(\d+)\uE000/g,
 		(_m, i) => branchRefs[Number(i)] ?? "",

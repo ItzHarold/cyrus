@@ -85,6 +85,32 @@ describe("AgentSessionManager - client content tripwire", () => {
 		expect(warns).toHaveLength(0);
 	});
 
+	// PON-186: the dogfood report that found this had its verification table
+	// rewritten to `packages/the model`. The package name must survive the
+	// tripwire byte-identical while a real model id in the SAME summary still
+	// redacts — the exemption cannot be a hole in the rule.
+	it("a package name posts verbatim while a real model id still redacts", async () => {
+		await manager.completeSession(SESSION_ID, {
+			type: "result",
+			subtype: "success",
+			duration_ms: 1,
+			duration_api_ms: 1,
+			is_error: false,
+			num_turns: 1,
+			result:
+				"Refreshed the tool list in packages/claude-runner/src/config.ts; the session ran on claude-opus-5.",
+			total_cost_usd: 0,
+			usage: { input_tokens: 1, output_tokens: 1 },
+			session_id: "sdk-1",
+		} as never);
+
+		const posted = JSON.stringify(sink.postActivity.mock.calls);
+		expect(posted).toContain("packages/claude-runner/src/config.ts");
+		expect(posted).not.toContain("packages/the model");
+		expect(posted).not.toContain("claude-opus-5");
+		expect(posted).toContain("ran on the model");
+	});
+
 	it("the strict delivery post is checked too", async () => {
 		await manager.postResponseActivityStrict(
 			SESSION_ID,
