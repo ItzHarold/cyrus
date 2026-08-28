@@ -240,3 +240,35 @@ export function gitAuthEnv(token: string): Record<string, string> {
  * Safe in argv: this sets an empty value, it carries no secret.
  */
 export const GIT_NO_AMBIENT_CREDENTIALS = ["-c", "credential.helper="] as const;
+
+/**
+ * Does this remote URL carry an embedded credential? (PON-203)
+ *
+ * `https://x-access-token:ghs_…@github.com/owner/repo.git` is what a session
+ * reaches for when it has no credential of its own and has to improvise — and
+ * it is the one shape that can persist a live token into `.git/config`, where
+ * it outlives the process, survives into backups, and is readable by anything
+ * that can read the repository.
+ *
+ * Matches userinfo in an http(s) URL. SSH remotes (`git@github.com:owner/repo`)
+ * are not credentials and must not match: the user there is a literal, and
+ * there is no secret in the URL.
+ */
+export function remoteUrlHasEmbeddedCredential(url: string): boolean {
+	const match = /^https?:\/\/([^/@\s]+)@/i.exec(url.trim());
+	if (!match) return false;
+	// `https://user@host` with no password is a username hint, not a secret;
+	// a colon means something is being passed as a password.
+	return match[1]!.includes(":");
+}
+
+/**
+ * The same URL with any embedded credential removed.
+ *
+ * Returns the input unchanged when there is nothing to strip, so callers can
+ * compare identity to decide whether anything happened.
+ */
+export function stripEmbeddedCredential(url: string): string {
+	if (!remoteUrlHasEmbeddedCredential(url)) return url;
+	return url.replace(/^(https?:\/\/)[^/@\s]+@/i, "$1");
+}

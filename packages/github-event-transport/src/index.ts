@@ -11,6 +11,8 @@ export {
 	mintTokenForRepo,
 	NoInstallationForRepositoryError,
 	parseGitHubRepoUrl,
+	remoteUrlHasEmbeddedCredential,
+	stripEmbeddedCredential,
 } from "./GitHubAppGitAuth.js";
 export type { GitHubAppTokenProviderConfig } from "./GitHubAppTokenProvider.js";
 export {
