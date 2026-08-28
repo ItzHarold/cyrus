@@ -3,6 +3,7 @@ import { execSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
 import { chmod, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { LinearClient } from "@linear/sdk";
 import type {
@@ -5537,7 +5538,7 @@ ${taskSection}`;
 	 */
 	private async resolveGitAuthForRepoPath(
 		repositoryPath: string,
-		operation: "fetch" | "ls-remote",
+		operation: "fetch" | "ls-remote" | "push",
 	): Promise<{
 		env: Record<string, string | undefined>;
 		args: string[];
@@ -5564,6 +5565,58 @@ ${taskSection}`;
 			env: gitAuthEnv(token),
 			args: [...GIT_NO_AMBIENT_CREDENTIALS],
 		};
+	}
+
+	/**
+	 * Git and GitHub credentials for the SESSION itself (PON-202).
+	 *
+	 * The machinery authenticated its own clones and fetches from the start,
+	 * but the session — the thing that actually pushes the branch and opens
+	 * the pull request, which is the entire deliverable — was handed nothing.
+	 * No token, no askpass, not even HOME. Sessions coped by writing their own
+	 * token minters and embedding credentials in remote URLs, which worked on
+	 * exactly one account: the one whose installation id happened to be in the
+	 * box-wide env. The first client repository under a different installation
+	 * got "Repository not found", and the client was told the GitHub
+	 * integration was not connected. It was; we simply never gave the session
+	 * a way to use it.
+	 *
+	 * The token is resolved from the worktree's OWN origin remote, so it is
+	 * the installation that actually covers this repository rather than
+	 * whatever the box was configured with.
+	 *
+	 * Returns an empty object when there is nothing to inject — a non-GitHub
+	 * remote, no App configured — which leaves the previous behaviour exactly
+	 * as it was.
+	 */
+	private async buildSessionGitEnv(
+		worktreePath: string,
+	): Promise<Record<string, string>> {
+		try {
+			const auth = await this.resolveGitAuthForRepoPath(worktreePath, "push");
+			if (!auth) return {};
+			const token = auth.env.CYRUS_GIT_TOKEN;
+			if (!token) return {};
+			return {
+				...(auth.env as Record<string, string>),
+				// `gh pr create` reads GH_TOKEN; the same installation token
+				// carries pull_requests:write.
+				GH_TOKEN: token,
+				// Without HOME, git and gh cannot read their own config and fail
+				// with "fatal: $HOME not set" before they ever reach a
+				// credential. Observed on the first client push.
+				HOME: process.env.HOME ?? homedir(),
+			};
+		} catch (error) {
+			// A credential that cannot be minted must not stop the session from
+			// starting: it fails later, loudly, on the push itself.
+			this.logger.warn(
+				`Could not resolve session git credentials for ${worktreePath}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+			return {};
+		}
 	}
 
 	/** The Linear issue id a session is working, from the session manager. */
@@ -9879,6 +9932,24 @@ ${input.userComment}
 				this.createAskUserQuestionCallback(sid, wid)!,
 			requireLinearWorkspaceId,
 		});
+
+		// PON-202: the session's own git/gh credentials, resolved per repository
+		// from the worktree's OWN origin remote. Every runner pushes, so this
+		// sits outside the Claude-only credential block below.
+		const sessionGitEnv = await this.buildSessionGitEnv(session.workspace.path);
+		if (Object.keys(sessionGitEnv).length > 0) {
+			const runnerConfig = result.config as AgentRunnerConfig & {
+				additionalEnv?: Record<string, string | undefined>;
+			};
+			runnerConfig.additionalEnv = {
+				...runnerConfig.additionalEnv,
+				...sessionGitEnv,
+			};
+			log.event("session_git_credentials_injected", {
+				sessionId,
+				worktree: session.workspace.path,
+			});
+		}
 
 		// PON-139: per-workspace Anthropic credentials. This is the runtime
 		// wiring of the three-state declaration — the resolver and schema shipped

@@ -46,6 +46,17 @@ export const CLIENT_MESSAGES = {
 		`repository it belongs to. The operator has been notified — no action ` +
 		`needed from you.`,
 
+	/**
+	 * PON-202: delivery is blocked on our side. Said when a push or a pull
+	 * request cannot be completed — never with the reason, never with a
+	 * workaround. A client asked to fetch a branch or apply a pasted diff has
+	 * been handed our outage as their chore.
+	 */
+	deliveryBlocked: () =>
+		`This one is delayed: we hit a problem on our side getting the work ` +
+		`to your repository. We are fixing it and will post the pull request ` +
+		`here as soon as it lands. Nothing is needed from you.`,
+
 	/** PON-152 ladder: the honest delay note on the client's issue. */
 	verificationDelayNote: () =>
 		`This one is taking longer than planned — the work is in final ` +
