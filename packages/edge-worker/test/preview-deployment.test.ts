@@ -219,6 +219,22 @@ describe("preview deployment", () => {
 		expect(unknown).toBeUndefined();
 	});
 
+	it("names a missing permission instead of calling it an outage", async () => {
+		// The live cause on day one: the App had contents/pull_requests but not
+		// deployments, so every lookup 403'd and the mirror said "couldn't
+		// check" — which sends someone hunting for a problem that is not there.
+		const forbidden = vi.fn(async () => ({
+			ok: false,
+			status: 403,
+			json: async () => ({}),
+		})) as unknown as typeof fetch;
+
+		const result = await fetchPreviewDeployment("tok", REPO, SHA, forbidden);
+
+		expect(result?.state).toBe("no-access");
+		expect(renderPreview(result)).toContain("deployments: read");
+	});
+
 	it("uses the newest deployment when several exist for a commit", async () => {
 		const result = await fetchPreviewDeployment(
 			"tok",
