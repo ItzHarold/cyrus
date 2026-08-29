@@ -122,6 +122,7 @@ describe("CockpitMirror", () => {
 			projectId?: string;
 		},
 		tokens: Record<string, string> = { [COCKPIT_WS]: "cockpit-token" },
+		extraDeps: Record<string, unknown> = {},
 	) => {
 		const fullConfig = config
 			? { workspaceName: "Cockpit", ...config }
@@ -143,6 +144,7 @@ describe("CockpitMirror", () => {
 				// suite).
 				// One client per tenant workspace, which is the common shape.
 				// The multi-workspace and multi-team cases have their own suite.
+				...extraDeps,
 				resolveClient: (ws) => ({
 					id: ws === TENANT_WS ? "devitaliteit" : `client-${ws}`,
 					displayName:
@@ -260,6 +262,36 @@ describe("CockpitMirror", () => {
 		});
 
 		expect(mirror.size).toBe(0);
+	});
+
+	it("opens a narration thread for a mirror that predates it", async () => {
+		// Otherwise only brand-new work becomes readable, and everything
+		// already in flight stays opaque forever.
+		const openNarrationSession = vi.fn().mockResolvedValue("narr-1");
+		makeMirror(
+			{ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID },
+			{ [COCKPIT_WS]: "cockpit-token" },
+			{ openNarrationSession },
+		);
+		mirror.restore({
+			[issue.issueId]: {
+				mirrorIssueId: "mirror-old",
+				tenantWorkspaceId: TENANT_WS,
+				state: "active",
+				issueIdentifier: issue.issueIdentifier,
+				mirrorTeamId: TEAM_ID,
+			} as never,
+		});
+
+		await mirror.upsert(issue, TENANT_WS, "in-verification");
+
+		expect(openNarrationSession).toHaveBeenCalledWith(
+			"mirror-old",
+			issue.issueId,
+		);
+		expect(mirror.serialize()[issue.issueId]?.narrationSessionId).toBe(
+			"narr-1",
+		);
 	});
 
 	it("refreshes an existing mirror when the renderer changes", async () => {

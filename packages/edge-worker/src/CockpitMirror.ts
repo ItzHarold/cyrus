@@ -395,6 +395,20 @@ export class CockpitMirror {
 					: undefined;
 			if (usableExisting?.mirrorIssueId) {
 				const existing = usableExisting;
+				// PON-212: a mirror created before the narration thread existed
+				// (or before this release) has nowhere to put the working
+				// detail. Open one on first touch rather than only at creation,
+				// so existing work becomes readable too instead of waiting for
+				// the next issue.
+				if (!existing.narrationSessionId) {
+					const opened = await this.deps
+						.openNarrationSession?.(existing.mirrorIssueId, issue.issueId)
+						.catch(() => undefined);
+					if (opened) {
+						existing.narrationSessionId = opened;
+						record.narrationSessionId = opened;
+					}
+				}
 				const noteChanged =
 					detail?.operatorNote !== undefined &&
 					detail.operatorNote !== existing.operatorNote;
