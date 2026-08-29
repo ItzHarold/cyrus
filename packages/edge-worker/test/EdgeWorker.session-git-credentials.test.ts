@@ -52,6 +52,51 @@ describe("EdgeWorker - session git credentials (PON-202)", () => {
 		expect(env.HOME).toBeTruthy();
 	});
 
+	it("authors commits as the App bot, so GitHub can link them (PON-206)", async () => {
+		// A commit GitHub cannot link to an account is unverified, and Vercel
+		// refuses to build such a PR — no preview link, which is the
+		// deliverable. ACM-13's commits were authored as an unlinked address
+		// and Vercel blocked the deployment; FRO-53's were bot-authored and
+		// linked.
+		const worker = createTestWorker([]);
+		const p = privates(worker);
+		p.resolveGitAuthForRepoPath = vi.fn().mockResolvedValue({
+			env: { CYRUS_GIT_TOKEN: "t" },
+			args: [],
+		});
+		p.appBotIdentity = vi.fn().mockResolvedValue({
+			name: "ponte-digital[bot]",
+			email: "318827544+ponte-digital[bot]@users.noreply.github.com",
+		});
+
+		const env = await p.buildSessionGitEnv(WORKTREE);
+
+		expect(env.GIT_AUTHOR_NAME).toBe("ponte-digital[bot]");
+		expect(env.GIT_AUTHOR_EMAIL).toBe(
+			"318827544+ponte-digital[bot]@users.noreply.github.com",
+		);
+		// The committer matters as much as the author: Vercel reads the commit,
+		// not the PR.
+		expect(env.GIT_COMMITTER_NAME).toBe("ponte-digital[bot]");
+		expect(env.GIT_COMMITTER_EMAIL).toBe(env.GIT_AUTHOR_EMAIL);
+	});
+
+	it("still delivers a credential when the bot identity cannot be resolved", async () => {
+		const worker = createTestWorker([]);
+		const p = privates(worker);
+		p.resolveGitAuthForRepoPath = vi.fn().mockResolvedValue({
+			env: { CYRUS_GIT_TOKEN: "t" },
+			args: [],
+		});
+		p.appBotIdentity = vi.fn().mockRejectedValue(new Error("api down"));
+
+		const env = await p.buildSessionGitEnv(WORKTREE);
+
+		// Losing the preview is bad; losing the push would be worse.
+		expect(env.CYRUS_GIT_TOKEN).toBe("t");
+		expect(env.GIT_AUTHOR_EMAIL).toBeUndefined();
+	});
+
 	it("resolves the credential for a PUSH, from the worktree's own remote", async () => {
 		const worker = createTestWorker([]);
 		const p = privates(worker);

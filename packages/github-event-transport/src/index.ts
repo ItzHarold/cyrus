@@ -4,6 +4,7 @@ export type {
 	GitHubRepoRef,
 } from "./GitHubAppGitAuth.js";
 export {
+	appBotIdentity,
 	askpassPath,
 	findInstallationForRepo,
 	GIT_NO_AMBIENT_CREDENTIALS,
@@ -12,6 +13,7 @@ export {
 	NoInstallationForRepositoryError,
 	parseGitHubRepoUrl,
 	remoteUrlHasEmbeddedCredential,
+	resetAppBotIdentityCache,
 	stripEmbeddedCredential,
 } from "./GitHubAppGitAuth.js";
 export type { GitHubAppTokenProviderConfig } from "./GitHubAppTokenProvider.js";

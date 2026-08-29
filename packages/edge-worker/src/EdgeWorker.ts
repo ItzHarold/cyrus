@@ -88,6 +88,7 @@ import {
 import { CursorRunner } from "cyrus-cursor-runner";
 import { GeminiRunner } from "cyrus-gemini-runner";
 import {
+	appBotIdentity,
 	extractCommentAuthor,
 	extractCommentBody,
 	extractCommentId,
@@ -5625,8 +5626,33 @@ ${taskSection}`;
 			if (!auth) return {};
 			const token = auth.env.CYRUS_GIT_TOKEN;
 			if (!token) return {};
+			// PON-206: commits must be authored as the App's own bot user. A
+			// commit GitHub cannot link to an account is an unverified commit,
+			// and Vercel refuses to build such a pull request — so the preview
+			// link, which is the deliverable, never appears.
+			let identity: Record<string, string> = {};
+			try {
+				const bot = await this.appBotIdentity();
+				if (bot) {
+					identity = {
+						GIT_AUTHOR_NAME: bot.name,
+						GIT_AUTHOR_EMAIL: bot.email,
+						GIT_COMMITTER_NAME: bot.name,
+						GIT_COMMITTER_EMAIL: bot.email,
+					};
+				}
+			} catch (error) {
+				// A commit with the box's default identity still lands; only the
+				// preview is lost. Never fail session start for it.
+				this.logger.warn(
+					`Could not resolve the App bot identity: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			}
 			return {
 				...(auth.env as Record<string, string>),
+				...identity,
 				// `gh pr create` reads GH_TOKEN; the same installation token
 				// carries pull_requests:write.
 				GH_TOKEN: token,
@@ -5645,6 +5671,23 @@ ${taskSection}`;
 			);
 			return {};
 		}
+	}
+
+	/**
+	 * The App's bot identity, for authoring commits (PON-206). Null when no
+	 * GitHub App is configured, which is the same condition under which no
+	 * credential is injected at all.
+	 */
+	private async appBotIdentity(): Promise<{
+		name: string;
+		email: string;
+	} | null> {
+		const appId = process.env.GITHUB_APP_ID;
+		// Same location the installation resolver is built from, so the two
+		// cannot disagree about which App we are.
+		const privateKeyPath = join(this.cyrusHome, "github-app.pem");
+		if (!appId || !existsSync(privateKeyPath)) return null;
+		return await appBotIdentity({ appId, privateKeyPath });
 	}
 
 	/** The Linear issue id a session is working, from the session manager. */
