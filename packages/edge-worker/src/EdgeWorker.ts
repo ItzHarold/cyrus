@@ -195,7 +195,11 @@ import {
 	type OperatorSessionLink,
 	OperatorSessionRegistry,
 } from "./operator-session.js";
-import { fetchPreviewDeployment, renderPreview } from "./preview-deployment.js";
+import {
+	fetchPreviewDeployment,
+	renderPreview,
+	withPreviewBypass,
+} from "./preview-deployment.js";
 import { ScopeApprovalStore } from "./ScopeApprovalStore.js";
 import {
 	buildScopeAskBody,
@@ -6475,6 +6479,20 @@ ${taskSection}`;
 	 * The preview link for the delivery footer (PON-171): the first Vercel
 	 * deployment URL the held summary mentions. Absent = omitted honestly.
 	 */
+	/**
+	 * The tenant's Vercel Protection Bypass secret (PON-213).
+	 *
+	 * Read at the point of use and never held anywhere else, so a rotation is
+	 * a config edit that hot-reload picks up with no restart. Never logged,
+	 * never journalled by value, never written into a worktree.
+	 */
+	private previewBypassTokenFor(
+		workspaceId: string | undefined,
+	): string | undefined {
+		if (!workspaceId) return undefined;
+		return this.config.linearWorkspaces?.[workspaceId]?.previewBypassToken;
+	}
+
 	private extractPreviewUrl(summary: string): string | undefined {
 		return /https?:\/\/[\w][\w.-]*vercel\.app[\w\-./?=&#%]*/i.exec(
 			summary,
@@ -6518,7 +6536,10 @@ ${taskSection}`;
 		const record = this.verificationGate.get(issueId);
 		if (!record || record.state !== "in-verification") return;
 		const checkout = await this.buildCheckoutInstructions(issueId);
-		const startHere = await this.buildStartHereBlock(record.prUrls);
+		const startHere = await this.buildStartHereBlock(
+			record.prUrls,
+			record.workspaceId,
+		);
 		const note = [
 			"---",
 			"**Held for review.** Reply on this issue to work on it with me — plain instructions are fine. `approve: <notes>` delivers it to the client, `reject: <feedback>` sends it back, `mine` hands me off the branch, `ask client: <question>` is the only thing that reaches them.",
@@ -6646,7 +6667,10 @@ ${taskSection}`;
 	 * Best-effort throughout: this block is the reason to open the mirror, but
 	 * it is not worth losing the mirror write that carries everything else.
 	 */
-	private async buildStartHereBlock(prUrls: string[]): Promise<string> {
+	private async buildStartHereBlock(
+		prUrls: string[],
+		workspaceId: string | undefined,
+	): Promise<string> {
 		const first = prUrls.map(parsePullRequestUrl).find(Boolean);
 		if (!first) return "";
 		try {
@@ -6655,6 +6679,15 @@ ${taskSection}`;
 			const pr = await this.fetchPullRequestFacts(token, first);
 			if (!pr) return "";
 			const preview = await fetchPreviewDeployment(token, first, pr.headSha);
+			// PON-213: open the reviewer's link too. Without the tenant's
+			// bypass token this is a no-op, so an unconfigured client keeps
+			// today's behaviour rather than getting a broken link.
+			if (preview?.url) {
+				preview.url = withPreviewBypass(
+					preview.url,
+					this.previewBypassTokenFor(workspaceId),
+				);
+			}
 			const files = pr.files.length
 				? [
 						"",
@@ -6938,7 +6971,13 @@ ${taskSection}`;
 		// PON-171: the client summary is the held summary (already
 		// deliverable-framed by R2's intrinsic rules) plus a delivery footer
 		// — preview, merge path, and the operator's notes when present.
-		const previewUrl = this.extractPreviewUrl(record.summary);
+		// PON-213: the client's copy is the one that has to open without a
+		// Vercel account — that is the whole point of holding the token.
+		const previewUrl =
+			withPreviewBypass(
+				this.extractPreviewUrl(record.summary) ?? "",
+				this.previewBypassTokenFor(record.workspaceId),
+			) || undefined;
 		const footer = CLIENT_MESSAGES.deliveryFooter(
 			previewUrl,
 			mergeablePrUrls.join(" · ") || undefined,
