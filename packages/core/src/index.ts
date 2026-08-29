@@ -267,6 +267,7 @@ export type {
 	SerializedCyrusAgentSessionEntry,
 	SerializedLaneState,
 	SerializedNeedsInfoRecord,
+	SerializedOperatorSession,
 	SerializedScopeApprovalRecord,
 	SerializedVerificationRecord,
 	V3SerializableEdgeWorkerState,

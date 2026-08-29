@@ -1094,6 +1094,9 @@
 					},
 					"cockpitProjectId": {
 						"type": "string"
+					},
+					"operatorRepoAccess": {
+						"type": "boolean"
 					}
 				},
 				"required": ["id", "displayName", "workspaces"],

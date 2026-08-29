@@ -19,6 +19,18 @@ export interface ClientConfig {
 	lanes?: number;
 	reviewerId?: string;
 	cockpitProjectId?: string;
+	/**
+	 * Does the OPERATOR's own GitHub account have write access to this
+	 * client's repository (PON-208, R8)?
+	 *
+	 * Not derivable and not guessable. The app pushes with its own
+	 * installation token, so nothing the platform holds can answer whether a
+	 * human at Ponte Digital can clone the repo — a real client's repository
+	 * lives in the client's org, where the operator is a stranger. Captured
+	 * at onboarding; `undefined` means nobody has said, and the cockpit hedges
+	 * rather than printing a checkout command that will fail.
+	 */
+	operatorRepoAccess?: boolean;
 }
 
 /** A resolved client, with the defaults applied. */
@@ -29,6 +41,8 @@ export interface ResolvedClient {
 	lanes: number;
 	reviewerId?: string;
 	cockpitProjectId?: string;
+	/** See ClientConfig.operatorRepoAccess — undefined means "unknown". */
+	operatorRepoAccess?: boolean;
 	/** True when this client works in more than one team. */
 	multiTeam: boolean;
 }
@@ -112,6 +126,9 @@ export class ClientRegistry {
 			...(client.reviewerId ? { reviewerId: client.reviewerId } : {}),
 			...(client.cockpitProjectId
 				? { cockpitProjectId: client.cockpitProjectId }
+				: {}),
+			...(client.operatorRepoAccess !== undefined
+				? { operatorRepoAccess: client.operatorRepoAccess }
 				: {}),
 		};
 	}

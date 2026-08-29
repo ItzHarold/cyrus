@@ -675,6 +675,19 @@ export const EdgeConfigSchema = z.object({
 				 * created on boot when absent, then cached here by the operator.
 				 */
 				cockpitProjectId: z.string().optional(),
+				/**
+				 * Does the operator's own GitHub account have write access to
+				 * this client's repository (PON-208)?
+				 *
+				 * Captured at onboarding, because it cannot be discovered: the
+				 * app pushes with its own installation token, which says
+				 * nothing about whether a human at Ponte Digital can clone the
+				 * repo. For a client whose repo lives in their own org, the
+				 * answer is usually no until they add us. Absent = unknown, and
+				 * the cockpit hedges rather than handing over a command that
+				 * will fail.
+				 */
+				operatorRepoAccess: z.boolean().optional(),
 			}),
 		)
 		.optional(),

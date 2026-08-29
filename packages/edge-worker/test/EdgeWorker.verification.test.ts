@@ -91,8 +91,15 @@ describe("EdgeWorker - verify-before-client-sees (PON-152)", () => {
 	const hold = (sessionId = SESSION_ID, content = SUMMARY, isError = false) =>
 		privates(worker).holdCompletionForVerification(sessionId, content, isError);
 
+	/**
+	 * PON-208: the in-verification mirror now reads the PRs' real draft state
+	 * and the repo origin before it writes, so the upsert lands a tick later.
+	 * The write was always fire-and-forget; only its timing moved.
+	 */
+	const settleMirror = () => privates(worker).mirrorComposition;
+
 	describe("suppress-and-store", () => {
-		it("holds a gated delegated completion and mirrors in-verification", () => {
+		it("holds a gated delegated completion and mirrors in-verification", async () => {
 			registerSession(worker);
 			privates(worker).laneManager.acquire(GATED_WS, SESSION_ID);
 
@@ -105,6 +112,7 @@ describe("EdgeWorker - verify-before-client-sees (PON-152)", () => {
 				"https://github.com/acme/webapp/pull/42",
 			]);
 			// Runner not running (none attached) → mirror transition fires here.
+			await settleMirror();
 			expect(mirror.upsert).toHaveBeenCalledWith(
 				expect.objectContaining({ issueId: ISSUE_ID }),
 				GATED_WS,
@@ -113,7 +121,7 @@ describe("EdgeWorker - verify-before-client-sees (PON-152)", () => {
 			);
 		});
 
-		it("defers the mirror transition while the runner still streams", () => {
+		it("defers the mirror transition while the runner still streams", async () => {
 			registerSession(worker);
 			privates(worker).laneManager.acquire(GATED_WS, SESSION_ID);
 			const session =
@@ -125,6 +133,7 @@ describe("EdgeWorker - verify-before-client-sees (PON-152)", () => {
 
 			// The runner's actual end lands the transition.
 			privates(worker).handleLaneSessionEnded(SESSION_ID, "runner_complete");
+			await settleMirror();
 			expect(mirror.upsert).toHaveBeenCalledWith(
 				expect.objectContaining({ issueId: ISSUE_ID }),
 				GATED_WS,
@@ -577,7 +586,7 @@ describe("EdgeWorker - verify-before-client-sees (PON-152)", () => {
 			expect(tracker.createAgentActivity).toHaveBeenCalledWith(
 				expect.objectContaining({
 					content: expect.objectContaining({
-						body: expect.stringContaining("Only the configured approver"),
+						body: expect.stringContaining("Only a configured reviewer"),
 					}),
 				}),
 			);
@@ -594,6 +603,7 @@ describe("EdgeWorker - verify-before-client-sees (PON-152)", () => {
 			mirror.upsert.mockClear();
 
 			privates(worker).mirrorInVerification(ISSUE_ID);
+			await settleMirror();
 
 			expect(mirror.upsert).toHaveBeenCalledWith(
 				expect.objectContaining({ issueId: ISSUE_ID }),
@@ -632,25 +642,37 @@ describe("EdgeWorker - verify-before-client-sees (PON-152)", () => {
 			expect(reject).toHaveBeenCalledWith(ISSUE_ID, "header row missing");
 		});
 
-		it("reject without feedback asks for it, anything else gets usage help", async () => {
+		it("reject without feedback asks for it", async () => {
 			const reject = vi.spyOn(privates(worker), "rejectVerifiedWork" as never);
 			await privates(worker).handleMirrorAction(
 				mirrorAction("@cyrussh reject:"),
 				ISSUE_ID,
 			);
 			expect(reject).not.toHaveBeenCalled();
-
-			await privates(worker).handleMirrorAction(
-				mirrorAction("@cyrussh what is this?"),
-				ISSUE_ID,
-			);
 			const tracker = privates(worker).issueTrackers.get("cockpit-ws");
 			const bodies = tracker.createAgentActivity.mock.calls.map(
 				(c: never[]) => (c[0] as { content: { body: string } }).content.body,
 			);
 			expect(bodies.some((b: string) => b.includes("feedback"))).toBe(true);
-			expect(bodies.some((b: string) => b.includes("cockpit mirror"))).toBe(
-				true,
+		});
+
+		it("anything else is a work request now, not a canned refusal (PON-208)", async () => {
+			// Was: one reply saying "discussion belongs on the client's issue".
+			// The mirror is a working surface, so an ordinary sentence starts
+			// an operator turn instead.
+			const iterate = vi
+				.spyOn(privates(worker), "runOperatorIteration" as never)
+				.mockResolvedValue(undefined as never);
+
+			await privates(worker).handleMirrorAction(
+				mirrorAction("@cyrussh make the header sticky"),
+				ISSUE_ID,
+			);
+
+			expect(iterate).toHaveBeenCalledWith(
+				expect.anything(),
+				ISSUE_ID,
+				expect.objectContaining({ instruction: "make the header sticky" }),
 			);
 		});
 	});
@@ -685,7 +707,7 @@ describe("EdgeWorker - verify-before-client-sees (PON-152)", () => {
 			const tracker = privates(worker).issueTrackers.get("cockpit-ws");
 			expect(
 				String(tracker.createAgentActivity.mock.calls[0]![0].content.body),
-			).toContain("Only the configured approver");
+			).toContain("Only a configured reviewer");
 		});
 
 		it("a wrong-workspace webhook is refused outright", async () => {

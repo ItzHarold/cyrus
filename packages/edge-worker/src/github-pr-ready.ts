@@ -88,3 +88,47 @@ export async function markPullRequestReady(
 	);
 	return "ready";
 }
+
+/**
+ * Is this pull request still a draft (PON-208)?
+ *
+ * The cockpit used to LABEL links "PR (draft)" without ever asking. That is
+ * fine right up until it is wrong — the one thing the operator is deciding is
+ * whether the client should see this work, and a PR that quietly went ready
+ * has already shown it to them. Read-only, and deliberately undefined rather
+ * than false on failure: "we could not tell" and "it is ready" are different
+ * facts and the mirror should not print the second when it means the first.
+ */
+export async function isPullRequestDraft(
+	token: string,
+	pr: ParsedPullRequestUrl,
+): Promise<boolean | undefined> {
+	try {
+		const response = await fetch("https://api.github.com/graphql", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${token}`,
+				"User-Agent": "cyrus-agent",
+			},
+			body: JSON.stringify({
+				query: `query($owner: String!, $repo: String!, $number: Int!) {
+					repository(owner: $owner, name: $repo) {
+						pullRequest(number: $number) { isDraft }
+					}
+				}`,
+				variables: { owner: pr.owner, repo: pr.repo, number: pr.number },
+			}),
+		});
+		const payload = (await response.json()) as {
+			data?: {
+				repository?: { pullRequest?: { isDraft?: boolean } | null } | null;
+			};
+			errors?: unknown[];
+		};
+		if (!response.ok || payload.errors?.length) return undefined;
+		return payload.data?.repository?.pullRequest?.isDraft;
+	} catch {
+		return undefined;
+	}
+}
