@@ -5620,7 +5620,7 @@ ${taskSection}`;
 	 */
 	private async buildSessionGitEnv(
 		worktreePath: string,
-	): Promise<Record<string, string>> {
+	): Promise<Record<string, string | undefined>> {
 		try {
 			const auth = await this.resolveGitAuthForRepoPath(worktreePath, "push");
 			if (!auth) return {};
@@ -5653,6 +5653,14 @@ ${taskSection}`;
 			return {
 				...(auth.env as Record<string, string>),
 				...identity,
+				// PON-205: the box-wide installation id never reaches a session
+				// again. It is dead config (PON-143 resolves installations per
+				// repository) and it was the pointer that made improvisation
+				// possible: a session with no credential found this, minted a
+				// token for the WRONG installation, and told the client the
+				// integration was disconnected. Unset explicitly rather than
+				// relying on the env file, so it holds however the box is set up.
+				GITHUB_APP_INSTALLATION_ID: undefined as unknown as string,
 				// `gh pr create` reads GH_TOKEN; the same installation token
 				// carries pull_requests:write.
 				GH_TOKEN: token,
