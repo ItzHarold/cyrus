@@ -413,6 +413,49 @@ describe("cockpit workability (PON-211)", () => {
 		expect(p.operatorSessions.get(MIRROR_SESSION).reviewerId).toBe(HAROLD);
 	});
 
+	it("opens at most one narration thread per mirror, under concurrency", async () => {
+		// Observed live: two threads on one mirror 207ms apart, and the record
+		// kept only the second — so the reviewer arrived at a thread the
+		// narration was not going to.
+		const { p } = setup();
+		const createAgentSession = vi
+			.fn()
+			.mockImplementation(
+				() => new Promise((r) => setTimeout(() => r("narr-1"), 5)),
+			);
+		p.activitySinks.set(COCKPIT_WS, {
+			postActivity: vi.fn(),
+			createAgentSession,
+		});
+		p.cockpitMirror.narrationSessionIdFor = vi.fn().mockReturnValue(undefined);
+
+		const [a, b, c] = await Promise.all([
+			p.openNarrationSessionOnce(MIRROR_ISSUE, CLIENT_ISSUE),
+			p.openNarrationSessionOnce(MIRROR_ISSUE, CLIENT_ISSUE),
+			p.openNarrationSessionOnce(MIRROR_ISSUE, CLIENT_ISSUE),
+		]);
+
+		expect(createAgentSession).toHaveBeenCalledTimes(1);
+		expect([a, b, c]).toEqual(["narr-1", "narr-1", "narr-1"]);
+	});
+
+	it("never opens a second thread for a mirror that already has one", async () => {
+		const { p } = setup();
+		const createAgentSession = vi.fn();
+		p.activitySinks.set(COCKPIT_WS, {
+			postActivity: vi.fn(),
+			createAgentSession,
+		});
+		p.cockpitMirror.narrationSessionIdFor = vi
+			.fn()
+			.mockReturnValue("existing-1");
+
+		const got = await p.openNarrationSessionOnce(MIRROR_ISSUE, CLIENT_ISSUE);
+
+		expect(got).toBe("existing-1");
+		expect(createAgentSession).not.toHaveBeenCalled();
+	});
+
 	it("does not recompose the mirror when an operator turn ends", async () => {
 		const { p } = setup();
 		await p.handleMirrorAction(action("carry on"), CLIENT_ISSUE);
