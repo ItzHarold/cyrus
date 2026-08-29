@@ -81,6 +81,11 @@ Update the PR/MR with a comprehensive description:
   > **Tip:** I will respond to comments that @ mention @<bot_username> on this PR/MR. You can also submit a review with all your feedback at once, and I will automatically wake up to address each comment.
   ```
 
-Remove any "WIP:" or "Draft:" prefix from the title. Check `<agent_guidance>` — only mark the PR/MR as ready if guidance does NOT specify keeping them as drafts.
+Remove any "WIP:" or "Draft:" prefix from the title.
+
+**Leave the PR/MR as a draft.** Marking it ready is a delivery decision and it is not yours: on a
+reviewed workflow a ready PR is what tells the client the work is finished, and that has to follow a
+human looking at it, not precede it. The platform marks it ready when the work is released. The only
+exception is an explicit instruction in `<agent_guidance>` saying to mark it ready.
 
 Verify the PR/MR targets the correct base branch from `<base_branch>` in the issue context.
