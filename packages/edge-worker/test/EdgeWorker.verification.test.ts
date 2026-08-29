@@ -592,6 +592,26 @@ describe("EdgeWorker - verify-before-client-sees (PON-152)", () => {
 			);
 		});
 
+		it("recomposes the review block for in-verification mirrors on reconcile (PON-212)", async () => {
+			// Reconcile re-upserts through the plain path, which carries no
+			// review block — so the preview link and changed files appeared
+			// only when a session ENDED, and a restart left the mirror without
+			// the one thing the reviewer opens it for.
+			registerSession(worker);
+			hold();
+			await settleMirror();
+			mirror.upsert.mockClear();
+
+			await privates(worker).reconcileCockpitMirror();
+			await settleMirror();
+
+			const withNote = mirror.upsert.mock.calls.find(
+				(c: unknown[]) =>
+					(c[3] as { note?: string } | undefined)?.note !== undefined,
+			);
+			expect(withNote).toBeDefined();
+		});
+
 		it("a per-lane assignment routes the notification to that tenant's reviewer", async () => {
 			privates(worker).config.cockpit.reviewers = ["approver-user-id"];
 			privates(worker).config.cockpit.assignments = {
