@@ -30,7 +30,16 @@ export type PreviewState =
 	 */
 	| "protected"
 	/** The repository has no preview deployments at all. */
-	| "none";
+	| "none"
+	/**
+	 * We are not allowed to read deployments on this repository.
+	 *
+	 * Distinct from a transient failure because the fix is different and
+	 * specific: the GitHub App needs `deployments: read`, which an org owner
+	 * grants once. Reporting it as "couldn't check" sends someone hunting for
+	 * an outage that is not there.
+	 */
+	| "no-access";
 
 export interface PreviewDeployment {
 	state: PreviewState;
@@ -94,6 +103,7 @@ export async function fetchPreviewDeployment(
 	sha: string,
 	fetchImpl: typeof fetch = fetch,
 ): Promise<PreviewDeployment | undefined> {
+	let forbidden = false;
 	const api = async <T>(path: string): Promise<T | undefined> => {
 		const response = await fetchImpl(`https://api.github.com${path}`, {
 			headers: {
@@ -102,6 +112,10 @@ export async function fetchPreviewDeployment(
 				"User-Agent": "cyrus-agent",
 			},
 		});
+		// 403 only. A 404 is ambiguous — GitHub uses it to hide private
+		// resources, but it is also a plain missing repo — and guessing wrong
+		// would tell an org owner to grant a permission that is not the problem.
+		if (response.status === 403) forbidden = true;
 		if (!response.ok) return undefined;
 		return (await response.json()) as T;
 	};
@@ -110,7 +124,8 @@ export async function fetchPreviewDeployment(
 		const deployments = await api<GitHubDeployment[]>(
 			`/repos/${repo.owner}/${repo.repo}/deployments?sha=${sha}&per_page=10`,
 		);
-		if (!deployments) return undefined;
+		if (!deployments)
+			return forbidden ? { state: "no-access", sha } : undefined;
 		// A repo with no preview environment is a supported shape, not a
 		// failure: say so once, rather than leaving a silent gap that reads
 		// identically to a broken lookup.
@@ -216,6 +231,8 @@ export function renderPreview(preview: PreviewDeployment | undefined): string {
 				: `**Preview:** the build **failed**${at}.`;
 		case "protected":
 			return `**Preview:** ${preview.url}${at} — ⚠️ **it asks for a login**, so the client cannot open their own preview. The connected project still has Vercel Authentication on for previews; onboarding asks for it to be off.`;
+		case "no-access":
+			return "**Preview:** I can't read deployments on this repository — the GitHub App is missing the `deployments: read` permission. An org owner grants it once, in the App's settings, and the installation then has to accept it.";
 		case "none":
 			return "**Preview:** this repository has no preview deployments, so review from the diff.";
 	}
