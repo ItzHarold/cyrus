@@ -346,6 +346,22 @@ export const LinearWorkspaceConfigSchema = z.object({
 	 * config edit: hot-reload picks it up with no restart.
 	 */
 	previewBypassToken: z.string().optional(),
+	/**
+	 * Whether this client's preview runs against a database separate from
+	 * production (PON-215).
+	 *
+	 * We cannot determine this — it lives in their hosting dashboard, which we
+	 * have no access to — so it is recorded from what they told us at
+	 * onboarding, and absent means UNCONFIRMED rather than fine.
+	 *
+	 * Unconfirmed is treated as unsafe on purpose: a false "not cleared" costs
+	 * a conversation, a false "cleared" means we reviewed a client's real
+	 * customer records and the whole data position was untrue. The asymmetry
+	 * is the entire argument.
+	 */
+	previewDataSeparation: z
+		.enum(["confirmed", "unconfirmed", "reads-production"])
+		.optional(),
 	anthropicAuth: z
 		.discriminatedUnion("mode", [
 			z.object({

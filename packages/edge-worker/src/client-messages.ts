@@ -91,8 +91,20 @@ export const CLIENT_MESSAGES = {
 		mergeUrls?: string,
 		reviewNotes?: string,
 	) => {
+		// The preview link can carry a bypass value so it opens without an
+		// account on the hosting provider. That value is yours and you can
+		// regenerate it at any time — which silently kills every link already
+		// sent, including this one. Better said here than discovered months
+		// later on an old message, so the pull request is named as the record
+		// that keeps working.
+		const previewIsTemporary =
+			previewUrl !== undefined &&
+			/[?&]x-vercel-protection-bypass=/i.test(previewUrl);
 		const lines = [
 			previewUrl ? `**See it working:** ${previewUrl}` : "",
+			previewIsTemporary
+				? "*(That preview link works because it carries your access value. If you regenerate it, this link stops opening — the pull request below is the permanent record.)*"
+				: "",
 			mergeUrls ? `**To take it:** merge ${mergeUrls}` : "",
 			reviewNotes ? `**Notes from our review:** ${reviewNotes}` : "",
 		].filter(Boolean);

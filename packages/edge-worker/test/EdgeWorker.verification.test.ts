@@ -621,6 +621,32 @@ describe("EdgeWorker - verify-before-client-sees (PON-152)", () => {
 			expect(mirror.upsert).toHaveBeenCalled();
 		});
 
+		it("withholds the preview when the client's data separation is unconfirmed (PON-215)", async () => {
+			// We cannot check this — it lives in a dashboard we have no access
+			// to — so silence means unconfirmed, and unconfirmed is treated as
+			// unsafe. Reviewing anyway would make "we never touch your
+			// production data" quietly false for the client who bought us for it.
+			privates(worker).config.linearWorkspaces[GATED_WS] = {
+				...(privates(worker).config.linearWorkspaces[GATED_WS] ?? {}),
+				previewDataSeparation: undefined,
+			};
+			expect(privates(worker).previewDataSeparationFor(GATED_WS)).toBe(
+				"unconfirmed",
+			);
+		});
+
+		it("only clears the preview on an explicit confirmation", async () => {
+			const p = privates(worker);
+			p.config.linearWorkspaces[GATED_WS] = {
+				...(p.config.linearWorkspaces[GATED_WS] ?? {}),
+				previewDataSeparation: "reads-production",
+			};
+			expect(p.previewDataSeparationFor(GATED_WS)).toBe("reads-production");
+
+			p.config.linearWorkspaces[GATED_WS].previewDataSeparation = "confirmed";
+			expect(p.previewDataSeparationFor(GATED_WS)).toBe("confirmed");
+		});
+
 		it("recomposes the review block for in-verification mirrors on reconcile (PON-212)", async () => {
 			// Reconcile re-upserts through the plain path, which carries no
 			// review block — so the preview link and changed files appeared

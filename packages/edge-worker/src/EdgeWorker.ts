@@ -6486,6 +6486,20 @@ ${taskSection}`;
 	 * a config edit that hot-reload picks up with no restart. Never logged,
 	 * never journalled by value, never written into a worktree.
 	 */
+	/**
+	 * Has this client confirmed their preview database is not production
+	 * (PON-215)? Absent means unconfirmed, never "fine".
+	 */
+	private previewDataSeparationFor(
+		workspaceId: string | undefined,
+	): "confirmed" | "unconfirmed" | "reads-production" {
+		if (!workspaceId) return "unconfirmed";
+		return (
+			this.config.linearWorkspaces?.[workspaceId]?.previewDataSeparation ??
+			"unconfirmed"
+		);
+	}
+
 	private previewBypassTokenFor(
 		workspaceId: string | undefined,
 	): string | undefined {
@@ -6678,16 +6692,17 @@ ${taskSection}`;
 			if (!token) return "";
 			const pr = await this.fetchPullRequestFacts(token, first);
 			if (!pr) return "";
-			const preview = await fetchPreviewDeployment(token, first, pr.headSha);
-			// PON-213: open the reviewer's link too. Without the tenant's
-			// bypass token this is a no-op, so an unconfigured client keeps
-			// today's behaviour rather than getting a broken link.
-			if (preview?.url) {
-				preview.url = withPreviewBypass(
-					preview.url,
-					this.previewBypassTokenFor(workspaceId),
-				);
-			}
+			// PON-215: refuse to hand over a preview we believe carries the
+			// client's real customer data.
+			//
+			// We cannot check this — it lives in a dashboard we have no access
+			// to — so it is what they told us at onboarding, and silence means
+			// unconfirmed. Unconfirmed is treated as unsafe: reviewing anyway
+			// would make "we never touch your production data" quietly false
+			// for exactly the client who bought us for it.
+			// The changed files are worth reading whether or not the preview can
+			// be shown — a withheld preview makes the diff the ONLY way to
+			// review, so this is when it matters most.
 			const files = pr.files.length
 				? [
 						"",
@@ -6700,6 +6715,29 @@ ${taskSection}`;
 							: "",
 					]
 				: [];
+
+			const separation = this.previewDataSeparationFor(workspaceId);
+			if (separation !== "confirmed") {
+				return [
+					separation === "reads-production"
+						? "**Preview: withheld** — this client's preview runs against their production database, so reviewing on it would mean looking at real customer records. Review from the diff, and say on delivery what you could not exercise."
+						: "**Preview: withheld** — we have not confirmed this client's preview uses a database separate from production, and unconfirmed is treated as unsafe. Ask them, or review from the diff and say on delivery what you could not exercise.",
+					...files,
+				]
+					.filter(Boolean)
+					.join("\n");
+			}
+
+			const preview = await fetchPreviewDeployment(token, first, pr.headSha);
+			// PON-213: open the reviewer's link too. Without the tenant's
+			// bypass token this is a no-op, so an unconfigured client keeps
+			// today's behaviour rather than getting a broken link.
+			if (preview?.url) {
+				preview.url = withPreviewBypass(
+					preview.url,
+					this.previewBypassTokenFor(workspaceId),
+				);
+			}
 			return [renderPreview(preview), ...files].filter(Boolean).join("\n");
 		} catch (error) {
 			this.logger.warn(`Could not build the review block: ${String(error)}`);

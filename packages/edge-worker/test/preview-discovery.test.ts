@@ -2,6 +2,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+	assessOnboarding,
 	discoverPreviewSetup,
 	envRefsInSource,
 	renderDiscoveryAsk,
@@ -168,5 +169,95 @@ describe("discovery — env reference extraction", () => {
 		// them makes the list look automated and untrustworthy.
 		expect(found).not.toContain("NODE_ENV");
 		expect(found).not.toContain("VERCEL_URL");
+	});
+});
+
+/**
+ * The onboarding gate (PON-215).
+ *
+ * The bypass token is a PREREQUISITE, not an extra: a protected preview is
+ * invisible to the reviewer too, so without it the product does not work for
+ * that client. The gate exists so that is said before a lane is sold, not at
+ * the first delivery.
+ */
+describe("onboarding readiness", () => {
+	const base = async () =>
+		discoverPreviewSetup(localReader(FIXTURE, WITH_PREVIEWS));
+
+	it("blocks when the preview is protected and we have no bypass value", async () => {
+		const gate = assessOnboarding({
+			discovery: await base(),
+			previewProtected: true,
+			hasBypassToken: false,
+			dataSeparation: "confirmed",
+		});
+		expect(gate.readiness).toBe("blocked-needs-client-action");
+		// It has to say why in terms of the product, not the mechanism.
+		expect(gate.blockers.join(" ")).toContain("we cannot review the work");
+		expect(gate.blockers.join(" ")).toContain(
+			"Protection Bypass for Automation",
+		);
+	});
+
+	it("does not ask for a bypass value when the preview already opens", async () => {
+		// Asking for a credential nobody needs is how an onboarding message
+		// stops being believed.
+		const gate = assessOnboarding({
+			discovery: await base(),
+			previewProtected: false,
+			hasBypassToken: false,
+			dataSeparation: "confirmed",
+		});
+		expect(gate.readiness).toBe("ready");
+		expect(gate.blockers).toHaveLength(0);
+	});
+
+	it("treats an unconfirmed database as unmet, not as fine", async () => {
+		const gate = assessOnboarding({
+			discovery: await base(),
+			previewProtected: false,
+			hasBypassToken: false,
+			dataSeparation: "unconfirmed",
+		});
+		expect(gate.readiness).toBe("blocked-needs-client-action");
+	});
+
+	it("refuses outright when the preview reads production", async () => {
+		const gate = assessOnboarding({
+			discovery: await base(),
+			previewProtected: false,
+			hasBypassToken: false,
+			dataSeparation: "reads-production",
+		});
+		expect(gate.blockers.join(" ")).toContain("real customer data");
+	});
+
+	it("routes a client with no previews to the setup engagement", async () => {
+		// Not a blocker to argue about — it is the first paid piece of work.
+		const discovery = await discoverPreviewSetup(
+			localReader(FIXTURE, { found: false, detail: "none" }),
+		);
+		const gate = assessOnboarding({
+			discovery,
+			previewProtected: false,
+			hasBypassToken: false,
+			dataSeparation: "unconfirmed",
+		});
+		expect(gate.readiness).toBe("needs-setup-engagement");
+		// And it does not pile on the other asks, which would be noise.
+		expect(gate.blockers).toHaveLength(1);
+	});
+
+	it("says plainly that work cannot start, in the client's message", async () => {
+		const discovery = await base();
+		const gate = assessOnboarding({
+			discovery,
+			previewProtected: true,
+			hasBypassToken: false,
+			dataSeparation: "unconfirmed",
+		});
+		const message = renderDiscoveryAsk(discovery, "orderly", gate);
+		expect(message).toContain("Before we can start");
+		expect(message).toContain("we cannot deliver it");
 	});
 });

@@ -3,6 +3,7 @@ import {
 	findClientContentViolations,
 	redactClientContent,
 } from "../src/client-content-policy.js";
+import { CLIENT_MESSAGES } from "../src/client-messages.js";
 import {
 	containsBypassToken,
 	withPreviewBypass,
@@ -86,5 +87,32 @@ describe("preview bypass — it cannot escape through the URL exemption", () => 
 		// to key on the parameter.
 		expect(containsBypassToken(withPreviewBypass(URL, "zzzz"))).toBe(true);
 		expect(containsBypassToken(URL)).toBe(false);
+	});
+});
+
+/**
+ * The token dies when the client regenerates it, and every link already sent
+ * dies with it — the value is IN the URL. Live mirrors self-heal on the
+ * refresh clock; delivered messages do not, so the message has to say so.
+ */
+describe("delivery footer — the link is temporary", () => {
+	it("warns when the preview link depends on a value the client can revoke", () => {
+		const footer = CLIENT_MESSAGES.deliveryFooter(
+			withPreviewBypass("https://app-abc.vercel.app", "sekrit"),
+			"https://github.com/acme/app/pull/7",
+		);
+		expect(footer).toContain("regenerate");
+		// And it names what keeps working, rather than only what breaks.
+		expect(footer).toContain("permanent record");
+	});
+
+	it("says nothing when the link does not depend on one", () => {
+		// A caveat on a link that cannot break is noise, and noise is what
+		// makes real caveats get skipped.
+		const footer = CLIENT_MESSAGES.deliveryFooter(
+			"https://app-abc.vercel.app",
+			"https://github.com/acme/app/pull/7",
+		);
+		expect(footer).not.toContain("regenerate");
 	});
 });
