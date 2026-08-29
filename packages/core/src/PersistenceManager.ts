@@ -135,6 +135,16 @@ export interface SerializedCockpitMirror {
 	/** Team key within the client's workspace, e.g. "ACM". */
 	teamKey?: string;
 	/**
+	 * The cockpit team the mirror issue actually lives in (PON-207).
+	 *
+	 * Recorded so that repointing the cockpit at a different team is a
+	 * migration rather than a wedge: an issue cannot take a status from
+	 * another team, so a mirror left behind in the old team must be replaced,
+	 * not updated. Absent on records written before this existed — those are
+	 * verified once, on first touch.
+	 */
+	mirrorTeamId?: string;
+	/**
 	 * The title last written to the mirror. Compared on update so a change of
 	 * client label, team, or issue title re-titles the mirror — and so the
 	 * old `[ACM-13] …` shape is detected and adopted rather than duplicated.
