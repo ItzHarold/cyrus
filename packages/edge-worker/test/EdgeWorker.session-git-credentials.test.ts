@@ -97,6 +97,24 @@ describe("EdgeWorker - session git credentials (PON-202)", () => {
 		expect(env.GIT_AUTHOR_EMAIL).toBeUndefined();
 	});
 
+	it("never hands a session the box-wide installation id (PON-205)", async () => {
+		// It is dead config — installations resolve per repository — and it was
+		// the pointer a credential-less session followed to mint a token for
+		// the WRONG installation, then tell the client the integration was
+		// disconnected.
+		const worker = createTestWorker([]);
+		const p = privates(worker);
+		p.resolveGitAuthForRepoPath = vi.fn().mockResolvedValue({
+			env: { CYRUS_GIT_TOKEN: "t" },
+			args: [],
+		});
+
+		const env = await p.buildSessionGitEnv(WORKTREE);
+
+		expect("GITHUB_APP_INSTALLATION_ID" in env).toBe(true);
+		expect(env.GITHUB_APP_INSTALLATION_ID).toBeUndefined();
+	});
+
 	it("resolves the credential for a PUSH, from the worktree's own remote", async () => {
 		const worker = createTestWorker([]);
 		const p = privates(worker);
