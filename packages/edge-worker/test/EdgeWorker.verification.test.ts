@@ -592,6 +592,35 @@ describe("EdgeWorker - verify-before-client-sees (PON-152)", () => {
 			);
 		});
 
+		it("does not rewrite the mirror when the review block is unchanged (PON-212)", async () => {
+			// The block is refreshed on a clock, so an unchanged tick must cost
+			// nothing on the reviewer's issue — otherwise every few minutes
+			// adds an edit to the activity feed of work nobody touched.
+			registerSession(worker);
+			hold();
+			await settleMirror();
+			mirror.upsert.mockClear();
+
+			privates(worker).mirrorInVerification(ISSUE_ID);
+			await settleMirror();
+
+			expect(mirror.upsert).not.toHaveBeenCalled();
+		});
+
+		it("rewrites when the block actually changes", async () => {
+			registerSession(worker);
+			hold();
+			await settleMirror();
+			mirror.upsert.mockClear();
+			// A new commit, a finished build, anything the block reports.
+			privates(worker).lastReviewBlock.set(ISSUE_ID, "something else");
+
+			privates(worker).mirrorInVerification(ISSUE_ID);
+			await settleMirror();
+
+			expect(mirror.upsert).toHaveBeenCalled();
+		});
+
 		it("recomposes the review block for in-verification mirrors on reconcile (PON-212)", async () => {
 			// Reconcile re-upserts through the plain path, which carries no
 			// review block — so the preview link and changed files appeared
@@ -601,6 +630,10 @@ describe("EdgeWorker - verify-before-client-sees (PON-152)", () => {
 			hold();
 			await settleMirror();
 			mirror.upsert.mockClear();
+			// A restart is the real scenario, and it starts with a cold block
+			// cache — the mirror in Linear still shows whatever the previous
+			// release rendered.
+			privates(worker).lastReviewBlock.clear();
 
 			await privates(worker).reconcileCockpitMirror();
 			await settleMirror();

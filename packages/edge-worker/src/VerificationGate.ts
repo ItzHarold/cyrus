@@ -66,6 +66,13 @@ export class VerificationGate {
 	}
 
 	/** True while a completion sits unapproved. */
+	/** Issues whose work is held awaiting a reviewer (PON-212 refresh clock). */
+	pendingIssueIds(): string[] {
+		return [...this.records.entries()]
+			.filter(([, r]) => r.state === "in-verification")
+			.map(([issueId]) => issueId);
+	}
+
 	isPending(issueId: string): boolean {
 		return this.records.get(issueId)?.state === "in-verification";
 	}
