@@ -303,7 +303,18 @@ export class CockpitMirror {
 				title: record.title,
 			});
 
-			if (existing?.mirrorIssueId) {
+			// PON-207: a mirror in ANOTHER team cannot be updated — Linear
+			// refuses a status from a different team, and rightly. This is
+			// what repointing the cockpit looks like from here: the old
+			// mirror stays where it is as history, and the work gets a fresh
+			// one in the team the operator now uses.
+			const usableExisting =
+				existing?.mirrorIssueId &&
+				(await this.mirrorLivesInTeam(existing, config))
+					? existing
+					: undefined;
+			if (usableExisting?.mirrorIssueId) {
+				const existing = usableExisting;
 				const noteChanged =
 					detail?.operatorNote !== undefined &&
 					detail.operatorNote !== existing.operatorNote;
@@ -346,6 +357,7 @@ export class CockpitMirror {
 					},
 				);
 				record.mirrorTitle = mirrorTitle;
+				record.mirrorTeamId = config.teamId;
 				this.mirrors.set(issue.issueId, record);
 			} else {
 				const created = await this.gql<{
@@ -369,6 +381,7 @@ export class CockpitMirror {
 				);
 				record.mirrorIssueId = created.issueCreate.issue.id;
 				record.mirrorTitle = mirrorTitle;
+				record.mirrorTeamId = config.teamId;
 				this.mirrors.set(issue.issueId, record);
 			}
 			this.logger.event("cockpit_mirror_upserted", {
@@ -761,6 +774,42 @@ export class CockpitMirror {
 					title: node.title.slice(0, 60),
 				});
 			}
+		}
+	}
+
+	/**
+	 * Does this mirror issue still live in the team we are writing to?
+	 *
+	 * Recorded on every write, so the common path is a field comparison. A
+	 * record from before the field existed is asked once, and the answer is
+	 * remembered — that single query is the whole cost of moving the cockpit
+	 * to its own team.
+	 */
+	private async mirrorLivesInTeam(
+		record: SerializedCockpitMirror,
+		config: { linearWorkspaceId: string; teamId: string },
+	): Promise<boolean> {
+		if (record.mirrorTeamId) return record.mirrorTeamId === config.teamId;
+		try {
+			const data = await this.gql<{
+				issue: { team: { id: string } } | null;
+			}>(
+				config.linearWorkspaceId,
+				`query($id: String!) { issue(id: $id) { team { id } } }`,
+				{ id: record.mirrorIssueId },
+			);
+			const teamId = data.issue?.team?.id;
+			if (!teamId) return false;
+			record.mirrorTeamId = teamId;
+			if (teamId !== config.teamId) {
+				this.logger.info(
+					`[event:cockpit_mirror_left_behind] ${record.issueIdentifier ?? record.mirrorIssueId} was mirrored in another team; creating a fresh mirror in the current one`,
+				);
+			}
+			return teamId === config.teamId;
+		} catch {
+			// Unknown: treat as usable rather than duplicating on a blip.
+			return true;
 		}
 	}
 

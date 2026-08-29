@@ -726,4 +726,58 @@ describe("CockpitMirror", () => {
 			);
 		});
 	});
+
+	it("creates a fresh mirror instead of writing a status across teams", async () => {
+		// Linear refuses a status from another team, and rightly. Moving the
+		// cockpit to its own team must therefore be a migration, not a wedge:
+		// the old mirror stays as history, the work gets a new one.
+		makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
+		mirror.restore({
+			[issue.issueId]: {
+				mirrorIssueId: "mirror-in-old-team",
+				tenantWorkspaceId: TENANT_WS,
+				state: "active",
+				issueIdentifier: "DVV-12",
+				clientId: "devitaliteit",
+				mirrorTeamId: "team-the-cockpit-used-to-use",
+			},
+		});
+
+		await mirror.upsert(issue, TENANT_WS, "in-verification");
+
+		// Nothing was written to the abandoned mirror.
+		expect(
+			calls.some((c) => (c.variables.id as string) === "mirror-in-old-team"),
+		).toBe(false);
+		// A new one exists, in the team we now use.
+		const create = calls.find((c) => c.query.includes("issueCreate"));
+		expect(create).toBeDefined();
+		expect((create?.variables.input as { teamId: string }).teamId).toBe(
+			TEAM_ID,
+		);
+		const record = mirror.serialize()[issue.issueId];
+		expect(record?.mirrorIssueId).not.toBe("mirror-in-old-team");
+		expect(record?.mirrorTeamId).toBe(TEAM_ID);
+	});
+
+	it("updates in place when the mirror is in the team we write to", async () => {
+		makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
+		mirror.restore({
+			[issue.issueId]: {
+				mirrorIssueId: "mirror-here",
+				tenantWorkspaceId: TENANT_WS,
+				state: "active",
+				issueIdentifier: "DVV-12",
+				clientId: "devitaliteit",
+				mirrorTeamId: TEAM_ID,
+			},
+		});
+
+		await mirror.upsert(issue, TENANT_WS, "in-verification");
+
+		expect(calls.some((c) => c.query.includes("issueCreate"))).toBe(false);
+		expect(
+			calls.some((c) => (c.variables.id as string) === "mirror-here"),
+		).toBe(true);
+	});
 });
