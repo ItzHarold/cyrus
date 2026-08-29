@@ -254,6 +254,10 @@ export class ConfigManager extends EventEmitter {
 				// the block is the documented kill switch, so absence is a
 				// value here, never "keep the old one" (PON-151 review).
 				cockpit: "cockpit" in parsedConfig ? parsedConfig.cockpit : undefined,
+				// PON-207: absence is a value here too — removing the clients
+				// array must take the client model with it, not leave a stale
+				// one in memory.
+				clients: "clients" in parsedConfig ? parsedConfig.clients : undefined,
 			};
 
 			// Basic validation
@@ -353,6 +357,7 @@ export class ConfigManager extends EventEmitter {
 			"userAccessControl",
 			"sandbox",
 			"cockpit",
+			"clients",
 			"verificationEscalation",
 		];
 

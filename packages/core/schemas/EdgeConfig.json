@@ -1060,6 +1060,46 @@
 			"required": ["linearWorkspaceId", "workspaceName", "teamId"],
 			"additionalProperties": false
 		},
+		"clients": {
+			"type": "array",
+			"items": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"displayName": {
+						"type": "string"
+					},
+					"workspaces": {
+						"minItems": 1,
+						"type": "array",
+						"items": {
+							"type": "string"
+						}
+					},
+					"teams": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						}
+					},
+					"lanes": {
+						"type": "integer",
+						"exclusiveMinimum": 0,
+						"maximum": 9007199254740991
+					},
+					"reviewerId": {
+						"type": "string"
+					},
+					"cockpitProjectId": {
+						"type": "string"
+					}
+				},
+				"required": ["id", "displayName", "workspaces"],
+				"additionalProperties": false
+			}
+		},
 		"verificationEscalation": {
 			"type": "object",
 			"properties": {

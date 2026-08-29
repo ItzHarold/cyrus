@@ -16,6 +16,18 @@ export interface OperatorItem {
 	stateRank: number;
 	/** Stable within-tenant tiebreak — insertion sequence */
 	seq: number;
+	/**
+	 * The CLIENT this work is for (PON-207). A client may hold several
+	 * workspaces and several teams; all of it is one queue, because the
+	 * client experiences one queue. Absent falls back to the workspace, which
+	 * is the pre-PON-207 behaviour.
+	 */
+	clientId?: string;
+	/**
+	 * Lanes the client bought. A two-lane client takes two turns per cycle —
+	 * they are paying for twice the attention, so they get it. Absent = 1.
+	 */
+	lanes?: number;
 }
 
 /**
@@ -53,25 +65,45 @@ export function stateRankOf(state: string): number {
  * One tenant = its own order unchanged.
  */
 export function computeRoundRobinOrder(items: OperatorItem[]): string[] {
-	const byTenant = new Map<string, OperatorItem[]>();
+	// Group by CLIENT where one is known, else by workspace. A client with
+	// two teams is one queue: they bought lanes, not teams.
+	const byClient = new Map<string, OperatorItem[]>();
+	const lanesOf = new Map<string, number>();
 	for (const item of items) {
-		const list = byTenant.get(item.tenantWorkspaceId) ?? [];
+		const key = item.clientId ?? item.tenantWorkspaceId;
+		const list = byClient.get(key) ?? [];
 		list.push(item);
-		byTenant.set(item.tenantWorkspaceId, list);
+		byClient.set(key, list);
+		// Lanes are a property of the client; take the largest seen so a
+		// stale item cannot shrink a client's share.
+		lanesOf.set(key, Math.max(lanesOf.get(key) ?? 1, item.lanes ?? 1));
 	}
-	for (const list of byTenant.values()) {
+	for (const list of byClient.values()) {
 		list.sort((a, b) => a.stateRank - b.stateRank || a.seq - b.seq);
 	}
-	const tenants = [...byTenant.entries()].sort(
+	const clients = [...byClient.entries()].sort(
 		(a, b) =>
 			Math.min(...a[1].map((item) => item.seq)) -
 			Math.min(...b[1].map((item) => item.seq)),
 	);
+	// Each client takes `lanes` turns per cycle. Cursors rather than an
+	// index, because turns per client now differ.
+	const cursor = new Map<string, number>();
 	const out: string[] = [];
-	for (let cycle = 0; out.length < items.length; cycle++) {
-		for (const [, list] of tenants) {
-			const item = list[cycle];
-			if (item) out.push(item.issueId);
+	let progressed = true;
+	while (out.length < items.length && progressed) {
+		progressed = false;
+		for (const [key, list] of clients) {
+			const turns = lanesOf.get(key) ?? 1;
+			let at = cursor.get(key) ?? 0;
+			for (let taken = 0; taken < turns; taken++) {
+				const item = list[at];
+				if (!item) break;
+				out.push(item.issueId);
+				at += 1;
+				progressed = true;
+			}
+			cursor.set(key, at);
 		}
 	}
 	return out;

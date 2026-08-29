@@ -15,6 +15,11 @@
  */
 
 import type { ILogger, SerializedCockpitMirror } from "cyrus-core";
+import {
+	buildMirrorTitle,
+	type ResolvedClient,
+	teamKeyOf,
+} from "./client-registry.js";
 import { computeRoundRobinOrder, stateRankOf } from "./operator-ordering.js";
 
 /** The mirror's state labels, from the PON-151 design table. */
@@ -27,6 +32,27 @@ export const COCKPIT_STATES = [
 	"delivered",
 ] as const;
 export type CockpitState = (typeof COCKPIT_STATES)[number];
+
+/**
+ * The lifecycle as WORKFLOW STATUSES (PON-207).
+ *
+ * Labels could never be board columns, so state was invisible until you
+ * opened an issue. Statuses are the columns. The names are what the operator
+ * reads across the top of the board, so they are written for a human rather
+ * than matching our internal keys.
+ *
+ * Adopted by name, never created: workflow statuses are per-team, and the
+ * cockpit team is the operator's to shape. A missing set degrades to labels
+ * rather than failing, and says exactly what to create.
+ */
+export const COCKPIT_STATUS_NAMES: Record<CockpitState, string> = {
+	"awaiting-scope-confirm": "Awaiting scope",
+	queued: "Queued",
+	active: "Active",
+	"needs-info": "Needs info",
+	"in-verification": "In verification",
+	delivered: "Delivered",
+};
 
 /** What the mirror needs to know about a client issue. */
 export interface CockpitIssueRef {
@@ -50,6 +76,11 @@ export interface CockpitMirrorDeps {
 	getToken: (workspaceId: string) => string | undefined;
 	/** Human-readable tenant workspace name, for the mirror description. */
 	getWorkspaceName: (workspaceId: string) => string | undefined;
+	/**
+	 * Which client this work is for (PON-207). Resolved per call so a config
+	 * hot-reload takes effect without restarting anything.
+	 */
+	resolveClient: (workspaceId: string, teamKey?: string) => ResolvedClient;
 	/** Persist EdgeWorker state (best-effort; failures already logged). */
 	persist: () => Promise<void>;
 }
@@ -57,13 +88,32 @@ export interface CockpitMirrorDeps {
 interface TeamSetup {
 	labelIds: Record<string, string>;
 	completedStateId: string | undefined;
+	/**
+	 * Lifecycle status ids by state, when the cockpit team defines all six
+	 * (PON-207). Undefined means the team has not been set up yet and the
+	 * mirror falls back to labels — the pre-PON-207 behaviour.
+	 */
+	stateIds?: Record<CockpitState, string>;
+	/** Team-identity labels (`team:ACM`), created lazily like state labels. */
+	teamLabelIds: Record<string, string>;
 }
 
 /** How long a failed team setup stays failed before another attempt. */
 const SETUP_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
 
-/** Mirror titles look like "[DVV-12] …" — reconcile adopts/closes by this. */
-const MIRROR_TITLE_PATTERN = /^\[([A-Z][A-Z0-9]*-\d+)\]\s/;
+/**
+ * Mirror titles, old and new. Reconcile adopts and closes by this.
+ *
+ * Old (pre-PON-207): `[DVV-12] Title`
+ * New:               `Acme Corp · DVV-12 — Title`, or with a team segment
+ *                    `Acme Corp · ACMOPS · ACMOPS-4 — Title`
+ *
+ * Both are recognised, and must stay recognised: a boot that stopped
+ * recognising the old shape would treat every existing mirror as an orphan
+ * and close live work.
+ */
+const MIRROR_TITLE_PATTERN =
+	/^\[([A-Z][A-Z0-9]*-\d+)\]\s|·\s([A-Z][A-Z0-9]*-\d+)\s—\s/;
 
 export class CockpitMirror {
 	private deps: CockpitMirrorDeps;
@@ -75,6 +125,8 @@ export class CockpitMirror {
 	private setupFailedAt = new Map<string, number>();
 	/** The last misconfiguration logged, so the loud warning fires once. */
 	private lastMisconfigLogged: string | undefined;
+	/** The last team told it has no lifecycle columns — logged once. */
+	private lastStatusSetupLogged: string | undefined;
 	/**
 	 * Per-issue write chain: transitions for one issue apply in order, so a
 	 * fast active→done cannot be overtaken by a slower queued update.
@@ -114,20 +166,36 @@ export class CockpitMirror {
 		| undefined {
 		const config = this.deps.getConfig();
 		if (!config) return undefined;
-		// The declared workspace NAME must agree with the configured entry
-		// for the declared id. A copied-wrong id (client workspace ids sit
-		// right next to the operator's in the same map) must fail loudly
-		// here, not silently write cross-tenant data into a client's Linear.
+		// PON-207: the cross-tenant guard keys on IDS, not names.
+		//
+		// The danger it exists for is a copied-wrong workspace id — client
+		// ids sit right next to the operator's in the same map — which would
+		// write our cross-tenant view into a client's Linear. An id that is
+		// not a configured workspace, or that has no token, cannot be written
+		// to, and that is the check that matters.
+		//
+		// The declared NAME is now advisory. Keying the kill switch on it
+		// meant a client renaming their workspace disabled the operator's
+		// whole view, which punishes us for something only they control.
 		const actualName = this.deps.getWorkspaceName(config.linearWorkspaceId);
-		if (actualName !== config.workspaceName) {
-			const key = `${config.linearWorkspaceId}:${config.workspaceName}`;
+		if (actualName === undefined) {
+			const key = `unknown:${config.linearWorkspaceId}`;
 			if (this.lastMisconfigLogged !== key) {
 				this.lastMisconfigLogged = key;
 				this.logger.error(
-					`[event:cockpit_disabled_misconfigured] cockpit.workspaceName "${config.workspaceName}" does not match the configured name "${actualName ?? "(unknown workspace id)"}" for workspace ${config.linearWorkspaceId} — mirroring is DISABLED until the declaration agrees`,
+					`[event:cockpit_disabled_misconfigured] cockpit.linearWorkspaceId ${config.linearWorkspaceId} is not a configured workspace — mirroring is DISABLED until it names one`,
 				);
 			}
 			return undefined;
+		}
+		if (config.workspaceName && actualName !== config.workspaceName) {
+			const key = `renamed:${config.linearWorkspaceId}:${actualName}`;
+			if (this.lastMisconfigLogged !== key) {
+				this.lastMisconfigLogged = key;
+				this.logger.warn(
+					`[event:cockpit_workspace_renamed] cockpit.workspaceName says "${config.workspaceName}" but the workspace is now "${actualName}" — mirroring continues on the id; update the declaration when convenient`,
+				);
+			}
 		}
 		if (!this.deps.getToken(config.linearWorkspaceId)) return undefined;
 		return config;
@@ -171,6 +239,11 @@ export class CockpitMirror {
 			const setup = await this.ensureTeamSetup(config);
 			if (!setup) return;
 
+			// PON-207: who this work is FOR. Resolved per write so a config
+			// hot-reload lands without a restart.
+			const teamKey = teamKeyOf(issue.issueIdentifier);
+			const client = this.deps.resolveClient(tenantWorkspaceId, teamKey);
+
 			const existing = this.mirrors.get(issue.issueId);
 			const mergedLinks = [
 				...new Set([
@@ -188,6 +261,8 @@ export class CockpitMirror {
 				issueIdentifier: issue.issueIdentifier ?? existing?.issueIdentifier,
 				issueUrl: issue.url ?? existing?.issueUrl,
 				title: issue.title ?? existing?.title,
+				clientId: client.id,
+				...(teamKey ? { teamKey } : {}),
 				...((detail?.operatorNote ?? existing?.operatorNote) !== undefined
 					? { operatorNote: detail?.operatorNote ?? existing?.operatorNote }
 					: {}),
@@ -209,9 +284,24 @@ export class CockpitMirror {
 				(detail?.note ? `\n\n${detail.note}` : "");
 			const labelId = setup.labelIds[state];
 			const labelIds = labelId ? [labelId] : [];
-			const assignee = detail?.assigneeId
-				? { assigneeId: detail.assigneeId }
-				: {};
+			// PON-207: the lifecycle is a board column when the team defines
+			// the statuses; labels stay alongside so a half-migrated cockpit
+			// still filters and nothing is lost if the statuses go away.
+			const stateId = setup.stateIds?.[state];
+			const lifecycle = stateId ? { stateId } : {};
+			// The reviewer owns the client's lanes, so their avatar is on
+			// every card of theirs — not only the ones already in review.
+			const assigneeId = detail?.assigneeId ?? client.reviewerId;
+			const assignee = assigneeId ? { assigneeId } : {};
+			// One project per client: the swim lane.
+			const projectId = client.cockpitProjectId ?? config.projectId;
+			const project = projectId ? { projectId } : {};
+			const mirrorTitle = buildMirrorTitle({
+				client,
+				issueIdentifier: record.issueIdentifier,
+				teamKey,
+				title: record.title,
+			});
 
 			if (existing?.mirrorIssueId) {
 				const noteChanged =
@@ -223,11 +313,19 @@ export class CockpitMirror {
 					record.revisions !== existing.revisions ||
 					(record.briefLinks?.length ?? 0) !==
 						(existing.briefLinks?.length ?? 0);
+				// PON-207: a mirror written before the client model exists has
+				// the old title and no project. Adoption is just a normal
+				// update with the new shape, so migration needs no separate
+				// pass and cannot create a duplicate.
+				const shapeChanged =
+					existing.clientId !== record.clientId ||
+					existing.mirrorTitle !== mirrorTitle;
 				if (
 					existing.state === record.state &&
 					!detail?.note &&
 					!noteChanged &&
-					!briefChanged
+					!briefChanged &&
+					!shapeChanged
 				)
 					return; // nothing changed
 				await this.gql(
@@ -237,12 +335,19 @@ export class CockpitMirror {
 					}`,
 					{
 						id: existing.mirrorIssueId,
-						input: { description, labelIds, ...assignee },
+						input: {
+							title: mirrorTitle,
+							description,
+							labelIds,
+							...lifecycle,
+							...project,
+							...assignee,
+						},
 					},
 				);
+				record.mirrorTitle = mirrorTitle;
 				this.mirrors.set(issue.issueId, record);
 			} else {
-				const title = `[${record.issueIdentifier ?? issue.issueId}] ${record.title ?? "(untitled)"}`;
 				const created = await this.gql<{
 					issueCreate: { success: boolean; issue: { id: string } };
 				}>(
@@ -253,21 +358,25 @@ export class CockpitMirror {
 					{
 						input: {
 							teamId: config.teamId,
-							...(config.projectId ? { projectId: config.projectId } : {}),
-							title,
+							...project,
+							title: mirrorTitle,
 							description,
 							labelIds,
+							...lifecycle,
 							...assignee,
 						},
 					},
 				);
 				record.mirrorIssueId = created.issueCreate.issue.id;
+				record.mirrorTitle = mirrorTitle;
 				this.mirrors.set(issue.issueId, record);
 			}
 			this.logger.event("cockpit_mirror_upserted", {
 				issueId: issue.issueId,
 				issueIdentifier: record.issueIdentifier,
 				state: record.state,
+				client: client.id,
+				lifecycleColumn: stateId ? COCKPIT_STATUS_NAMES[state] : "none",
 			});
 			await this.deps.persist();
 			// PON-173: every transition can change the fair order. Awaited so
@@ -299,13 +408,24 @@ export class CockpitMirror {
 				this.orderingQueued = false;
 				const config = this.guardedConfig();
 				if (!config) return;
+				// PON-207: order is per CLIENT, weighted by lanes. A client
+				// with two teams is one queue; a client with two lanes takes
+				// two turns per cycle, which is what they bought.
 				const items = [...this.mirrors.entries()].map(
-					([issueId, record], seq) => ({
-						issueId,
-						tenantWorkspaceId: record.tenantWorkspaceId,
-						stateRank: stateRankOf(record.state),
-						seq,
-					}),
+					([issueId, record], seq) => {
+						const client = this.deps.resolveClient(
+							record.tenantWorkspaceId,
+							record.teamKey,
+						);
+						return {
+							issueId,
+							tenantWorkspaceId: record.tenantWorkspaceId,
+							stateRank: stateRankOf(record.state),
+							seq,
+							clientId: client.id,
+							lanes: client.lanes,
+						};
+					},
 				);
 				const order = computeRoundRobinOrder(items);
 				let changed = 0;
@@ -587,7 +707,11 @@ export class CockpitMirror {
 			}
 			if (trackedMirrorIds.has(node.id)) continue; // map already knows it
 
-			const liveIssue = match[1] ? byIdentifier.get(match[1]) : undefined;
+			// Group 1 is the old `[DVV-12] …` shape, group 2 the client-first
+			// one. Both must resolve, or a boot mid-migration sees half its
+			// mirrors as strangers.
+			const identifier = match[1] ?? match[2];
+			const liveIssue = identifier ? byIdentifier.get(identifier) : undefined;
 			if (liveIssue && !liveTracked.has(node.id)) {
 				const alreadyAdopted = this.mirrors.get(liveIssue.issueId);
 				if (!alreadyAdopted) {
@@ -608,6 +732,17 @@ export class CockpitMirror {
 					continue;
 				}
 			}
+			// PON-207 migration safety: while any tracked mirror is still on
+			// the pre-client shape, this boot ADOPTS only and closes nothing.
+			// The first boot after the model lands sees old titles it has not
+			// re-written yet, and "looks unfamiliar" must never be grounds
+			// for closing a live in-verification delivery.
+			if (this.hasUnmigratedMirrors()) {
+				this.logger.info(
+					`[cockpit] orphan close skipped for "${node.title.slice(0, 60)}" — migration boot, adoption only`,
+				);
+				continue;
+			}
 			// An open mirror-looking issue matching nothing live: orphaned by
 			// a lost map. Close it directly.
 			if (setup.completedStateId) {
@@ -627,6 +762,20 @@ export class CockpitMirror {
 				});
 			}
 		}
+	}
+
+	/**
+	 * Is any tracked mirror still on the pre-PON-207 shape?
+	 *
+	 * A mirror gets `clientId` the first time it is written under the client
+	 * model. Until every tracked mirror has one, this boot is a migration
+	 * boot: adoption runs, closing does not.
+	 */
+	private hasUnmigratedMirrors(): boolean {
+		for (const record of this.mirrors.values()) {
+			if (!record.clientId) return true;
+		}
+		return false;
 	}
 
 	/**
@@ -720,14 +869,16 @@ export class CockpitMirror {
 			try {
 				const data = await this.gql<{
 					team: {
-						states: { nodes: Array<{ id: string; type: string }> };
+						states: {
+							nodes: Array<{ id: string; name: string; type: string }>;
+						};
 						labels: { nodes: Array<{ id: string; name: string }> };
 					};
 				}>(
 					config.linearWorkspaceId,
 					`query($teamId: String!, $labelNames: [String!]!) {
 						team(id: $teamId) {
-							states(first: 50) { nodes { id type } }
+							states(first: 50) { nodes { id name type } }
 							labels(filter: { name: { in: $labelNames } }, first: 10) {
 								nodes { id name }
 							}
@@ -772,8 +923,40 @@ export class CockpitMirror {
 				const completedStateId = data.team.states.nodes.find(
 					(state) => state.type === "completed",
 				)?.id;
+
+				// PON-207: adopt the lifecycle statuses by name. All six or
+				// none — a half-configured team would scatter mirrors across
+				// two schemes, which is worse than the labels we started with.
+				const byName = new Map(
+					data.team.states.nodes.map((state) => [state.name, state.id]),
+				);
+				const stateIds = {} as Record<CockpitState, string>;
+				const missing: string[] = [];
+				for (const key of COCKPIT_STATES) {
+					const wanted = COCKPIT_STATUS_NAMES[key];
+					const id = byName.get(wanted);
+					if (id) stateIds[key] = id;
+					else missing.push(wanted);
+				}
+				if (
+					missing.length > 0 &&
+					this.lastStatusSetupLogged !== config.teamId
+				) {
+					this.lastStatusSetupLogged = config.teamId;
+					this.logger.warn(
+						`[cockpit] the cockpit team has no lifecycle columns yet — mirrors keep state in labels and land in the team's default status. Create these statuses on the cockpit team, in this order, to get the board: ${Object.values(
+							COCKPIT_STATUS_NAMES,
+						).join(" → ")}. Missing: ${missing.join(", ")}.`,
+					);
+				}
+
 				this.setupFailedAt.delete(config.teamId);
-				return { labelIds, completedStateId };
+				return {
+					labelIds,
+					teamLabelIds: {},
+					completedStateId,
+					...(missing.length === 0 ? { stateIds } : {}),
+				};
 			} catch (error) {
 				this.logger.error("[cockpit] team setup failed:", error);
 				this.setupByTeam.delete(config.teamId);

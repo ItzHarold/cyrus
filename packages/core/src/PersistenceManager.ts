@@ -126,6 +126,21 @@ export interface SerializedCockpitMirror {
 	/** Client issue title (for re-rendering) */
 	title?: string;
 	/**
+	 * The client this work is for (PON-207, v4.10). Resolved from
+	 * (workspace, team) at write time; stored so ordering can group by client
+	 * without re-resolving, and so a mirror written before the client model
+	 * existed is recognisable as needing adoption.
+	 */
+	clientId?: string;
+	/** Team key within the client's workspace, e.g. "ACM". */
+	teamKey?: string;
+	/**
+	 * The title last written to the mirror. Compared on update so a change of
+	 * client label, team, or issue title re-titles the mirror — and so the
+	 * old `[ACM-13] …` shape is detected and adopted rather than duplicated.
+	 */
+	mirrorTitle?: string;
+	/**
 	 * The session's internal reading (PON-169), rendered into the mirror
 	 * description so the operator sees the approach before approving.
 	 * Carried across state transitions; latest note wins.

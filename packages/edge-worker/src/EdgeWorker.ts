@@ -170,6 +170,7 @@ import {
 	sanitizeClientPaths,
 } from "./client-content-policy.js";
 import { CLIENT_MESSAGES } from "./client-messages.js";
+import { ClientRegistry } from "./client-registry.js";
 import { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
 import { EgressProxy } from "./EgressProxy.js";
 import { GitService, WorktreeCreationRefusedError } from "./GitService.js";
@@ -578,6 +579,13 @@ export class EdgeWorker extends EventEmitter {
 					this.config.linearWorkspaces?.[workspaceId]?.linearToken,
 				getWorkspaceName: (workspaceId) =>
 					this.config.linearWorkspaces?.[workspaceId]?.linearWorkspaceName,
+				// PON-207: who the work is for. Built per call so a config
+				// hot-reload changes what the operator sees without a restart.
+				resolveClient: (workspaceId, teamKey) =>
+					new ClientRegistry(this.config.clients).resolveFor(
+						workspaceId,
+						teamKey,
+					),
 				// Trailing-debounced: a lane dequeue re-renders every queued
 				// mirror, and N back-to-back transitions must not become N
 				// full state-file writes.

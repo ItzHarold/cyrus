@@ -251,6 +251,11 @@ export class WorkerService {
 			// out here is silently dropped at boot even though hot-reload
 			// would carry it — which is exactly how this line was found.
 			cockpit: edgeConfig.cockpit,
+			// PON-207: the clients behind the tenants. Mapped here for the
+			// same reason as everything above it — a field the schema accepts
+			// and the worker never sees is a setting that silently does
+			// nothing, which is how this mapping earned its own test.
+			clients: edgeConfig.clients,
 			verificationEscalation: edgeConfig.verificationEscalation,
 
 			handlers: {
