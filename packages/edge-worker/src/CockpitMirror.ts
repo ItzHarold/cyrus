@@ -81,6 +81,16 @@ export interface CockpitMirrorDeps {
 	 * hot-reload takes effect without restarting anything.
 	 */
 	resolveClient: (workspaceId: string, teamKey?: string) => ResolvedClient;
+	/**
+	 * Open an agent session on a freshly created mirror (PON-212), so the
+	 * operator has somewhere to read the working narration that the client's
+	 * surface suppresses. Optional: a cockpit without one simply keeps the
+	 * previous behaviour, which is a body-only mirror.
+	 */
+	openNarrationSession?: (
+		mirrorIssueId: string,
+		clientIssueId: string,
+	) => Promise<string | undefined>;
 	/** Persist EdgeWorker state (best-effort; failures already logged). */
 	persist: () => Promise<void>;
 }
@@ -312,6 +322,9 @@ export class CockpitMirror {
 				mirrorIssueId: existing?.mirrorIssueId ?? "",
 				renderVersion: DESCRIPTION_VERSION,
 				queueRank: existing?.queueRank,
+				...(existing?.narrationSessionId
+					? { narrationSessionId: existing.narrationSessionId }
+					: {}),
 				clientQueuePosition: existing?.clientQueuePosition,
 				tenantWorkspaceId,
 				state:
@@ -464,6 +477,12 @@ export class CockpitMirror {
 					},
 				);
 				record.mirrorIssueId = created.issueCreate.issue.id;
+				// PON-212: give the new mirror a thread before anything needs
+				// it. Best-effort — a mirror without one is the old behaviour,
+				// not a broken one.
+				record.narrationSessionId = await this.deps
+					.openNarrationSession?.(record.mirrorIssueId, issue.issueId)
+					.catch(() => undefined);
 				record.mirrorTitle = mirrorTitle;
 				record.mirrorTeamId = config.teamId;
 				this.mirrors.set(issue.issueId, record);
@@ -1172,6 +1191,11 @@ export class CockpitMirror {
 	 * surface (the working thread, its links); mirror state is still never a
 	 * source of truth about the work.
 	 */
+	/** The mirror's narration thread for a client issue (PON-212), if open. */
+	narrationSessionIdFor(clientIssueId: string): string | undefined {
+		return this.mirrors.get(clientIssueId)?.narrationSessionId;
+	}
+
 	mirrorIssueIdFor(clientIssueId: string): string | undefined {
 		return this.mirrors.get(clientIssueId)?.mirrorIssueId;
 	}

@@ -435,18 +435,40 @@ describe("operator session — guards", () => {
 		vi.spyOn(console, "error").mockImplementation(() => {});
 	});
 
-	it("refuses a work request from a non-reviewer", async () => {
-		const { p, resumed, cockpitPosts } = setup();
+	it("lets any cockpit member work on a mirror (PON-212)", async () => {
+		// Read access and working access are for the team; only the things the
+		// CLIENT experiences are reviewer-only. A colleague talking to the
+		// agent about work in progress is help, not a threat.
+		const { p, resumed } = setup();
 		await p.handleMirrorAction(
-			{ ...action("do the thing"), actorId: "someone-else" },
+			{ ...action("do the thing"), actorId: "a-colleague" },
 			CLIENT_ISSUE,
 		);
-		// This used to be a harmless canned reply; now it would spend the
-		// client's credential and write to the client's branch.
-		expect(resumed).toHaveLength(0);
+		expect(resumed).toHaveLength(1);
+	});
+
+	it("still refuses to DELIVER for a non-reviewer", async () => {
+		const { p, cockpitPosts } = setup();
+		p.deliverVerifiedWork = vi.fn();
+		await p.handleMirrorAction(
+			{ ...action("approve: ship it"), actorId: "a-colleague" },
+			CLIENT_ISSUE,
+		);
+		expect(p.deliverVerifiedWork).not.toHaveBeenCalled();
 		expect(cockpitPosts.some((a) => /reviewer/i.test(a.content.body))).toBe(
 			true,
 		);
+	});
+
+	it("still refuses to REACH THE CLIENT for a non-reviewer", async () => {
+		// ask-client is a release of a kind — it is the one action during
+		// review that the client sees.
+		const { p, clientPosts } = setup();
+		await p.handleMirrorAction(
+			{ ...action("ask client: which currency?"), actorId: "a-colleague" },
+			CLIENT_ISSUE,
+		);
+		expect(clientPosts).toHaveLength(0);
 	});
 
 	it("refuses work from outside the cockpit workspace", async () => {
