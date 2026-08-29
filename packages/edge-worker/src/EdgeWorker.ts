@@ -6349,6 +6349,15 @@ ${taskSection}`;
 				awaitingScopeConfirm,
 				inVerification,
 			});
+			// PON-212: reconcile re-upserts an in-verification mirror through
+			// the plain path, which carries no review block — so the preview
+			// link, the changed files and the held summary only ever appeared
+			// when a session ENDED. After a restart (or a release that changes
+			// what the block contains) the mirror sat there without the one
+			// thing the reviewer opens it for. Recompose them properly.
+			for (const entry of inVerification) {
+				this.mirrorInVerification(entry.issue.issueId);
+			}
 		} catch (error) {
 			this.logger.error("Cockpit reconciliation failed:", error);
 		}
