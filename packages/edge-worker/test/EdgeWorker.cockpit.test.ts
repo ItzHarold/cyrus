@@ -117,6 +117,15 @@ describe("EdgeWorker - cockpit mirror wiring (PON-151)", () => {
 		);
 	});
 
+	it("records the approval even if the mirror write cannot happen", async () => {
+		// This runs on the scope-APPROVAL path. A cosmetic write to an operator
+		// surface must never be able to stop a client's consent being recorded
+		// — the mirror is a derived view, the approval is the fact. Found by a
+		// partial test double throwing here.
+		const p = worker as never as Record<string, (id: string) => void>;
+		expect(() => p.markConsentOnMirror("issue-with-no-mirror")).not.toThrow();
+	});
+
 	it("scope approval mirrors as active", async () => {
 		registerSession(worker);
 		privates(worker).scopeApprovals.recordProposed(ISSUE_ID, {

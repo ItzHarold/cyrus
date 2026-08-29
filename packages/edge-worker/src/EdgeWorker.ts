@@ -6696,22 +6696,32 @@ ${taskSection}`;
 	 * legible at a glance.
 	 */
 	private markConsentOnMirror(clientIssueId: string): void {
-		const narrationSessionId =
-			this.cockpitMirror.narrationSessionIdFor(clientIssueId);
-		const cockpitWs = this.config.cockpit?.linearWorkspaceId;
-		if (!narrationSessionId || !cockpitWs) return;
-		const tracker = this.issueTrackers.get(cockpitWs);
-		void tracker
-			?.createAgentActivity?.({
-				agentSessionId: narrationSessionId,
-				content: {
-					type: "thought",
-					body: "━━━ **The client approved the scope here.** Everything above is the agent reading the repository to write that scope — including its plan, which is a proposal, not work done. Everything below is the implementation they consented to. ━━━",
-				},
-			})
-			.catch((error: unknown) => {
-				this.logger.debug(`Could not mark consent on mirror: ${String(error)}`);
-			});
+		// Wrapped and optional-called throughout: this runs on the scope
+		// APPROVAL path, and a cosmetic write to an operator surface must
+		// never be able to break the client's consent being recorded. The
+		// mirror is a derived view; the approval is the fact.
+		try {
+			const narrationSessionId =
+				this.cockpitMirror.narrationSessionIdFor?.(clientIssueId);
+			const cockpitWs = this.config.cockpit?.linearWorkspaceId;
+			if (!narrationSessionId || !cockpitWs) return;
+			const tracker = this.issueTrackers.get(cockpitWs);
+			void tracker
+				?.createAgentActivity?.({
+					agentSessionId: narrationSessionId,
+					content: {
+						type: "thought",
+						body: "━━━ **The client approved the scope here.** Everything above is the agent reading the repository to write that scope — including its plan, which is a proposal, not work done. Everything below is the implementation they consented to. ━━━",
+					},
+				})
+				.catch((error: unknown) => {
+					this.logger.debug(
+						`Could not mark consent on mirror: ${String(error)}`,
+					);
+				});
+		} catch (error) {
+			this.logger.debug(`Could not mark consent on mirror: ${String(error)}`);
+		}
 	}
 
 	private attachNarrationShadow(
