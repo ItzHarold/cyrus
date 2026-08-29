@@ -1177,6 +1177,8 @@ export class EdgeWorker extends EventEmitter {
 		// PON-136: the liveness clock — idle workspaces get the refresh that
 		// busy ones get from traffic.
 		this.armWorkspaceLiveness();
+		// PON-212: the review block reports state nobody notifies us about.
+		this.armMirrorRefresh();
 	}
 
 	/**
@@ -3263,6 +3265,11 @@ ${taskSection}`;
 		if (this.workspaceLivenessTimer) {
 			clearInterval(this.workspaceLivenessTimer);
 			this.workspaceLivenessTimer = undefined;
+		}
+
+		if (this.mirrorRefreshTimer) {
+			clearInterval(this.mirrorRefreshTimer);
+			this.mirrorRefreshTimer = undefined;
 		}
 
 		// Cancel pending lane grace timers (PON-112); state is persisted below
@@ -6513,6 +6520,15 @@ ${taskSection}`;
 	 */
 	private mirrorComposition: Promise<void> = Promise.resolve();
 
+	/**
+	 * Last review block written per issue (PON-212).
+	 *
+	 * The block is refreshed on a clock, so it has to be able to decide that
+	 * nothing changed — otherwise every tick rewrites the description and the
+	 * reviewer's issue fills with activity noise.
+	 */
+	private lastReviewBlock = new Map<string, string>();
+
 	private async composeVerificationMirror(issueId: string): Promise<void> {
 		const record = this.verificationGate.get(issueId);
 		if (!record || record.state !== "in-verification") return;
@@ -6533,6 +6549,9 @@ ${taskSection}`;
 		]
 			.filter(Boolean)
 			.join("\n");
+		// Nothing changed since the last render — do not rewrite the body.
+		if (this.lastReviewBlock.get(issueId) === note) return;
+		this.lastReviewBlock.set(issueId, note);
 		void this.cockpitMirror.upsert(
 			{ issueId, issueIdentifier: record.issueIdentifier },
 			record.workspaceId,
@@ -6976,6 +6995,39 @@ ${taskSection}`;
 		});
 		return "Rejection sent back to the agent with your feedback. The client was told nothing.";
 	}
+
+	/**
+	 * Keep the review block true to the world (PON-212).
+	 *
+	 * The block reports things we do not own and are not told about: whether a
+	 * preview finished building, whether it went from protected to open, what
+	 * the newest commit deployed to. None of that produces a Linear event, so
+	 * a mirror rendered once at session-end could sit for hours saying
+	 * "building" about a deployment that finished in ninety seconds — which is
+	 * exactly the shape of staleness that has bitten this surface three times.
+	 *
+	 * A clock is the honest answer for derived state whose source is silent.
+	 * Writes are suppressed when the block is unchanged, so a quiet mirror
+	 * costs a couple of reads and no activity on the reviewer's issue.
+	 */
+	private armMirrorRefresh(): void {
+		if (this.mirrorRefreshTimer) return;
+		const raw = Number(process.env.CYRUS_MIRROR_REFRESH_MS);
+		const intervalMs =
+			Number.isFinite(raw) && raw > 0 ? Math.max(60_000, raw) : 3 * 60 * 1000;
+		this.mirrorRefreshTimer = setInterval(() => {
+			try {
+				for (const issueId of this.verificationGate.pendingIssueIds()) {
+					this.mirrorInVerification(issueId);
+				}
+			} catch (error) {
+				this.logger.error("Mirror refresh tick failed:", error);
+			}
+		}, intervalMs);
+		this.mirrorRefreshTimer.unref?.();
+	}
+
+	private mirrorRefreshTimer?: ReturnType<typeof setInterval>;
 
 	/**
 	 * Someone picked this mirror up with no instruction (PON-211).
