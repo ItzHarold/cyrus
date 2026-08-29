@@ -34,6 +34,8 @@ function makeLogger() {
 
 describe("CockpitMirror", () => {
 	let calls: GqlCall[];
+	/** Client issue id -> workflow state type, for the PON-209 boot check. */
+	let stateTypeByIssue: Map<string, string>;
 	let persist: ReturnType<typeof vi.fn>;
 	let mirror: CockpitMirror;
 	let logger: ReturnType<typeof makeLogger>;
@@ -48,6 +50,29 @@ describe("CockpitMirror", () => {
 
 	/** Team-setup response plus scripted per-mutation responses. */
 	const respond = (call: GqlCall): unknown => {
+		// PON-209: the boot check that asks each tenant whether its client
+		// issues are already over.
+		if (call.query.includes("id: { in: $ids }")) {
+			const ids = (call.variables as { ids: string[] }).ids ?? [];
+			return {
+				issues: {
+					nodes: ids.map((id) => ({
+						id,
+						state: { type: stateTypeByIssue.get(id) ?? "started" },
+					})),
+				},
+			};
+		}
+		if (call.query.includes("issue(id: $id) { state { type } }")) {
+			return {
+				issue: {
+					state: {
+						type:
+							stateTypeByIssue.get(call.variables.id as string) ?? "started",
+					},
+				},
+			};
+		}
 		if (call.query.includes("issues(")) {
 			return { team: { issues: { nodes: linearMirrorIssues } } };
 		}
@@ -136,6 +161,7 @@ describe("CockpitMirror", () => {
 
 	beforeEach(() => {
 		calls = [];
+		stateTypeByIssue = new Map();
 		linearMirrorIssues = [];
 		issueCreateCounter = 0;
 		vi.stubGlobal(
@@ -209,6 +235,31 @@ describe("CockpitMirror", () => {
 		expect(String(input.description)).toContain("authoritative");
 		expect(persist).toHaveBeenCalled();
 		expect(mirror.size).toBe(1);
+	});
+
+	it("closes a mirror whose client issue was cancelled while we were down (PON-209)", async () => {
+		// Our records ("live") do not hear about a client cancelling while the
+		// service is down, so the mirror came back every boot in a live-looking
+		// state — surviving even being closed by hand. Linear is the authority
+		// on whether the client's issue is over.
+		makeMirror(
+			{ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID },
+			{
+				[COCKPIT_WS]: "cockpit-token",
+				[TENANT_WS]: "tenant-token",
+			},
+		);
+		await mirror.upsert(issue, TENANT_WS, "awaiting-scope-confirm");
+		expect(mirror.size).toBe(1);
+
+		stateTypeByIssue.set(issue.issueId, "canceled");
+		await mirror.reconcile({
+			active: [],
+			queued: [],
+			awaitingScopeConfirm: [{ issue, tenantWorkspaceId: TENANT_WS }],
+		});
+
+		expect(mirror.size).toBe(0);
 	});
 
 	it("refreshes an existing mirror when the renderer changes", async () => {

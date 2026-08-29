@@ -88,6 +88,8 @@ export interface CockpitMirrorDeps {
 interface TeamSetup {
 	labelIds: Record<string, string>;
 	completedStateId: string | undefined;
+	/** The team's canceled status, so an abandoned issue does not read as shipped. */
+	canceledStateId: string | undefined;
 	/**
 	 * Lifecycle status ids by state, when the cockpit team defines all six
 	 * (PON-207). Undefined means the team has not been set up yet and the
@@ -637,6 +639,22 @@ export class CockpitMirror {
 			if (!config) return;
 			const setup = await this.ensureTeamSetup(config);
 			if (!setup?.completedStateId) return;
+			// A cancelled issue is not a delivered one. The mirror used to close
+			// everything into the completed state, so work the client abandoned
+			// read as work we shipped — on the operator's own board, which is
+			// the one place that has to be true.
+			//
+			// Linear's terminal notification deliberately does not say WHICH
+			// terminal state (see IssueStateChangeMessage), so the only honest
+			// source is the client issue itself. One read on a path that is
+			// already writing; a failure falls back to completed, which is the
+			// previous behaviour rather than a new guess.
+			const closeStateId = (await this.clientIssueWasCanceled(
+				existing.tenantWorkspaceId,
+				issueId,
+			))
+				? (setup.canceledStateId ?? setup.completedStateId)
+				: setup.completedStateId;
 
 			// PON-207: a mirror left behind in a previous cockpit team cannot
 			// take this team's Done state. It was closed when the cockpit
@@ -660,7 +678,7 @@ export class CockpitMirror {
 				{
 					id: existing.mirrorIssueId,
 					input: {
-						stateId: setup.completedStateId,
+						stateId: closeStateId,
 						labelIds: [],
 						description: this.renderDescription(
 							{ ...existing, state: `done (${reason})` },
@@ -736,8 +754,25 @@ export class CockpitMirror {
 				...live.awaitingScopeConfirm.map((e) => e.issue),
 				...(live.inVerification ?? []).map((e) => e.issue),
 			]);
+			// PON-209: "live" here means "our machinery still thinks this is
+			// open" — a scope record, a lane entry, a held delivery. None of
+			// those hear about a client cancelling while we are down, so the
+			// mirror comes back every boot, in a live-looking state, forever.
+			// Observed: three mirrors of long-cancelled issues sitting in
+			// "Awaiting scope", surviving being closed by hand.
+			//
+			// Linear is the authority on whether the client's issue is over.
+			// Ask it, once per tenant, and treat a terminal client issue as
+			// not live no matter what our records say.
+			const terminal = await this.terminalClientIssues([
+				...live.awaitingScopeConfirm,
+				...live.queued,
+				...live.active,
+				...(live.inVerification ?? []),
+			]);
 			const liveIds = new Set<string>();
 			for (const entry of live.awaitingScopeConfirm) {
+				if (terminal.has(entry.issue.issueId)) continue;
 				liveIds.add(entry.issue.issueId);
 				await this.upsert(
 					entry.issue,
@@ -746,16 +781,19 @@ export class CockpitMirror {
 				);
 			}
 			for (const entry of live.queued) {
+				if (terminal.has(entry.issue.issueId)) continue;
 				liveIds.add(entry.issue.issueId);
 				await this.upsert(entry.issue, entry.tenantWorkspaceId, "queued", {
 					position: entry.position,
 				});
 			}
 			for (const entry of live.active) {
+				if (terminal.has(entry.issue.issueId)) continue;
 				liveIds.add(entry.issue.issueId);
 				await this.upsert(entry.issue, entry.tenantWorkspaceId, "active");
 			}
 			for (const entry of live.inVerification ?? []) {
+				if (terminal.has(entry.issue.issueId)) continue;
 				liveIds.add(entry.issue.issueId);
 				await this.upsert(
 					entry.issue,
@@ -1048,6 +1086,79 @@ export class CockpitMirror {
 		return claimed;
 	}
 
+	/**
+	 * Which of these client issues are already over (PON-209)?
+	 *
+	 * One query per tenant, on boot only. A failure returns empty — the
+	 * mirrors then stay open, which is the behaviour we already had; treating
+	 * an unreachable tenant's issues as terminal would close live work.
+	 */
+	private async terminalClientIssues(
+		entries: Array<{ issue: CockpitIssueRef; tenantWorkspaceId: string }>,
+	): Promise<Set<string>> {
+		const terminal = new Set<string>();
+		const byWorkspace = new Map<string, string[]>();
+		for (const entry of entries) {
+			const list = byWorkspace.get(entry.tenantWorkspaceId) ?? [];
+			list.push(entry.issue.issueId);
+			byWorkspace.set(entry.tenantWorkspaceId, list);
+		}
+		for (const [workspaceId, ids] of byWorkspace) {
+			try {
+				const data = await this.gql<{
+					issues: {
+						nodes: Array<{ id: string; state: { type: string } | null }>;
+					};
+				}>(
+					workspaceId,
+					`query($ids: [ID!]) {
+						issues(filter: { id: { in: $ids } }, first: 250) {
+							nodes { id state { type } }
+						}
+					}`,
+					{ ids },
+				);
+				for (const node of data.issues.nodes) {
+					if (
+						node.state?.type === "completed" ||
+						node.state?.type === "canceled"
+					) {
+						terminal.add(node.id);
+					}
+				}
+			} catch (error) {
+				this.logger.warn(
+					`[cockpit] could not check client issue states for ${workspaceId}: ${String(error)}`,
+				);
+			}
+		}
+		if (terminal.size > 0) {
+			this.logger.event("cockpit_terminal_clients_found", {
+				count: terminal.size,
+			});
+		}
+		return terminal;
+	}
+
+	/** Did the client cancel this issue, rather than finish it? */
+	private async clientIssueWasCanceled(
+		tenantWorkspaceId: string,
+		issueId: string,
+	): Promise<boolean> {
+		try {
+			const data = await this.gql<{
+				issue: { state: { type: string } | null } | null;
+			}>(
+				tenantWorkspaceId,
+				`query($id: String!) { issue(id: $id) { state { type } } }`,
+				{ id: issueId },
+			);
+			return data?.issue?.state?.type === "canceled";
+		} catch {
+			return false;
+		}
+	}
+
 	clientIssueIdFor(mirrorIssueId: string): string | undefined {
 		for (const [clientIssueId, record] of this.mirrors) {
 			if (record.mirrorIssueId === mirrorIssueId) return clientIssueId;
@@ -1198,6 +1309,9 @@ export class CockpitMirror {
 				const completedStateId = data.team.states.nodes.find(
 					(state) => state.type === "completed",
 				)?.id;
+				const canceledStateId = data.team.states.nodes.find(
+					(state) => state.type === "canceled",
+				)?.id;
 
 				// PON-207: adopt the lifecycle statuses by name. All six or
 				// none — a half-configured team would scatter mirrors across
@@ -1230,6 +1344,7 @@ export class CockpitMirror {
 					labelIds,
 					teamLabelIds: {},
 					completedStateId,
+					canceledStateId,
 					...(missing.length === 0 ? { stateIds } : {}),
 				};
 			} catch (error) {
