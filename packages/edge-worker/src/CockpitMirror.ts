@@ -20,6 +20,7 @@ import {
 	type ResolvedClient,
 	teamKeyOf,
 } from "./client-registry.js";
+import { CONSENT_DESCRIPTION_NOTE } from "./consent-boundary.js";
 import { computeRoundRobinOrder, stateRankOf } from "./operator-ordering.js";
 
 /** The mirror's state labels, from the PON-151 design table. */
@@ -156,7 +157,7 @@ const WAITING_STATES = new Set(["in-verification", "needs-info"]);
  * existing mirror showing the old body until its work happens to move. Bump it
  * in the same commit as any rendering change.
  */
-const DESCRIPTION_VERSION = 2;
+const DESCRIPTION_VERSION = 3;
 
 export function isForeignCockpitMirror(title: string | undefined): boolean {
 	return MIRROR_TITLE_PATTERN.test(title ?? "");
@@ -1467,6 +1468,12 @@ export class CockpitMirror {
 				? [
 						"",
 						`**Approved:** ${record.approvedAt} · **Revisions:** ${record.revisions ?? 0}`,
+						// PON-216: the reviewer reads the description before the
+						// thread, so the consent boundary is named here too —
+						// otherwise the marker only works for someone who already
+						// scrolled far enough to wonder about it.
+						"",
+						CONSENT_DESCRIPTION_NOTE,
 					]
 				: []),
 			// The internal reading (PON-169).
