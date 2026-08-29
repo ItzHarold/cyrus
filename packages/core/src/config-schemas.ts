@@ -330,6 +330,22 @@ export const LinearWorkspaceConfigSchema = z.object({
 	 * a correct configuration right up until the bill arrives against the wrong
 	 * tenant — or a personal rate limit takes down a paying client's session.
 	 */
+	/**
+	 * Vercel's Protection Bypass secret for this tenant's preview
+	 * deployments (PON-213).
+	 *
+	 * Previews are protected by default on paid Vercel teams, so the link we
+	 * send a client shows them a login page for an account they do not have.
+	 * The client generates this secret on their own project and gives it to
+	 * us; appending it opens OUR link while leaving the preview protected
+	 * against anyone who does not have it — which is why this is preferred
+	 * over asking them to turn protection off and make previews world-readable.
+	 *
+	 * A non-production, preview-scoped, rotatable value. Never a production
+	 * secret, never logged, never written into the worktree. Rotating it is a
+	 * config edit: hot-reload picks it up with no restart.
+	 */
+	previewBypassToken: z.string().optional(),
 	anthropicAuth: z
 		.discriminatedUnion("mode", [
 			z.object({

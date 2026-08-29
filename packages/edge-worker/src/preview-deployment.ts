@@ -237,3 +237,55 @@ export function renderPreview(preview: PreviewDeployment | undefined): string {
 			return "**Preview:** this repository has no preview deployments, so review from the diff.";
 	}
 }
+
+/**
+ * Vercel's query parameters for opening a protected preview.
+ *
+ * `x-vercel-set-bypass-cookie` makes the first load set a cookie, so the
+ * reviewer or client can navigate the app rather than having the bypass apply
+ * to one request and then bounce them to a login page on the second click.
+ */
+const BYPASS_PARAM = "x-vercel-protection-bypass";
+const BYPASS_COOKIE_PARAM = "x-vercel-set-bypass-cookie";
+
+/**
+ * Make a protected preview openable by someone with no Vercel account
+ * (PON-213).
+ *
+ * The client generates this secret on their own project and gives it to us.
+ * Appending it opens our link while leaving the preview protected against
+ * anyone who does not have it — which is why we ask for this rather than
+ * asking them to switch protection off and make previews world-readable.
+ *
+ * Returns the URL unchanged when there is no token, so an unconfigured tenant
+ * degrades to today's behaviour rather than to a broken link.
+ */
+export function withPreviewBypass(
+	url: string,
+	token: string | undefined,
+): string {
+	if (!token) return url;
+	try {
+		const parsed = new URL(url);
+		parsed.searchParams.set(BYPASS_PARAM, token);
+		parsed.searchParams.set(BYPASS_COOKIE_PARAM, "true");
+		return parsed.toString();
+	} catch {
+		// Not a URL we can parse — hand back what we were given rather than
+		// concatenating a secret onto an unknown string.
+		return url;
+	}
+}
+
+/**
+ * Does this text carry a preview bypass token?
+ *
+ * The content policy blanks URLs before scanning, deliberately — a preview
+ * host embeds the branch name and rewriting it hands the client a broken
+ * link. But a bypass token lives in a query string, so that exemption makes
+ * the one place the secret appears the one place we do not look. This is the
+ * narrow re-inclusion: scan for the parameter by name, whatever the value.
+ */
+export function containsBypassToken(text: string): boolean {
+	return new RegExp(`[?&]${BYPASS_PARAM}=`, "i").test(text);
+}

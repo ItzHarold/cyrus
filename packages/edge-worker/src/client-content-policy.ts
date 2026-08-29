@@ -23,7 +23,8 @@ export interface ClientContentViolation {
 		| "internal-package"
 		| "internal-path"
 		| "model-id"
-		| "model-family-word";
+		| "model-family-word"
+		| "preview-bypass-token";
 	/** The offending excerpt */
 	match: string;
 	/** Whether redactClientContent can rewrite this safely */
@@ -87,6 +88,16 @@ const RULES: Array<{
 		pattern: /\b(?:claude|opus|sonnet|haiku|fable)\b/gi,
 		redactable: false,
 	},
+	// PON-213: a preview bypass secret. It is legitimate in a preview URL we
+	// hand the client — that is what it is for — but never anywhere else, and
+	// never in operator notes or a summary the model composed. Detected by
+	// parameter name so an opaque value is caught whatever it looks like;
+	// the redactor rewrites the VALUE and leaves the link working.
+	{
+		rule: "preview-bypass-token",
+		pattern: /x-vercel-protection-bypass=[^&\s)\]]+/gi,
+		redactable: true,
+	},
 ];
 
 /**
@@ -105,7 +116,17 @@ export function findClientContentViolations(
 	// shaped branch-ref exemption below cannot cover, and rewriting it
 	// hands the client a broken link. The name class a URL can leak (the
 	// app username) is already client-visible as the comment author.
-	scanned = scanned.replace(URL_PATTERN, " ");
+	// PON-213: blank URLs, but NOT a preview bypass token inside one. The
+	// exemption above is right about branch-shaped hosts and wrong about
+	// query strings: a client's bypass secret lives in one, so blanking URLs
+	// wholesale makes the single place the secret ever appears the single
+	// place we never look. Keep the parameter visible to the scanner; the
+	// value itself is redacted by value elsewhere.
+	scanned = scanned.replace(URL_PATTERN, (url) =>
+		/[?&]x-vercel-protection-bypass=/i.test(url)
+			? " x-vercel-protection-bypass=REDACTED "
+			: " ",
+	);
 	// The per-repo hook script names are the CLIENT's own files, documented
 	// product conventions that live in their repository — reporting "ran
 	// cyrus-setup.sh" names their file, not our internals. (Renaming the
@@ -161,7 +182,18 @@ export function redactClientContent(
 	// the client a broken link (found live, PON-175 audit).
 	const urls: string[] = [];
 	let out = text.replace(URL_PATTERN, (m) => {
-		urls.push(m);
+		// PON-213: the URL is protected as a pointer, but a preview bypass
+		// secret inside one is not a pointer — it is a client credential, and
+		// protecting the whole URL would carry it straight through the
+		// redactor untouched. Strip the VALUE and keep the link working.
+		const safe = m.replace(
+			/(x-vercel-protection-bypass=)[^&\s)\]]+/gi,
+			(_all, key: string) => {
+				redactions.push("preview-bypass-token");
+				return `${key}REDACTED`;
+			},
+		);
+		urls.push(safe);
 		return `\uE001U${urls.length - 1}\uE001`;
 	});
 	// Same branch-reference exemption as the scanner: protect them before
