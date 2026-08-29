@@ -72,6 +72,27 @@ export interface EnvVarFinding {
 	optional?: boolean;
 }
 
+/**
+ * Whether this client can be onboarded at all (PON-215).
+ *
+ * "Ready" is not a summary of the discovery — it is a gate. A lane that cannot
+ * be reviewed is a lane we cannot deliver, so the honest answer to a client
+ * whose previews we cannot open is *the product does not work for you yet*,
+ * said before money changes hands rather than at the first delivery.
+ */
+export type OnboardingReadiness =
+	| "ready"
+	/** Fixable by the client in minutes; we say exactly what to do. */
+	| "blocked-needs-client-action"
+	/** No previews at all — the setup engagement, not a blocker to argue about. */
+	| "needs-setup-engagement";
+
+export interface OnboardingGate {
+	readiness: OnboardingReadiness;
+	/** Every unmet requirement, in the client's words. */
+	blockers: string[];
+}
+
 export interface PreviewDiscovery {
 	previewsPerPR: "yes" | "no" | "unknown";
 	/** Evidence for the above, in words, so a human can check our reasoning. */
@@ -326,6 +347,64 @@ function buildMustAsk(input: {
 }
 
 /**
+ * Can we actually deliver for this client?
+ *
+ * Three things must hold, and each is a real reason the product does not work
+ * rather than a nice-to-have:
+ *
+ *  1. Pull requests build previews. Without one there is nothing to review on.
+ *  2. The preview opens for US. A protected preview is invisible to the
+ *     REVIEWER too — a reviewer is a stranger to a client's hosting account —
+ *     so a bypass value is a prerequisite, not a convenience for the client's
+ *     copy of the link.
+ *  3. The preview database is not production. Unconfirmed counts as unmet.
+ *
+ * Evaluated before a lane opens: selling a lane that cannot be reviewed is
+ * worse than saying no.
+ */
+export function assessOnboarding(input: {
+	discovery: PreviewDiscovery;
+	/** From an unauthenticated probe of the preview URL. */
+	previewProtected: boolean;
+	/** Whether we hold this client's bypass value. */
+	hasBypassToken: boolean;
+	/** What they told us about the preview database. */
+	dataSeparation: "confirmed" | "unconfirmed" | "reads-production";
+}): OnboardingGate {
+	const blockers: string[] = [];
+
+	if (input.discovery.previewsPerPR === "no") {
+		return {
+			readiness: "needs-setup-engagement",
+			blockers: [
+				"Your pull requests do not build a preview yet, so there is nothing for us to review against. Setting that up is the first piece of work we would do together.",
+			],
+		};
+	}
+
+	if (input.previewProtected && !input.hasBypassToken) {
+		blockers.push(
+			"Your previews are behind your hosting provider's login, so we cannot open them either — which means we cannot review the work we do for you. In Vercel: Project → Settings → Deployment Protection → Protection Bypass for Automation → generate, and send us the value. Your previews stay private to everyone else.",
+		);
+	}
+
+	if (input.dataSeparation === "reads-production") {
+		blockers.push(
+			"Your preview runs against your production database. We do not review against real customer data, so this needs a separate preview database before we can start.",
+		);
+	} else if (input.dataSeparation === "unconfirmed") {
+		blockers.push(
+			"We still need to know whether your preview uses a different database from your live site. If you are not sure: open your preview and your live site side by side — does the preview show the same customers and orders?",
+		);
+	}
+
+	return {
+		readiness: blockers.length === 0 ? "ready" : "blocked-needs-client-action",
+		blockers,
+	};
+}
+
+/**
  * The onboarding message, generated from what we found.
  *
  * Client-facing: plain, specific, and short. It states what we already know so
@@ -334,6 +413,7 @@ function buildMustAsk(input: {
 export function renderDiscoveryAsk(
 	discovery: PreviewDiscovery,
 	repoName: string,
+	gate?: OnboardingGate,
 ): string {
 	const lines: string[] = [`We had a look at **${repoName}**.`, ""];
 
@@ -370,6 +450,24 @@ export function renderDiscoveryAsk(
 	if (discovery.mustAsk.length > 0) {
 		lines.push("", "**What we need from you:**");
 		for (const ask of discovery.mustAsk) lines.push(`- ${ask}`);
+	}
+
+	if (gate) {
+		lines.push("");
+		if (gate.readiness === "ready") {
+			lines.push(
+				"**You are ready to go** — nothing else needed from your side.",
+			);
+		} else if (gate.readiness === "needs-setup-engagement") {
+			lines.push(...gate.blockers.map((b) => b));
+		} else {
+			// Say plainly that work cannot start, and exactly why. A client who
+			// discovers this at the first delivery has already paid.
+			lines.push(
+				"**Before we can start**, these need sorting — without them we cannot review the work, which means we cannot deliver it:",
+			);
+			for (const blocker of gate.blockers) lines.push(`- ${blocker}`);
+		}
 	}
 	return lines.join("\n");
 }

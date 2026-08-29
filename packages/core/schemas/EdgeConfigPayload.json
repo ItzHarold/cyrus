@@ -521,6 +521,10 @@
 					"previewBypassToken": {
 						"type": "string"
 					},
+					"previewDataSeparation": {
+						"type": "string",
+						"enum": ["confirmed", "unconfirmed", "reads-production"]
+					},
 					"anthropicAuth": {
 						"oneOf": [
 							{
