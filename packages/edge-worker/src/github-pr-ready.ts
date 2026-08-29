@@ -132,3 +132,78 @@ export async function isPullRequestDraft(
 		return undefined;
 	}
 }
+
+/**
+ * Put a pull request BACK into draft (PON-208 follow-up).
+ *
+ * The inverse of `markPullRequestReady`, and the structural half of
+ * draft-until-release. Draft-ness used to rest entirely on the model
+ * following the verify-and-ship skill — and on the first live run it did
+ * not: the session marked its own PR ready before a human had looked at
+ * it, so a client watching their repository saw a finished-looking PR
+ * for work nobody had reviewed.
+ *
+ * Instructions cannot guarantee this; re-asserting the invariant can. We
+ * hold the App token, so whatever a session does, the gate can put it
+ * back.
+ *
+ * Returns "drafted" when it flipped one, "already-draft" when there was
+ * nothing to do. Throws on API failure so the caller can report honestly
+ * rather than assume.
+ */
+export async function convertPullRequestToDraft(
+	token: string,
+	pr: ParsedPullRequestUrl,
+): Promise<"drafted" | "already-draft"> {
+	const query = async <T>(
+		q: string,
+		variables: Record<string, unknown>,
+	): Promise<T> => {
+		const response = await fetch("https://api.github.com/graphql", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${token}`,
+				"User-Agent": "cyrus-agent",
+			},
+			body: JSON.stringify({ query: q, variables }),
+		});
+		const payload = (await response.json()) as {
+			data?: T;
+			errors?: Array<{ message: string }>;
+		};
+		if (!response.ok || payload.errors?.length || !payload.data) {
+			throw new Error(
+				`GitHub GraphQL error (${response.status}): ${payload.errors?.map((e) => e.message).join("; ") ?? "no data"}`,
+			);
+		}
+		return payload.data;
+	};
+
+	const lookup = await query<{
+		repository: { pullRequest: { id: string; isDraft: boolean } | null };
+	}>(
+		`query($owner: String!, $repo: String!, $number: Int!) {
+			repository(owner: $owner, name: $repo) {
+				pullRequest(number: $number) { id isDraft }
+			}
+		}`,
+		{ owner: pr.owner, repo: pr.repo, number: pr.number },
+	);
+	const found = lookup.repository?.pullRequest;
+	if (!found)
+		throw new Error(
+			`Pull request not found: ${pr.owner}/${pr.repo}#${pr.number}`,
+		);
+	if (found.isDraft) return "already-draft";
+
+	await query(
+		`mutation($id: ID!) {
+			convertPullRequestToDraft(input: { pullRequestId: $id }) {
+				pullRequest { id isDraft }
+			}
+		}`,
+		{ id: found.id },
+	);
+	return "drafted";
+}

@@ -176,6 +176,7 @@ import { EgressProxy } from "./EgressProxy.js";
 import { GitService, WorktreeCreationRefusedError } from "./GitService.js";
 import { GlobalSessionRegistry } from "./GlobalSessionRegistry.js";
 import {
+	convertPullRequestToDraft,
 	isPullRequestDraft,
 	markPullRequestReady,
 	parsePullRequestUrl,
@@ -6521,8 +6522,41 @@ ${taskSection}`;
 				if (!token) return url;
 				const draft = await isPullRequestDraft(token, parsed);
 				if (draft === true) return `${url} (draft)`;
-				if (draft === false) return `${url} — **already marked ready**`;
-				return url;
+				if (draft === undefined) return url;
+
+				// Draft-until-release, enforced rather than described.
+				//
+				// This ran as a describe-only check for exactly one live cycle,
+				// and the first PR it looked at was already marked ready — the
+				// session had done it itself, so a client watching their
+				// repository saw a finished-looking PR for work no human had
+				// reviewed. The skill text says not to; the model did anyway.
+				// Instructions cannot make this an invariant. Re-asserting it
+				// can: we hold the App token, so the gate puts it back.
+				try {
+					const result = await convertPullRequestToDraft(token, parsed);
+					this.logger.event("pr_draft_reasserted", {
+						owner: parsed.owner,
+						repo: parsed.repo,
+						number: parsed.number,
+						result,
+					});
+					return `${url} (draft — it had been marked ready; put back)`;
+				} catch (error) {
+					// Loud, and honest on the mirror: an un-draftable PR is
+					// visible to the client right now, and the operator is the
+					// one who can do something about it.
+					this.logger.error(
+						`Could not put ${parsed.owner}/${parsed.repo}#${parsed.number} back into draft:`,
+						error,
+					);
+					this.logger.event("pr_draft_reassert_failed", {
+						owner: parsed.owner,
+						repo: parsed.repo,
+						number: parsed.number,
+					});
+					return `${url} — ⚠️ **marked ready and I could not put it back — the client can see this now**`;
+				}
 			}),
 		);
 		return `**PR:** ${described.join(" · ")}`;
