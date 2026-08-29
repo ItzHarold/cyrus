@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CockpitMirror } from "../src/CockpitMirror.js";
+import { CONSENT_DESCRIPTION_NOTE } from "../src/consent-boundary.js";
 
 /**
  * Operator-cockpit mirror (PON-151). The properties that matter: the mirror
@@ -758,6 +759,10 @@ describe("CockpitMirror", () => {
 			expect(description).toContain("internal reading");
 			expect(description).toContain("## Links");
 			expect(description).toContain("- https://github.com/x/y/pull/9");
+			// PON-216: the consent boundary is named where the reviewer looks
+			// first. Harold read the mirror body, not the thread, and concluded
+			// work had happened before he approved.
+			expect(description).toContain(CONSENT_DESCRIPTION_NOTE);
 		});
 
 		it("brief links union — a repeated link is not duplicated", async () => {

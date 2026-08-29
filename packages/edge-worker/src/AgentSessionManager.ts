@@ -34,6 +34,7 @@ import {
 	sanitizeClientPaths,
 } from "./client-content-policy.js";
 import { CLIENT_MESSAGES } from "./client-messages.js";
+import { labelPlanAsProposal } from "./consent-boundary.js";
 
 /**
  * Models the SDK legitimately uses on its own behalf (PON-147) — session
@@ -192,12 +193,29 @@ export class AgentSessionManager extends EventEmitter {
 	 */
 	private shadowSinks = new Map<
 		string,
-		{ sink: IActivitySink; targetSessionId: string }
+		{
+			sink: IActivitySink;
+			targetSessionId: string;
+			/**
+			 * Evaluated per post, never captured at attach time (PON-216). The
+			 * shadow is attached once at session creation and outlives the scope
+			 * gate, so a boolean read here would freeze the answer at the moment
+			 * the session started — the same derived-view-that-never-refreshes
+			 * shape that has now cost us four bugs.
+			 */
+			preConsent?: () => boolean;
+		}
 	>();
 
 	setShadowSink(
 		sessionId: string,
-		shadow: { sink: IActivitySink; targetSessionId: string } | undefined,
+		shadow:
+			| {
+					sink: IActivitySink;
+					targetSessionId: string;
+					preConsent?: () => boolean;
+			  }
+			| undefined,
 	): void {
 		if (shadow) this.shadowSinks.set(sessionId, shadow);
 		else this.shadowSinks.delete(sessionId);
@@ -214,13 +232,42 @@ export class AgentSessionManager extends EventEmitter {
 	): void {
 		const shadow = this.shadowSinks.get(sessionId);
 		if (!shadow) return;
+		const payload = this.labelPreConsentPlan(shadow, content);
 		void Promise.resolve()
 			.then(() =>
-				shadow.sink.postActivity(shadow.targetSessionId, content as never),
+				shadow.sink.postActivity(shadow.targetSessionId, payload as never),
 			)
 			.catch((error) => {
 				this.logger.debug(`Shadow post failed: ${String(error)}`);
 			});
+	}
+
+	/**
+	 * Mark a plan that renders before the client has approved the scope
+	 * (PON-216).
+	 *
+	 * The plan is genuinely useful to a reviewer — it is how the agent shows
+	 * what it read — so it stays. What it must not do is read as a report of
+	 * work already done, which is exactly how "⏳ Verify and open the pull
+	 * request" read on ACM-19.
+	 *
+	 * Never throws: this is cosmetics on an operator surface, sitting on the
+	 * path of every narrated activity.
+	 */
+	private labelPreConsentPlan(
+		shadow: { preConsent?: () => boolean },
+		content: Record<string, unknown>,
+	): Record<string, unknown> {
+		try {
+			if (!shadow.preConsent?.()) return content;
+			if (content.type !== "thought") return content;
+			const body = content.body;
+			if (typeof body !== "string") return content;
+			const labeled = labelPlanAsProposal(body);
+			return labeled === body ? content : { ...content, body: labeled };
+		} catch {
+			return content;
+		}
 	}
 
 	setActivitySink(sessionId: string, sink: IActivitySink): void {

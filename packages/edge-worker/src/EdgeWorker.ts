@@ -171,6 +171,7 @@ import {
 } from "./client-content-policy.js";
 import { CLIENT_MESSAGES } from "./client-messages.js";
 import { ClientRegistry, teamKeyOf } from "./client-registry.js";
+import { CONSENT_MARKER } from "./consent-boundary.js";
 import { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
 import { EgressProxy } from "./EgressProxy.js";
 import { GitService, WorktreeCreationRefusedError } from "./GitService.js";
@@ -6711,7 +6712,7 @@ ${taskSection}`;
 					agentSessionId: narrationSessionId,
 					content: {
 						type: "thought",
-						body: "━━━ **The client approved the scope here.** Everything above is the agent reading the repository to write that scope — including its plan, which is a proposal, not work done. Everything below is the implementation they consented to. ━━━",
+						body: CONSENT_MARKER,
 					},
 				})
 				.catch((error: unknown) => {
@@ -6740,6 +6741,9 @@ ${taskSection}`;
 			this.agentSessionManager.setShadowSink?.(session.id, {
 				sink,
 				targetSessionId: narrationSessionId,
+				// A closure, not a value: the shadow is attached once and the
+				// gate opens later in the same session (PON-216).
+				preConsent: () => !this.scopeApprovals.isApproved(clientIssueId),
 			});
 		}
 	}
