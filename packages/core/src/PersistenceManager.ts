@@ -195,6 +195,12 @@ export interface SerializedCockpitMirror {
 	/** Place within this client's own queue, 1-based (PON-211). */
 	clientQueuePosition?: number;
 	/**
+	 * Which version of the description renderer produced this mirror's body
+	 * (PON-211). A mismatch means a release changed the rendering and this
+	 * mirror is showing the old one — treated as a change so it refreshes.
+	 */
+	renderVersion?: number;
+	/**
 	 * The cockpit team the mirror issue actually lives in (PON-207).
 	 *
 	 * Recorded so that repointing the cockpit at a different team is a
