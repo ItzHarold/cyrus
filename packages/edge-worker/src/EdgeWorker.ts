@@ -682,7 +682,16 @@ export class EdgeWorker extends EventEmitter {
 			// a false return is treated as "not published" rather than an error:
 			// these are cosmetic surfaces and must never disturb the session.
 			async (sessionId, fields) => {
-				const workspaceId = this.resolveWorkspaceIdForSession(sessionId);
+				// PON-208: this is the one surface that resolves its tracker by
+				// WORKSPACE rather than by the session's sink — and an operator
+				// session's workspace is the client's. Left alone it would
+				// publish the reviewer's session plan and links into the
+				// client's workspace, addressed to a session id that does not
+				// exist there. The surface follows the sink, so it follows the
+				// cockpit.
+				const workspaceId =
+					this.operatorSessions.get(sessionId)?.cockpitWorkspaceId ??
+					this.resolveWorkspaceIdForSession(sessionId);
 				if (!workspaceId) return false;
 				const tracker = this.issueTrackers.get(workspaceId);
 				if (!tracker?.updateAgentSession) return false;

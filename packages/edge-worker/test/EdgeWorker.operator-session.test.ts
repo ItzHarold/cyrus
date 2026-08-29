@@ -203,6 +203,18 @@ describe("operator session — the client hears nothing", () => {
 		expect(cockpitPosts.length).toBeGreaterThanOrEqual(0);
 	});
 
+	it("binds the mirror session's OUTPUT to the cockpit sink", async () => {
+		// The structural core of the silence claim: activities are posted
+		// through a per-session sink, so proving the bound sink is the
+		// cockpit's proves the client's surface is unreachable — stronger
+		// than counting posts a mocked runner was never going to make.
+		const { p } = setup();
+		await p.handleMirrorAction(action("carry on"), CLIENT_ISSUE);
+		const bound = p.agentSessionManager.activitySinks.get(MIRROR_SESSION);
+		expect(bound).toBe(p.activitySinks.get(COCKPIT_WS));
+		expect(bound).not.toBe(p.activitySinks.get(CLIENT_WS));
+	});
+
 	it("registers the client's repository as the subject", async () => {
 		const { p } = setup();
 		await p.handleMirrorAction(action("tighten the query"), CLIENT_ISSUE);
@@ -258,6 +270,27 @@ describe("operator session — the client hears nothing", () => {
 		// Without this the client's next resume would continue a conversation
 		// that never saw the operator's work — and nothing would report it.
 		expect(clientSession.claudeSessionId).toBe("claude-def");
+	});
+
+	it("publishes the session surface to the cockpit, not the client", async () => {
+		// The ONE surface that resolves its tracker by workspace rather than
+		// by the session's sink. An operator session's workspace is the
+		// client's, so left alone PON-116 would push the reviewer's plan and
+		// links into the client's workspace.
+		const { p, worker } = setup();
+		const clientUpdate = vi.fn().mockResolvedValue(true);
+		const cockpitUpdate = vi.fn().mockResolvedValue(true);
+		p.issueTrackers.get(CLIENT_WS).updateAgentSession = clientUpdate;
+		p.issueTrackers.get(COCKPIT_WS).updateAgentSession = cockpitUpdate;
+
+		await p.handleMirrorAction(action("carry on"), CLIENT_ISSUE);
+		await p.agentSessionManager.updateSessionSurface(MIRROR_SESSION, {
+			summary: "working",
+		});
+
+		expect(cockpitUpdate).toHaveBeenCalled();
+		expect(clientUpdate).not.toHaveBeenCalled();
+		expect(worker).toBeDefined();
 	});
 
 	it("is loud: an operator session is never client-quiet", async () => {
