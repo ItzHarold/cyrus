@@ -211,6 +211,32 @@ describe("CockpitMirror", () => {
 		expect(mirror.size).toBe(1);
 	});
 
+	it("refreshes an existing mirror when the renderer changes", async () => {
+		// The body is derived and only rewritten on a state change, so a
+		// release that changes the rendering would otherwise leave every
+		// existing mirror showing the old one — indefinitely, on exactly the
+		// issues an operator is about to pick up.
+		makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
+		mirror.restore({
+			[issue.issueId]: {
+				mirrorIssueId: "mirror-old",
+				tenantWorkspaceId: TENANT_WS,
+				state: "active",
+				issueIdentifier: issue.issueIdentifier,
+				mirrorTeamId: TEAM_ID,
+				// written by an older renderer (no renderVersion at all)
+			} as never,
+		});
+		const before = calls.length;
+
+		await mirror.upsert(issue, TENANT_WS, "active");
+
+		const update = calls
+			.slice(before)
+			.find((c) => c.query.includes("issueUpdate"));
+		expect(update).toBeDefined();
+	});
+
 	it("updates on a state change and is a no-op when the state is unchanged", async () => {
 		makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
 		await mirror.upsert(issue, TENANT_WS, "active");

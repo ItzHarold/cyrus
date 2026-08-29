@@ -136,6 +136,16 @@ const MIRROR_TITLE_PATTERN =
  */
 const WAITING_STATES = new Set(["in-verification", "needs-info"]);
 
+/**
+ * Bumped whenever `renderDescription` changes what it produces (PON-211).
+ *
+ * The mirror body is derived, and a mirror only rewrites when its state
+ * changes — so without this, a release that changes the rendering leaves every
+ * existing mirror showing the old body until its work happens to move. Bump it
+ * in the same commit as any rendering change.
+ */
+const DESCRIPTION_VERSION = 2;
+
 export function isForeignCockpitMirror(title: string | undefined): boolean {
 	return MIRROR_TITLE_PATTERN.test(title ?? "");
 }
@@ -298,6 +308,9 @@ export class CockpitMirror {
 			];
 			const record: SerializedCockpitMirror = {
 				mirrorIssueId: existing?.mirrorIssueId ?? "",
+				renderVersion: DESCRIPTION_VERSION,
+				queueRank: existing?.queueRank,
+				clientQueuePosition: existing?.clientQueuePosition,
 				tenantWorkspaceId,
 				state:
 					detail?.position !== undefined
@@ -380,9 +393,24 @@ export class CockpitMirror {
 				// the old title and no project. Adoption is just a normal
 				// update with the new shape, so migration needs no separate
 				// pass and cannot create a duplicate.
+				// PON-211: the queue position is rendered into the body, so it
+				// has to count as a change like any other.
+				const positionChanged =
+					existing.queueRank !== record.queueRank ||
+					existing.clientQueuePosition !== record.clientQueuePosition;
+				// The description is DERIVED, so a deploy that changes how it
+				// renders leaves every existing mirror stale — and, since a
+				// mirror only rewrites on a state change, stale until the work
+				// happens to move. Observed live: mirrors shipped without the
+				// "work this with @…" line the release added, on exactly the
+				// issues an operator was about to pick up. A render-version
+				// stamp makes a rendering change behave like any other change.
+				const renderChanged = existing.renderVersion !== DESCRIPTION_VERSION;
 				const shapeChanged =
 					existing.clientId !== record.clientId ||
-					existing.mirrorTitle !== mirrorTitle;
+					existing.mirrorTitle !== mirrorTitle ||
+					positionChanged ||
+					renderChanged;
 				if (
 					existing.state === record.state &&
 					!detail?.note &&
