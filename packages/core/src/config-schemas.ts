@@ -631,6 +631,55 @@ export const EdgeConfigSchema = z.object({
 		.optional(),
 
 	/**
+	 * The commercial entities behind the tenants (PON-207).
+	 *
+	 * A client is what we bill, what buys lanes, and what the operator needs
+	 * to see on a mirror. It is deliberately NOT a Linear concept: a client
+	 * may hold more than one workspace, several teams inside one, and their
+	 * Linear names can change under us without our view breaking. The issue
+	 * key is not identity either — two clients can both use "ACM".
+	 *
+	 * Absent = the pre-PON-207 behaviour: every mirror in one bucket.
+	 */
+	clients: z
+		.array(
+			z.object({
+				/** Stable key of ours. Never a Linear id — Linear ids change hands. */
+				id: z.string(),
+				/**
+				 * What the operator reads on every mirror. Independent of any
+				 * Linear workspace or team name, so a client renaming their
+				 * workspace changes nothing here.
+				 */
+				displayName: z.string(),
+				/** Linear workspace ids belonging to this client. Usually one. */
+				workspaces: z.array(z.string()).min(1),
+				/**
+				 * Team keys within those workspaces. Absent or empty means
+				 * every team — the common case. Present when one workspace is
+				 * shared by more than one client, or when only some teams are
+				 * ours to work.
+				 */
+				teams: z.array(z.string()).optional(),
+				/**
+				 * Lanes bought. Drives the client's share of the operator's
+				 * attention: a two-lane client contributes two items per
+				 * round-robin cycle, because that is what they are paying for.
+				 * Default 1.
+				 */
+				lanes: z.number().int().positive().optional(),
+				/** Reviewer who owns this client's lanes (PON-173 seam). */
+				reviewerId: z.string().optional(),
+				/**
+				 * Cockpit project grouping this client's mirrors. Resolved or
+				 * created on boot when absent, then cached here by the operator.
+				 */
+				cockpitProjectId: z.string().optional(),
+			}),
+		)
+		.optional(),
+
+	/**
 	 * Escalation ladder thresholds for unapproved work (PON-152). The ladder
 	 * only ever gets LOUDER — nothing here auto-delivers.
 	 */

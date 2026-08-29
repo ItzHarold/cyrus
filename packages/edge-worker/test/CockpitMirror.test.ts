@@ -107,7 +107,24 @@ describe("CockpitMirror", () => {
 			{
 				getConfig: () => fullConfig as never,
 				getToken: (ws) => tokens[ws],
-				getWorkspaceName: (ws) => (ws === TENANT_WS ? "DVV Client" : "Cockpit"),
+				getWorkspaceName: (ws) =>
+					ws === TENANT_WS
+						? "DVV Client"
+						: ws === COCKPIT_WS
+							? "Cockpit"
+							: undefined,
+				// PON-207: one single-team client, so these cases keep testing
+				// the mirror rather than the client model (which has its own
+				// suite).
+				// One client per tenant workspace, which is the common shape.
+				// The multi-workspace and multi-team cases have their own suite.
+				resolveClient: (ws) => ({
+					id: ws === TENANT_WS ? "devitaliteit" : `client-${ws}`,
+					displayName:
+						ws === TENANT_WS ? "DeVitaliteitVerrijkers" : `Client ${ws}`,
+					lanes: 1,
+					multiTeam: false,
+				}),
 				persist,
 			},
 			logger,
@@ -182,7 +199,10 @@ describe("CockpitMirror", () => {
 		const input = create?.variables.input as Record<string, unknown>;
 		expect(input.teamId).toBe(TEAM_ID);
 		expect(input.projectId).toBe("proj-1");
-		expect(input.title).toBe("[DVV-12] Add CSV export");
+		// PON-207: client first, because the issue key is not identity.
+		expect(input.title).toBe(
+			"DeVitaliteitVerrijkers · DVV-12 — Add CSV export",
+		);
 		expect(input.labelIds).toEqual(["label-active"]);
 		expect(String(input.description)).toContain(issue.url);
 		expect(String(input.description)).toContain("DVV Client");
@@ -315,24 +335,46 @@ describe("CockpitMirror", () => {
 		);
 	});
 
-	it("a mismatched workspaceName disables mirroring loudly", async () => {
+	it("a renamed cockpit workspace keeps mirroring and says so once (PON-207)", async () => {
+		// The name was an exact-match kill switch. A client renaming their
+		// workspace then disabled the operator's entire view — punishing us
+		// for something only they control. The guard keys on the id now.
 		makeMirror({
 			linearWorkspaceId: COCKPIT_WS,
-			workspaceName: "Some Client",
+			workspaceName: "Cockpit (old name)",
+			teamId: TEAM_ID,
+		});
+		await mirror.upsert(issue, TENANT_WS, "active");
+		expect(calls.length).toBeGreaterThan(0);
+		const warns = (logger as never as { warn: ReturnType<typeof vi.fn> }).warn;
+		const renameWarnings = warns.mock.calls.filter((c) =>
+			String(c[0]).includes("cockpit_workspace_renamed"),
+		);
+		expect(renameWarnings).toHaveLength(1);
+
+		// Advisory, so it says it once and never again.
+		await mirror.upsert(issue, TENANT_WS, "queued", { position: 1 });
+		expect(
+			warns.mock.calls.filter((c) =>
+				String(c[0]).includes("cockpit_workspace_renamed"),
+			),
+		).toHaveLength(1);
+	});
+
+	it("an unconfigured cockpit workspace id still disables mirroring loudly", async () => {
+		// The check that actually protects a client: an id we cannot resolve
+		// is an id we must not write to.
+		makeMirror({
+			linearWorkspaceId: "ws-not-configured",
 			teamId: TEAM_ID,
 		});
 		await mirror.upsert(issue, TENANT_WS, "active");
 		expect(calls).toHaveLength(0);
 		const errors = (logger as never as { error: ReturnType<typeof vi.fn> })
 			.error;
-		expect(errors).toHaveBeenCalledTimes(1);
 		expect(String(errors.mock.calls[0]![0])).toContain(
 			"cockpit_disabled_misconfigured",
 		);
-
-		// The loud warning fires once, not per event.
-		await mirror.upsert(issue, TENANT_WS, "queued", { position: 1 });
-		expect(errors).toHaveBeenCalledTimes(1);
 	});
 
 	it("a failed team setup cools down instead of retrying per event", async () => {
@@ -353,13 +395,13 @@ describe("CockpitMirror", () => {
 		expect(failures).toBe(1);
 	});
 
-	it("reconcile adopts existing Linear mirrors instead of duplicating, and closes orphans", async () => {
+	it("reconcile adopts existing Linear mirrors instead of duplicating, and closes nothing mid-migration", async () => {
 		makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
 		linearMirrorIssues = [
 			{
 				// Matches a live issue — must be adopted, not duplicated.
 				id: "mirror-existing",
-				title: "[DVV-12] Add CSV export",
+				title: "DeVitaliteitVerrijkers · DVV-12 — Add CSV export",
 				labels: { nodes: [{ id: "label-active" }] },
 				project: null,
 			},
@@ -391,6 +433,46 @@ describe("CockpitMirror", () => {
 		expect(mirror.serialize()[issue.issueId]?.mirrorIssueId).toBe(
 			"mirror-existing",
 		);
+		// PON-207 migration safety: this boot ADOPTS and closes nothing. The
+		// adopted mirror has no clientId yet, which is exactly the state a
+		// first boot after the client model is in — and "I don't recognise
+		// this title" must never be grounds for closing a live delivery.
+		expect(
+			calls.some((c) => (c.variables.id as string) === "mirror-orphan"),
+		).toBe(false);
+		expect(
+			calls.some((c) => (c.variables.id as string) === "unrelated-issue"),
+		).toBe(false);
+	});
+
+	it("closes orphans once every mirror carries the client model (PON-207)", async () => {
+		makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
+		// A fully migrated map: every tracked mirror knows its client.
+		mirror.restore({
+			[issue.issueId]: {
+				mirrorIssueId: "mirror-existing",
+				tenantWorkspaceId: TENANT_WS,
+				state: "active",
+				issueIdentifier: "DVV-12",
+				clientId: "devitaliteit",
+				mirrorTitle: "DeVitaliteitVerrijkers · DVV-12 — Add CSV export",
+			},
+		});
+		linearMirrorIssues = [
+			{
+				id: "mirror-orphan",
+				title: "DeVitaliteitVerrijkers · DVV-99 — Old thing",
+				labels: { nodes: [{ id: "label-queued" }] },
+				project: null,
+			},
+		];
+
+		await mirror.reconcile({
+			active: [{ issue, tenantWorkspaceId: TENANT_WS }],
+			queued: [],
+			awaitingScopeConfirm: [],
+		});
+
 		const orphanClose = calls.find(
 			(c) =>
 				c.query.includes("issueUpdate") &&
@@ -399,9 +481,6 @@ describe("CockpitMirror", () => {
 		expect((orphanClose?.variables.input as { stateId: string }).stateId).toBe(
 			"state-done",
 		);
-		expect(
-			calls.some((c) => (c.variables.id as string) === "unrelated-issue"),
-		).toBe(false);
 	});
 
 	it("label creation denied: mirrors still work, state in description, one warning", async () => {
@@ -442,9 +521,12 @@ describe("CockpitMirror", () => {
 		expect(
 			String((create?.variables.input as { description: string }).description),
 		).toContain("active");
-		expect(
-			(logger as never as { warn: ReturnType<typeof vi.fn> }).warn,
-		).toHaveBeenCalledTimes(1);
+		const labelWarnings = (
+			logger as never as { warn: ReturnType<typeof vi.fn> }
+		).warn.mock.calls.filter((c) =>
+			String(c[0]).includes("cannot create state labels"),
+		);
+		expect(labelWarnings).toHaveLength(1);
 		expect(mirror.size).toBe(1);
 	});
 
