@@ -611,23 +611,8 @@ export class EdgeWorker extends EventEmitter {
 				// any live session for that issue at it — so the narration the
 				// client's surface suppresses lands somewhere the operator can
 				// read instead of being dropped.
-				openNarrationSession: async (mirrorIssueId, clientIssueId) => {
-					const cockpitWs = this.config.cockpit?.linearWorkspaceId;
-					const sink = cockpitWs
-						? this.activitySinks.get(cockpitWs)
-						: undefined;
-					if (!sink) return undefined;
-					try {
-						const sessionId = await sink.createAgentSession(mirrorIssueId);
-						this.attachNarrationShadow(clientIssueId, sessionId);
-						return sessionId;
-					} catch (error) {
-						this.logger.warn(
-							`Could not open the mirror's narration thread: ${String(error)}`,
-						);
-						return undefined;
-					}
-				},
+				openNarrationSession: (mirrorIssueId, clientIssueId) =>
+					this.openNarrationSessionOnce(mirrorIssueId, clientIssueId),
 				// Trailing-debounced: a lane dequeue re-renders every queued
 				// mirror, and N back-to-back transitions must not become N
 				// full state-file writes.
@@ -6580,6 +6565,48 @@ ${taskSection}`;
 	 * order, and a session that starts first would otherwise narrate into the
 	 * void for its whole run.
 	 */
+	/**
+	 * In-flight narration opens, keyed by mirror issue (PON-212).
+	 *
+	 * Observed live: two threads appeared on one mirror 207ms apart, and the
+	 * record kept only the second — so the reviewer arrived at a thread the
+	 * narration was not going to. Whatever the exact interleaving, opening a
+	 * thread is not idempotent and the guard has to be, so concurrent callers
+	 * share one promise and a mirror can only ever have one.
+	 */
+	private narrationOpens = new Map<string, Promise<string | undefined>>();
+
+	private openNarrationSessionOnce(
+		mirrorIssueId: string,
+		clientIssueId: string,
+	): Promise<string | undefined> {
+		const inFlight = this.narrationOpens.get(mirrorIssueId);
+		if (inFlight) return inFlight;
+		// An already-recorded thread is the strongest answer: never open a
+		// second one for a mirror that has one.
+		const known = this.cockpitMirror.narrationSessionIdFor(clientIssueId);
+		if (known) return Promise.resolve(known);
+
+		const cockpitWs = this.config.cockpit?.linearWorkspaceId;
+		const sink = cockpitWs ? this.activitySinks.get(cockpitWs) : undefined;
+		if (!sink) return Promise.resolve(undefined);
+
+		const open = (async () => {
+			try {
+				const sessionId = await sink.createAgentSession(mirrorIssueId);
+				this.attachNarrationShadow(clientIssueId, sessionId);
+				return sessionId;
+			} catch (error) {
+				this.logger.warn(
+					`Could not open the mirror's narration thread: ${String(error)}`,
+				);
+				return undefined;
+			}
+		})();
+		this.narrationOpens.set(mirrorIssueId, open);
+		return open;
+	}
+
 	private attachNarrationShadow(
 		clientIssueId: string,
 		narrationSessionId: string | undefined,
