@@ -176,6 +176,53 @@ export class AgentSessionManager extends EventEmitter {
 	 * Register an activity sink for a specific session.
 	 * This associates the session with the correct issue tracker for activity posting.
 	 */
+	/**
+	 * Where a client-quiet session's narration goes instead of nowhere
+	 * (PON-212).
+	 *
+	 * PON-179 stopped narration reaching a client's thread, which was right,
+	 * and then dropped it on the floor, which was not: the operator lost it
+	 * too. A 389-message session left four activities on the client thread and
+	 * nothing anywhere else, so "what did it actually do" had no answer for
+	 * anyone — not a permission problem, a deletion.
+	 *
+	 * Quiet should mean quiet on the CLIENT's surface and loud on the
+	 * operator's. This is the same subject/surface split as PON-208, one layer
+	 * earlier.
+	 */
+	private shadowSinks = new Map<
+		string,
+		{ sink: IActivitySink; targetSessionId: string }
+	>();
+
+	setShadowSink(
+		sessionId: string,
+		shadow: { sink: IActivitySink; targetSessionId: string } | undefined,
+	): void {
+		if (shadow) this.shadowSinks.set(sessionId, shadow);
+		else this.shadowSinks.delete(sessionId);
+	}
+
+	/**
+	 * Post an activity that the client must not see onto the operator's
+	 * surface. Never throws and never blocks the client path: losing a line of
+	 * narration is a cost, breaking the session is a fault.
+	 */
+	private postToShadow(
+		sessionId: string,
+		content: Record<string, unknown>,
+	): void {
+		const shadow = this.shadowSinks.get(sessionId);
+		if (!shadow) return;
+		void Promise.resolve()
+			.then(() =>
+				shadow.sink.postActivity(shadow.targetSessionId, content as never),
+			)
+			.catch((error) => {
+				this.logger.debug(`Shadow post failed: ${String(error)}`);
+			});
+	}
+
 	setActivitySink(sessionId: string, sink: IActivitySink): void {
 		this.activitySinks.set(sessionId, sink);
 		if (!this.planTrackers.has(sessionId)) {
@@ -1768,7 +1815,10 @@ export class AgentSessionManager extends EventEmitter {
 					};
 					options.ephemeral = undefined;
 				} else {
-					log.debug(`Suppressed streamed ${content.type} (client-quiet)`);
+					// PON-212: redirected, not discarded. The operator reads the
+					// same typed transcript the agent produced.
+					this.postToShadow(sessionId, content as never);
+					log.debug(`Redirected streamed ${content.type} to the operator`);
 					return;
 				}
 			} else if (
@@ -2027,7 +2077,10 @@ export class AgentSessionManager extends EventEmitter {
 				};
 				label = "quiet status";
 			} else {
-				log.debug(`Suppressed ${label} (client-quiet workspace)`);
+				// PON-212: the other narration artery. Same rule — the client
+				// does not see it, the operator does.
+				if (input.content) this.postToShadow(sessionId, input.content as never);
+				log.debug(`Redirected ${label} to the operator (client-quiet)`);
 				return null;
 			}
 		} else if (

@@ -195,6 +195,12 @@ export interface SerializedCockpitMirror {
 	/** Place within this client's own queue, 1-based (PON-211). */
 	clientQueuePosition?: number;
 	/**
+	 * The mirror's own agent session (PON-212) — where the client-quiet
+	 * narration is redirected so the operator can read what was done. Created
+	 * with the mirror; absent on mirrors written before this existed.
+	 */
+	narrationSessionId?: string;
+	/**
 	 * Which version of the description renderer produced this mirror's body
 	 * (PON-211). A mismatch means a release changed the rendering and this
 	 * mirror is showing the old one — treated as a change so it refreshes.

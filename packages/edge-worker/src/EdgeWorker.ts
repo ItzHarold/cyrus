@@ -195,6 +195,7 @@ import {
 	type OperatorSessionLink,
 	OperatorSessionRegistry,
 } from "./operator-session.js";
+import { fetchPreviewDeployment, renderPreview } from "./preview-deployment.js";
 import { ScopeApprovalStore } from "./ScopeApprovalStore.js";
 import {
 	buildScopeAskBody,
@@ -606,6 +607,27 @@ export class EdgeWorker extends EventEmitter {
 						workspaceId,
 						teamKey,
 					),
+				// PON-212: open the mirror's thread as it is created, and point
+				// any live session for that issue at it — so the narration the
+				// client's surface suppresses lands somewhere the operator can
+				// read instead of being dropped.
+				openNarrationSession: async (mirrorIssueId, clientIssueId) => {
+					const cockpitWs = this.config.cockpit?.linearWorkspaceId;
+					const sink = cockpitWs
+						? this.activitySinks.get(cockpitWs)
+						: undefined;
+					if (!sink) return undefined;
+					try {
+						const sessionId = await sink.createAgentSession(mirrorIssueId);
+						this.attachNarrationShadow(clientIssueId, sessionId);
+						return sessionId;
+					} catch (error) {
+						this.logger.warn(
+							`Could not open the mirror's narration thread: ${String(error)}`,
+						);
+						return undefined;
+					}
+				},
 				// Trailing-debounced: a lane dequeue re-renders every queued
 				// mirror, and N back-to-back transitions must not become N
 				// full state-file writes.
@@ -4962,6 +4984,13 @@ ${taskSection}`;
 		const activitySink = this.getActivitySinkForRepo(primaryRepo.id);
 		if (activitySink) {
 			agentSessionManager.setActivitySink(sessionId, activitySink);
+			// PON-212: if this issue already has a mirror thread, narrate into
+			// it from the first activity. The mirror may be created before or
+			// after the session; both orders have to work.
+			this.attachNarrationShadow(
+				issue.id,
+				this.cockpitMirror.narrationSessionIdFor(issue.id),
+			);
 		}
 
 		// PON-189: routing is operator information, not client information.
@@ -6479,10 +6508,12 @@ ${taskSection}`;
 		const record = this.verificationGate.get(issueId);
 		if (!record || record.state !== "in-verification") return;
 		const checkout = await this.buildCheckoutInstructions(issueId);
+		const startHere = await this.buildStartHereBlock(record.prUrls);
 		const note = [
 			"---",
 			"**Held for review.** Reply on this issue to work on it with me — plain instructions are fine. `approve: <notes>` delivers it to the client, `reject: <feedback>` sends it back, `mine` hands me off the branch, `ask client: <question>` is the only thing that reaches them.",
 			await this.describePullRequests(record.prUrls),
+			startHere,
 			record.isError ? "**The session ended with an error.**" : "",
 			"",
 			"**What the session reported:**",
@@ -6510,6 +6541,117 @@ ${taskSection}`;
 				...(record.prUrls.length ? { brief: { addLinks: record.prUrls } } : {}),
 			},
 		);
+	}
+
+	/**
+	 * Point every live session for a client issue at the mirror's thread
+	 * (PON-212).
+	 *
+	 * Called when the mirror's thread is created, and again whenever a session
+	 * starts on an issue that already has one — the two can happen in either
+	 * order, and a session that starts first would otherwise narrate into the
+	 * void for its whole run.
+	 */
+	private attachNarrationShadow(
+		clientIssueId: string,
+		narrationSessionId: string | undefined,
+	): void {
+		const cockpitWs = this.config.cockpit?.linearWorkspaceId;
+		const sink = cockpitWs ? this.activitySinks.get(cockpitWs) : undefined;
+		if (!sink || !narrationSessionId) return;
+		for (const session of this.agentSessionManager.getSessionsByIssueId(
+			clientIssueId,
+		)) {
+			// Operator sessions already post to the cockpit; shadowing one
+			// would echo it back into its own thread.
+			if (this.operatorSessions.isOperatorSession(session.id)) continue;
+			this.agentSessionManager.setShadowSink?.(session.id, {
+				sink,
+				targetSessionId: narrationSessionId,
+			});
+		}
+	}
+
+	/**
+	 * What the reviewer needs before touching anything (PON-212).
+	 *
+	 * The preview to click, and the files that changed. Both are FACTS read
+	 * from GitHub rather than claims from the session — a summary can be
+	 * wrong about which files it touched; the PR cannot.
+	 *
+	 * Best-effort throughout: this block is the reason to open the mirror, but
+	 * it is not worth losing the mirror write that carries everything else.
+	 */
+	private async buildStartHereBlock(prUrls: string[]): Promise<string> {
+		const first = prUrls.map(parsePullRequestUrl).find(Boolean);
+		if (!first) return "";
+		try {
+			const token = await this.mintGitHubTokenForRepo(first.owner, first.repo);
+			if (!token) return "";
+			const pr = await this.fetchPullRequestFacts(token, first);
+			if (!pr) return "";
+			const preview = await fetchPreviewDeployment(token, first, pr.headSha);
+			const files = pr.files.length
+				? [
+						"",
+						`**Files changed** (${pr.files.length}${pr.truncated ? "+" : ""}):`,
+						...pr.files
+							.slice(0, 15)
+							.map((f) => `- \`${f.path}\` (+${f.additions}/-${f.deletions})`),
+						pr.files.length > 15
+							? `- …and ${pr.files.length - 15} more on the PR`
+							: "",
+					]
+				: [];
+			return [renderPreview(preview), ...files].filter(Boolean).join("\n");
+		} catch (error) {
+			this.logger.warn(`Could not build the review block: ${String(error)}`);
+			return "";
+		}
+	}
+
+	/** Head SHA and changed files for a PR — facts, not model claims. */
+	private async fetchPullRequestFacts(
+		token: string,
+		pr: { owner: string; repo: string; number: number },
+	): Promise<
+		| {
+				headSha: string;
+				files: Array<{ path: string; additions: number; deletions: number }>;
+				truncated: boolean;
+		  }
+		| undefined
+	> {
+		const api = async <T>(path: string): Promise<T | undefined> => {
+			const response = await fetch(`https://api.github.com${path}`, {
+				headers: {
+					Authorization: `Bearer ${token}`,
+					Accept: "application/vnd.github+json",
+					"User-Agent": "cyrus-agent",
+				},
+			});
+			if (!response.ok) return undefined;
+			return (await response.json()) as T;
+		};
+		const detail = await api<{ head: { sha: string }; changed_files: number }>(
+			`/repos/${pr.owner}/${pr.repo}/pulls/${pr.number}`,
+		);
+		if (!detail?.head?.sha) return undefined;
+		const files =
+			(await api<
+				Array<{ filename: string; additions: number; deletions: number }>
+			>(
+				`/repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/files?per_page=100`,
+			)) ?? [];
+		return {
+			headSha: detail.head.sha,
+			files: files.map((f) => ({
+				path: f.filename,
+				additions: f.additions,
+				deletions: f.deletions,
+			})),
+			truncated: (detail.changed_files ?? files.length) > files.length,
+		};
 	}
 
 	/**
@@ -7284,30 +7426,44 @@ ${taskSection}`;
 
 		const intent = classifyMirrorIntent(body);
 
-		// PON-173: an allowed-reviewer SET — `reviewers` when declared, the
-		// legacy single `assigneeId` otherwise.
+		// Who may do what on a mirror (PON-212).
 		//
-		// PON-208 widens this guard from approve/reject to EVERY mirror
-		// action. It used to be that anything else got a harmless canned
-		// reply, so only delivery needed protecting. Now the fallthrough
-		// spends the client's model credential and writes to the client's
-		// branch — so a work request has to clear the same bar as a delivery.
-		const reviewers = this.cockpitReviewers();
-		if (reviewers.length === 0) {
-			await reply(
-				"This mirror needs a configured reviewer (`cockpit.reviewers` or `cockpit.assigneeId`) before anyone can act on it.",
-			);
-			return;
-		}
-		if (!action.actorId || !reviewers.includes(action.actorId)) {
-			this.logger.event("verification_action_refused", {
-				clientIssueId,
-				actorId: action.actorId,
-				actorName: action.actorName,
-				intent: intent.kind,
-			});
-			await reply("Only a configured reviewer can act on this mirror.");
-			return;
+		// PON-208 guarded delivery; PON-211 widened that to EVERY action,
+		// which was too far. Harold's ruling: a colleague talking to the agent
+		// about work in progress is help, not a threat — what needs guarding
+		// is anything the CLIENT experiences.
+		//
+		//   approve / reject   release work to a client, irreversible here
+		//   ask client         the one action that reaches them
+		//   everything else    any member of the cockpit workspace
+		//
+		// Stated cost, accepted: any member can spend the client's model
+		// credential by talking to the agent. Nothing they can do reaches the
+		// client or ships anything, which is the line that matters.
+		const clientFacing =
+			intent.kind === "approve" ||
+			intent.kind === "reject" ||
+			intent.kind === "ask-client";
+		if (clientFacing) {
+			const reviewers = this.cockpitReviewers();
+			if (reviewers.length === 0) {
+				await reply(
+					"Delivering needs a configured reviewer (`cockpit.reviewers` or `cockpit.assigneeId`) — nobody is declared, so nothing can be released.",
+				);
+				return;
+			}
+			if (!action.actorId || !reviewers.includes(action.actorId)) {
+				this.logger.event("verification_action_refused", {
+					clientIssueId,
+					actorId: action.actorId,
+					actorName: action.actorName,
+					intent: intent.kind,
+				});
+				await reply(
+					"Only a configured reviewer can release work to the client. You can still work on it here — say what you want changed.",
+				);
+				return;
+			}
 		}
 
 		if (intent.kind === "orient") {

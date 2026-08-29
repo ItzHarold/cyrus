@@ -242,3 +242,106 @@ describe("AgentSessionManager - client-quiet stream (PON-179)", () => {
 		expect(all).toContain("Reading README.md now");
 	});
 });
+
+/**
+ * PON-212: quiet meant the narration was DELETED, so the operator lost it
+ * too — a 389-message session left four activities on the client thread and
+ * nothing anywhere else. Quiet must mean quiet on the CLIENT's surface and
+ * loud on the operator's.
+ */
+describe("AgentSessionManager - narration is redirected, not dropped (PON-212)", () => {
+	beforeEach(() => {
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+	});
+
+	const settle = () => new Promise((r) => setTimeout(r, 0));
+
+	it("sends suppressed narration to the operator's thread instead", async () => {
+		const { manager, postActivity } = makeManager(true);
+		const shadow = vi.fn().mockResolvedValue({ activityId: "s-1" });
+		manager.setShadowSink(SESSION_ID, {
+			sink: { postActivity: shadow, createAgentSession: vi.fn() } as never,
+			targetSessionId: "mirror-session-1",
+		});
+
+		await manager.createThoughtActivity(SESSION_ID, "Reading the repo…");
+		await manager.createThoughtActivity(
+			SESSION_ID,
+			"Found the bug in page.tsx",
+		);
+		await manager.createActionActivity(SESSION_ID, "Edit", "src/page.tsx");
+		await settle();
+
+		// The client still gets exactly one generic status and no detail.
+		const clientBodies = postActivity.mock.calls.map((c) =>
+			JSON.stringify(c[1]),
+		);
+		expect(clientBodies).toHaveLength(1);
+		expect(clientBodies[0]).not.toContain("page.tsx");
+
+		// The operator gets everything that was suppressed, addressed to the
+		// mirror's thread.
+		expect(shadow.mock.calls.length).toBeGreaterThanOrEqual(2);
+		expect(shadow.mock.calls.every((c) => c[0] === "mirror-session-1")).toBe(
+			true,
+		);
+		expect(JSON.stringify(shadow.mock.calls)).toContain("page.tsx");
+	});
+
+	it("redirects the STREAMED narration artery too, not just the funnel", async () => {
+		// Two separate suppression sites feed the client surface; fixing one
+		// and not the other would silently lose most of the transcript, since
+		// the streamed path carries the formatter output (tool calls, edits).
+		const { manager } = makeManager(true);
+		const shadow = vi.fn().mockResolvedValue({ activityId: "s-1" });
+		manager.setShadowSink(SESSION_ID, {
+			sink: { postActivity: shadow, createAgentSession: vi.fn() } as never,
+			targetSessionId: "mirror-session-1",
+		});
+		const sync = (
+			manager as unknown as {
+				syncEntryToActivitySink: (
+					entry: Record<string, unknown>,
+					sessionId: string,
+				) => Promise<void>;
+			}
+		).syncEntryToActivitySink.bind(manager);
+
+		// First one becomes the generic status; the rest must be redirected.
+		await sync({ type: "assistant", content: "first" }, SESSION_ID);
+		await sync({ type: "assistant", content: "editing page.tsx" }, SESSION_ID);
+		await sync({ type: "assistant", content: "running the build" }, SESSION_ID);
+		await settle();
+
+		expect(shadow.mock.calls.length).toBeGreaterThanOrEqual(2);
+		expect(JSON.stringify(shadow.mock.calls)).toContain("page.tsx");
+	});
+
+	it("still drops nothing on the client when no operator thread exists", async () => {
+		// A cockpit-less install keeps the old behaviour rather than erroring.
+		const { manager, postActivity } = makeManager(true);
+		await manager.createThoughtActivity(SESSION_ID, "Reading the repo…");
+		await manager.createThoughtActivity(SESSION_ID, "More detail");
+		await settle();
+		expect(postActivity).toHaveBeenCalledTimes(1);
+	});
+
+	it("a failing operator thread never breaks the client session", async () => {
+		const { manager, postActivity } = makeManager(true);
+		manager.setShadowSink(SESSION_ID, {
+			sink: {
+				postActivity: vi.fn().mockRejectedValue(new Error("cockpit down")),
+				createAgentSession: vi.fn(),
+			} as never,
+			targetSessionId: "mirror-session-1",
+		});
+
+		await manager.createThoughtActivity(SESSION_ID, "one");
+		await expect(
+			manager.createThoughtActivity(SESSION_ID, "two"),
+		).resolves.not.toThrow();
+		await settle();
+		expect(postActivity).toHaveBeenCalledTimes(1);
+	});
+});
