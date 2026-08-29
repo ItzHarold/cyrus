@@ -272,3 +272,67 @@ export function stripEmbeddedCredential(url: string): string {
 	if (!remoteUrlHasEmbeddedCredential(url)) return url;
 	return url.replace(/^(https?:\/\/)[^/@\s]+@/i, "$1");
 }
+
+/**
+ * The identity our commits must carry (PON-206).
+ *
+ * A commit authored as anything GitHub cannot link to an account is, to
+ * everything downstream, an unverified commit. Vercel refuses to build such a
+ * pull request — *"GitHub couldn't verify an account for commit …"* — so the
+ * preview link never appears, and the preview link is the deliverable: a
+ * client is promised work they can see running, not a diff.
+ *
+ * The App's own bot user is the correct author: it is a real GitHub account,
+ * it is the account that opened the pull request, and GitHub links commits to
+ * it through the `<id>+<slug>[bot]@users.noreply.github.com` convention.
+ * Resolved from the App rather than hardcoded, because the slug and id differ
+ * per App — the dev and production apps are different accounts.
+ *
+ * Cached per App id: it cannot change for the lifetime of the process.
+ */
+const botIdentityCache = new Map<string, { name: string; email: string }>();
+
+export async function appBotIdentity(
+	config: GitHubAppGitAuthConfig,
+): Promise<{ name: string; email: string }> {
+	const cached = botIdentityCache.get(config.appId);
+	if (cached) return cached;
+
+	const pem = await readFile(config.privateKeyPath, "utf-8");
+	const jwt = createAppJwt(config.appId, pem);
+	const base = config.apiBaseUrl ?? "https://api.github.com";
+	const headers = {
+		Authorization: `Bearer ${jwt}`,
+		Accept: "application/vnd.github+json",
+		"User-Agent": "cyrus-github-app",
+	};
+
+	const appRes = await fetch(`${base}/app`, { headers });
+	if (!appRes.ok) {
+		throw new Error(`Could not read the GitHub App: HTTP ${appRes.status}`);
+	}
+	const slug = ((await appRes.json()) as { slug?: string }).slug;
+	if (!slug) throw new Error("GitHub App response carried no slug");
+
+	const login = `${slug}[bot]`;
+	const userRes = await fetch(`${base}/users/${encodeURIComponent(login)}`, {
+		headers,
+	});
+	if (!userRes.ok) {
+		throw new Error(`Could not read the App bot user: HTTP ${userRes.status}`);
+	}
+	const id = ((await userRes.json()) as { id?: number }).id;
+	if (!id) throw new Error("App bot user response carried no id");
+
+	const identity = {
+		name: login,
+		email: `${id}+${login}@users.noreply.github.com`,
+	};
+	botIdentityCache.set(config.appId, identity);
+	return identity;
+}
+
+/** Test seam: forget the cached identity. */
+export function resetAppBotIdentityCache(): void {
+	botIdentityCache.clear();
+}
