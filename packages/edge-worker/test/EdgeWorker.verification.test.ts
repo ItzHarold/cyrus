@@ -592,7 +592,7 @@ describe("EdgeWorker - verify-before-client-sees (PON-152)", () => {
 			);
 		});
 
-		it("a per-lane assignment routes the in-verification mirror to that tenant's reviewer", async () => {
+		it("a per-lane assignment routes the notification to that tenant's reviewer", async () => {
 			privates(worker).config.cockpit.reviewers = ["approver-user-id"];
 			privates(worker).config.cockpit.assignments = {
 				[GATED_WS]: "lane-reviewer",
@@ -605,12 +605,19 @@ describe("EdgeWorker - verify-before-client-sees (PON-152)", () => {
 			privates(worker).mirrorInVerification(ISSUE_ID);
 			await settleMirror();
 
+			// PON-211: the routing intent is unchanged — this client's reviews
+			// belong to this reviewer — but it now SUBSCRIBES them rather than
+			// assigning them. Assigning made claiming impossible: the stamp
+			// was re-applied on every transition, silently reverting a
+			// reviewer who took the work.
 			expect(mirror.upsert).toHaveBeenCalledWith(
 				expect.objectContaining({ issueId: ISSUE_ID }),
 				GATED_WS,
 				"in-verification",
-				expect.objectContaining({ assigneeId: "lane-reviewer" }),
+				expect.objectContaining({ subscriberIds: ["lane-reviewer"] }),
 			);
+			const detail = mirror.upsert.mock.calls[0][3] as Record<string, unknown>;
+			expect(detail.assigneeId).toBeUndefined();
 		});
 
 		it("approve with notes passes the remainder as the notes text (PON-171)", async () => {

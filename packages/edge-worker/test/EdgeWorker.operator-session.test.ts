@@ -176,8 +176,12 @@ describe("operator session — intent classification", () => {
 		});
 	});
 
-	it("is not an instruction when it is empty", () => {
-		expect(classifyMirrorIntent("   ")).toBeUndefined();
+	it("reads an empty body as picking the work up, not as nothing", () => {
+		// A delegation carries no comment. This used to classify as undefined
+		// and the handler returned in silence — so delegating a mirror to the
+		// agent, the most natural way to take it, did nothing at all.
+		expect(classifyMirrorIntent("   ")).toEqual({ kind: "orient" });
+		expect(classifyMirrorIntent("")).toEqual({ kind: "orient" });
 	});
 });
 
@@ -359,6 +363,68 @@ describe("operator session — the client hears nothing", () => {
 		await p.handleMirrorAction(action("adjust the copy"), CLIENT_ISSUE);
 		// The client's next issue must not queue behind Harold's review.
 		expect(p.laneManager.isActive(MIRROR_SESSION)).toBe(false);
+	});
+});
+
+describe("cockpit workability (PON-211)", () => {
+	beforeEach(() => {
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+	});
+
+	it("answers a bare delegation instead of saying nothing", async () => {
+		// The headline bug: delegating a mirror to the agent — the most
+		// natural way to pick work up — classified as nothing and returned in
+		// silence. No session should start (there is no instruction yet), but
+		// silence is not an acceptable answer to "I'm taking this".
+		const { p, cockpitPosts, resumed } = setup();
+
+		await p.handleMirrorAction(action(""), CLIENT_ISSUE);
+
+		expect(resumed).toHaveLength(0); // no model turn, no cost
+		expect(cockpitPosts).toHaveLength(1);
+		const body = cockpitPosts[0].content.body as string;
+		expect(body).toContain("ACM-13");
+		expect(body).toContain("approve:");
+		expect(body).toContain("ask client:");
+	});
+
+	it("does not send the operator session the client-facing rules", async () => {
+		// These directly contradict the operator block, which asks for file
+		// names and diffs on a thread the client cannot see. Appending both
+		// told the model two opposite things at once.
+		const { p } = setup();
+		const clientRules = p.sessionRuleBlocks(CLIENT_SESSION);
+		expect(clientRules).toContain("client");
+		expect(clientRules.length).toBeGreaterThan(0);
+
+		await p.handleMirrorAction(action("tighten the query"), CLIENT_ISSUE);
+
+		expect(p.sessionRuleBlocks(MIRROR_SESSION)).toBe("");
+	});
+
+	it("records which human drove the turn", async () => {
+		// The multi-reviewer seam: one agent identity serves every mirror, so
+		// Linear attributes every turn to the app. This is the only place the
+		// person is recorded, and it cannot be backfilled later.
+		const { p } = setup();
+		await p.handleMirrorAction(action("carry on"), CLIENT_ISSUE);
+		expect(p.operatorSessions.get(MIRROR_SESSION).reviewerId).toBe(HAROLD);
+	});
+
+	it("does not recompose the mirror when an operator turn ends", async () => {
+		const { p } = setup();
+		await p.handleMirrorAction(action("carry on"), CLIENT_ISSUE);
+		p.cockpitMirror.upsert.mockClear();
+
+		p.handleLaneSessionEnded(MIRROR_SESSION, "result");
+		await p.mirrorComposition;
+
+		// The state did not change — it was in verification before the turn
+		// and still is. Re-rendering the whole description under the reviewer
+		// mid-conversation is churn, not an update.
+		expect(p.cockpitMirror.upsert).not.toHaveBeenCalled();
 	});
 });
 

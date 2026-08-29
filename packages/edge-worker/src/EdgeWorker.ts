@@ -5565,6 +5565,23 @@ ${taskSection}`;
 		);
 	}
 
+	/**
+	 * The rule blocks appended to a session's system prompt (PON-211).
+	 *
+	 * An operator session gets NEITHER of the client-facing blocks. Appending
+	 * them was a straight contradiction: the client-surface block bans
+	 * internal vocabulary, bans "narration diaries" and mandates deliverable
+	 * framing, while the operator block asks for the opposite — name files,
+	 * show diffs, the client register does not apply here. The model was being
+	 * told both at once, on the one thread where the reviewer wants an
+	 * engineer. The needs-info block is wrong here too: it points questions at
+	 * the client, and on this thread they belong to the reviewer.
+	 */
+	private sessionRuleBlocks(sessionId: string | undefined): string {
+		if (this.operatorSessions.isOperatorSession(sessionId)) return "";
+		return buildClientSurfaceRuleBlock() + buildNeedsInfoRuleBlock();
+	}
+
 	/** Gate on for the workspace AND the issue's scope not yet approved. */
 	private scopeGatePendingForIssue(
 		workspaceId: string | undefined,
@@ -6407,17 +6424,21 @@ ${taskSection}`;
 	}
 
 	/**
-	 * The reviewer a tenant's mirrors are assigned to (PON-173): the
-	 * per-lane assignment when declared, else the default reviewer.
+	 * Who to notify about a tenant's mirrors (PON-173, re-pointed by PON-211).
+	 *
+	 * The routing intent is unchanged — a client whose reviews belong to one
+	 * reviewer notifies that reviewer, everyone otherwise. What changed is the
+	 * mechanism: this used to pick an ASSIGNEE, which made the mirror overwrite
+	 * a reviewer's claim on every transition. Subscribers carry the same
+	 * signal (Linear notifies subscribers in the Inbox) and carry no claim.
 	 */
-	private reviewerForWorkspace(
+	private subscribersForWorkspace(
 		tenantWorkspaceId: string | undefined,
-	): string | undefined {
+	): string[] {
 		const cockpit = this.config.cockpit;
-		if (tenantWorkspaceId && cockpit?.assignments?.[tenantWorkspaceId]) {
-			return cockpit.assignments[tenantWorkspaceId];
-		}
-		return this.cockpitReviewers()[0];
+		const routed =
+			tenantWorkspaceId && cockpit?.assignments?.[tenantWorkspaceId];
+		return routed ? [routed] : this.cockpitReviewers();
 	}
 
 	/**
@@ -6477,9 +6498,12 @@ ${taskSection}`;
 			record.workspaceId,
 			"in-verification",
 			{
-				// PON-173: the tenant's own reviewer when assigned, else the
-				// default reviewer.
-				assigneeId: this.reviewerForWorkspace(record.workspaceId),
+				// PON-211: subscribe the reviewers, never assign them. The
+				// assignee field is the claim, and a reviewer's claim must
+				// survive every later transition — which it cannot if the
+				// mirror re-stamps it. Assignment auto-subscribes in Linear,
+				// so a claimed mirror keeps its notifications either way.
+				subscriberIds: this.subscribersForWorkspace(record.workspaceId),
 				note,
 				// The PR links join the persistent operator brief (PON-170) —
 				// unlike `note`, they survive later transitions.
@@ -6803,6 +6827,71 @@ ${taskSection}`;
 	}
 
 	/**
+	 * Someone picked this mirror up with no instruction (PON-211).
+	 *
+	 * The most natural way to take a piece of work in Linear is to delegate it
+	 * to the agent — and that carried no comment, so it classified as nothing
+	 * and we said nothing back. Silence in answer to "I'm taking this" is the
+	 * single thing that made the cockpit feel broken.
+	 *
+	 * So: record the claim (Linear's own delegate field), and answer with what
+	 * this actually is. No model session — there is no work to do yet, and an
+	 * orientation should not cost a turn.
+	 */
+	private async orientOnMirror(
+		action: {
+			organizationId: string;
+			mirrorSessionId: string;
+			actorId?: string;
+			actorName?: string;
+		},
+		clientIssueId: string,
+	): Promise<void> {
+		const reply = async (text: string) => {
+			const tracker = this.getIssueTrackerForWorkspace(action.organizationId);
+			try {
+				await tracker?.createAgentActivity({
+					agentSessionId: action.mirrorSessionId,
+					content: { type: "response", body: text },
+				});
+			} catch (error) {
+				this.logger.error("Failed to orient on mirror thread:", error);
+			}
+		};
+		const record = this.verificationGate.get(clientIssueId);
+		if (!record) {
+			await reply(
+				"Nothing is held for review on this issue yet — there's nothing for me to pick up here.",
+			);
+			return;
+		}
+		const held = this.operatorSessions.forClientIssue(clientIssueId);
+		const session = this.agentSessionManager.getSession(record.sessionId);
+		const branch = session?.workspace?.path
+			? basename(session.workspace.path)
+			: undefined;
+		this.logger.event("operator_oriented", {
+			clientIssueId,
+			issueIdentifier: record.issueIdentifier,
+			actorId: action.actorId,
+		});
+		const lines = [
+			`I've got the first pass on **${record.issueIdentifier ?? "this issue"}** ready for you.`,
+			"",
+			branch ? `Branch \`${branch}\`` : "",
+			record.prUrls.length ? `PR ${record.prUrls.join(" · ")}` : "",
+			held?.operatorHoldsBranch
+				? "\nYou currently hold the branch — say **back to you: <what you changed>** when you want me to pick it up again."
+				: "",
+			"",
+			"Tell me what to change and I'll do it on the same branch and PR — the client sees nothing until you release it. Plain instructions are fine, no keyword needed.",
+			"",
+			"`approve: <notes>` delivers it · `reject: <feedback>` sends it back · `mine` hands me off the branch · `ask client: <question>` is the only thing that reaches them.",
+		];
+		await reply(lines.filter((l) => l !== "").join("\n"));
+	}
+
+	/**
 	 * What the operator needs to work on this themselves (PON-208, R7).
 	 *
 	 * Linear has no copyable-text element — the docs are explicit that a code
@@ -7065,6 +7154,7 @@ ${taskSection}`;
 			cockpitWorkspaceId: action.organizationId,
 			repositoryId: repository.id,
 			startedAt: existing?.startedAt ?? new Date().toISOString(),
+			...(action.actorId ? { reviewerId: action.actorId } : {}),
 			operatorHoldsBranch: false,
 		};
 		// Registered BEFORE the resume: every exemption (quietness, the scope
@@ -7104,6 +7194,10 @@ ${taskSection}`;
 			repositoryId: repository.id,
 			adoptedConversation: adopted,
 			afterOperatorEdits: opts.resumedAfterOperatorEdits,
+			// PON-211: who drove this turn. One agent identity serves every
+			// mirror, so Linear attributes all of it to the app — this is the
+			// only place the human is recorded.
+			reviewerId: action.actorId,
 		});
 		void this.savePersistedState();
 
@@ -7189,7 +7283,6 @@ ${taskSection}`;
 		}
 
 		const intent = classifyMirrorIntent(body);
-		if (!intent) return; // an empty message is not an instruction
 
 		// PON-173: an allowed-reviewer SET — `reviewers` when declared, the
 		// legacy single `assigneeId` otherwise.
@@ -7217,6 +7310,12 @@ ${taskSection}`;
 			return;
 		}
 
+		if (intent.kind === "orient") {
+			// A bare delegation. No model session, no cost — just claim it and
+			// say plainly what this is and what can be said next.
+			await this.orientOnMirror(action, clientIssueId);
+			return;
+		}
 		if (intent.kind === "mine") {
 			const report = await this.setOperatorHoldsBranch(clientIssueId, true);
 			await reply(report);
@@ -7635,6 +7734,18 @@ ${taskSection}`;
 			void this.savePersistedState();
 		}
 		const endedIssueId = this.sessionIssueId(sessionId);
+		// PON-211: an operator turn ending does not change the mirror's state
+		// — it was in verification before the turn and it still is. Recomposing
+		// anyway re-rendered the entire description (two GitHub round trips)
+		// underneath the reviewer while they were mid-conversation. The
+		// conversation-id sync above is the part that matters here.
+		if (operatorLink) {
+			const opWorkspaceId = this.laneManager.workspaceOf(sessionId);
+			if (opWorkspaceId && this.laneManager.isActive(sessionId)) {
+				this.releaseLaneAndContinue(opWorkspaceId, sessionId, reason);
+			}
+			return;
+		}
 		if (endedIssueId && this.verificationGate.isPending(endedIssueId)) {
 			// PON-152: completed work awaiting approval — the mirror shows
 			// in-verification instead of closing. Idempotent with the
@@ -11710,15 +11821,24 @@ ${input.userComment}
 		// inherit the previous invocation's appended system prompt, so a
 		// restart mid-gate would otherwise remove the gate exactly when the
 		// client's answer arrives.
+		// PON-211: an operator session gets the OPERATOR rules INSTEAD of the
+		// client-facing ones, not in addition.
+		//
+		// Appending both was a straight contradiction: the client-surface
+		// block bans internal vocabulary, bans "narration diaries" and
+		// mandates deliverable framing, while the operator block asks for
+		// exactly the opposite — name files, show diffs, the client register
+		// does not apply here. The model was being told both at once, on the
+		// one thread where the reviewer wants it to talk like an engineer.
+		// The needs-info block is wrong here too: it points questions at the
+		// client, and on this thread they belong to the reviewer.
 		const systemPrompt =
 			(this.appendScopeGateIfPending(
 				systemPromptResult?.prompt,
 				resolvedWorkspaceId,
 				fullIssue.id,
 				sessionId,
-			) ?? "") +
-			buildClientSurfaceRuleBlock() +
-			buildNeedsInfoRuleBlock();
+			) ?? "") + this.sessionRuleBlocks(sessionId);
 		const promptType = systemPromptResult?.type;
 
 		// Build allowed and disallowed tools lists

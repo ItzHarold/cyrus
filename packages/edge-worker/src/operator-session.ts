@@ -55,7 +55,16 @@ export type MirrorIntent =
 	| { kind: "mine" }
 	| { kind: "handback"; notes: string }
 	| { kind: "ask-client"; question: string }
-	| { kind: "iterate"; instruction: string };
+	| { kind: "iterate"; instruction: string }
+	/**
+	 * Arrived with no instruction — a bare delegation (PON-211).
+	 *
+	 * This used to be a silent no-op: a delegation carries no comment, so the
+	 * body was empty, and we returned without a word. Delegating to the agent
+	 * is the most natural way to pick a mirror up, and it did nothing at all.
+	 * Now it means "I am taking this" — claim it and say what it is.
+	 */
+	| { kind: "orient" };
 
 const ASK_CLIENT = /^ask[\s-]+client\b[:,-]?\s*([\s\S]*)$/i;
 const HANDBACK = /^back\s+to\s+you\b[:,-]?\s*([\s\S]*)$/i;
@@ -75,9 +84,11 @@ const MINE =
  * feature. An empty body is not work, so it stays a no-op for the caller to
  * refuse.
  */
-export function classifyMirrorIntent(body: string): MirrorIntent | undefined {
+export function classifyMirrorIntent(body: string): MirrorIntent {
 	const text = body.trim();
-	if (!text) return undefined;
+	// A delegation carries no comment. That is not nothing — it is someone
+	// picking the work up.
+	if (!text) return { kind: "orient" };
 
 	const approve = /^approve\b[:,-]?\s*([\s\S]*)$/i.exec(text);
 	if (approve) return { kind: "approve", notes: (approve[1] ?? "").trim() };

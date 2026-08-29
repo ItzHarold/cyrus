@@ -217,6 +217,9 @@ describe("CockpitMirror", () => {
 		const before = calls.length;
 
 		await mirror.upsert(issue, TENANT_WS, "active");
+		// PON-211 resolves this instance's agent handle once per process (it
+		// cannot change without a reinstall) — so the FIRST upsert may add a
+		// read, and every later one adds nothing.
 		expect(calls).toHaveLength(before); // unchanged state, no write
 
 		await mirror.upsert(issue, TENANT_WS, "awaiting-scope-confirm");
@@ -704,9 +707,19 @@ describe("CockpitMirror", () => {
 			makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
 			await mirror.upsert(issue, TENANT_WS, "active");
 			await mirror.resyncOperatorOrdering();
-			const before = calls.length;
+			const before = calls.filter((c) =>
+				c.query.includes("issueUpdate"),
+			).length;
+
 			await mirror.resyncOperatorOrdering();
-			expect(calls.length).toBe(before);
+
+			// The invariant is that a no-op resync does not CHURN Linear.
+			// PON-211 added one read per resync (who has claimed what), which
+			// is not churn — so this counts writes, which is what it was
+			// always protecting.
+			expect(calls.filter((c) => c.query.includes("issueUpdate"))).toHaveLength(
+				before,
+			);
 		});
 
 		it("the note survives serialize/restore", async () => {
