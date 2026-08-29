@@ -293,6 +293,36 @@ describe("operator session — the client hears nothing", () => {
 		expect(worker).toBeDefined();
 	});
 
+	it("does not drag the conversation backwards on a second turn", async () => {
+		// Turn 1 advances the id. If turn 2 re-adopted from the client record
+		// it would silently discard turn 1 — the exact failure the end-of-turn
+		// sync is supposed to prevent, reintroduced whenever that sync did not
+		// land (a runner that died before its end event).
+		const { p, clientSession } = setup();
+		await p.handleMirrorAction(action("first change"), CLIENT_ISSUE);
+		p.agentSessionManager.getSession(MIRROR_SESSION).claudeSessionId =
+			"claude-turn-2";
+		expect(clientSession.claudeSessionId).toBe("claude-abc"); // sync not landed
+
+		await p.handleMirrorAction(action("second change"), CLIENT_ISSUE);
+
+		expect(
+			p.agentSessionManager.getSession(MIRROR_SESSION).claudeSessionId,
+		).toBe("claude-turn-2");
+	});
+
+	it("forgets the operator link when the issue is over", async () => {
+		const { p } = setup();
+		await p.handleMirrorAction(action("keep going"), CLIENT_ISSUE);
+		expect(p.operatorSessions.isOperatorSession(MIRROR_SESSION)).toBe(true);
+
+		p.operatorSessions.releaseForClientIssue(CLIENT_ISSUE);
+
+		// Otherwise the link keeps granting its exemptions — loud, ungated,
+		// unheld — to a session on an issue that has ended.
+		expect(p.operatorSessions.isOperatorSession(MIRROR_SESSION)).toBe(false);
+	});
+
 	it("is loud: an operator session is never client-quiet", async () => {
 		const { p } = setup();
 		await p.handleMirrorAction(action("show me the diff"), CLIENT_ISSUE);

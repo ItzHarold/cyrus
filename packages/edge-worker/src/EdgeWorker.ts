@@ -4098,6 +4098,10 @@ ${taskSection}`;
 		if (this.scopeApprovals.remove(issueId) || needsInfoRemoved) {
 			await this.persistScopeApprovals("issue_terminal");
 		}
+		// Operator sessions (PON-208): same lifecycle. Left behind, the link
+		// would keep granting its exemptions — loud, ungated, unheld — to a
+		// session id on an issue that is over.
+		this.operatorSessions.releaseForClientIssue(issueId);
 
 		// Cockpit (PON-151): a terminal client issue closes its mirror.
 		void this.cockpitMirror.close(issueId, "issue_terminal");
@@ -7039,10 +7043,21 @@ ${taskSection}`;
 
 		// Continuity: same conversation, same worktree. Without this the
 		// operator would be talking to a model that has never seen the work.
-		const adopted = this.agentSessionManager.adoptRunnerSession(
-			record.sessionId,
-			mirrorSessionId,
+		//
+		// Adopt ONCE. By the second turn this session has its own, newer
+		// conversation id, and re-adopting from the client record would drag
+		// it backwards — silently discarding the first turn if the end-of-turn
+		// sync had not landed (a runner that died before its end event, say).
+		// Whoever is further ahead wins, and after the first turn that is us.
+		const alreadyContinuing = Boolean(
+			this.agentSessionManager.getSession(mirrorSessionId)?.claudeSessionId,
 		);
+		const adopted =
+			alreadyContinuing ||
+			this.agentSessionManager.adoptRunnerSession(
+				record.sessionId,
+				mirrorSessionId,
+			);
 		operatorSession =
 			this.agentSessionManager.getSession(mirrorSessionId) ?? operatorSession;
 
