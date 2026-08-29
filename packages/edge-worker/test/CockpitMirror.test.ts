@@ -760,6 +760,30 @@ describe("CockpitMirror", () => {
 		expect(record?.mirrorTeamId).toBe(TEAM_ID);
 	});
 
+	it("forgets a left-behind mirror on close instead of failing forever", async () => {
+		// The close path has the same constraint as the write path: a mirror
+		// in another team cannot take this team's Done state. Without this,
+		// every reconcile retried the same impossible write.
+		makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
+		mirror.restore({
+			[issue.issueId]: {
+				mirrorIssueId: "mirror-in-old-team",
+				tenantWorkspaceId: TENANT_WS,
+				state: "delivered",
+				issueIdentifier: "DVV-12",
+				clientId: "devitaliteit",
+				mirrorTeamId: "team-the-cockpit-used-to-use",
+			},
+		});
+
+		await mirror.close(issue.issueId, "delivered");
+
+		expect(
+			calls.some((c) => (c.variables.id as string) === "mirror-in-old-team"),
+		).toBe(false);
+		expect(mirror.serialize()[issue.issueId]).toBeUndefined();
+	});
+
 	it("updates in place when the mirror is in the team we write to", async () => {
 		makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
 		mirror.restore({

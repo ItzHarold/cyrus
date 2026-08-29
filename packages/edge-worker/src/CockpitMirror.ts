@@ -511,6 +511,20 @@ export class CockpitMirror {
 			const setup = await this.ensureTeamSetup(config);
 			if (!setup?.completedStateId) return;
 
+			// PON-207: a mirror left behind in a previous cockpit team cannot
+			// take this team's Done state. It was closed when the cockpit
+			// moved; forgetting it is the whole job.
+			if (!(await this.mirrorLivesInTeam(existing, config))) {
+				this.mirrors.delete(issueId);
+				this.logger.event("cockpit_mirror_closed", {
+					issueId,
+					issueIdentifier: existing.issueIdentifier,
+					reason: `${reason} (left behind in a previous cockpit team)`,
+				});
+				await this.deps.persist();
+				return;
+			}
+
 			await this.gql(
 				config.linearWorkspaceId,
 				`mutation($id: String!, $input: IssueUpdateInput!) {
