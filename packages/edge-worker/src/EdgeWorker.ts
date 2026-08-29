@@ -5903,6 +5903,12 @@ ${taskSection}`;
 					revisions: record?.revisions ?? 0,
 				});
 				await this.persistScopeApprovals("scope_confirmed");
+				// Draw the line the reviewer needs. Everything the session did
+				// before this was investigation to WRITE the scope — including
+				// its plan, which reads like completed work when it is the only
+				// thing on the thread. Say where consent happened so nobody has
+				// to reconstruct it from timestamps.
+				this.markConsentOnMirror(issueId as string);
 				// Cockpit (PON-151): approved — work resumes. The mirror
 				// becomes the operator brief (PON-170): what the client
 				// approved, when, after how many revisions. The internal
@@ -6674,6 +6680,38 @@ ${taskSection}`;
 		})();
 		this.narrationOpens.set(mirrorIssueId, open);
 		return open;
+	}
+
+	/**
+	 * Post the consent boundary into the mirror's narration thread (PON-216).
+	 *
+	 * Harold read a mirror as showing work done before the client approved.
+	 * Nothing had been: the worktree, the commit and the PR all postdate
+	 * approval. What he saw was the scope session's own PLAN — a task list
+	 * containing "Verify and open the pull request" — redirected to the mirror
+	 * and timestamped before consent.
+	 *
+	 * A reviewer should never have to reconstruct that from timestamps. The
+	 * gate is the client's consent and the SLA start; where it falls has to be
+	 * legible at a glance.
+	 */
+	private markConsentOnMirror(clientIssueId: string): void {
+		const narrationSessionId =
+			this.cockpitMirror.narrationSessionIdFor(clientIssueId);
+		const cockpitWs = this.config.cockpit?.linearWorkspaceId;
+		if (!narrationSessionId || !cockpitWs) return;
+		const tracker = this.issueTrackers.get(cockpitWs);
+		void tracker
+			?.createAgentActivity?.({
+				agentSessionId: narrationSessionId,
+				content: {
+					type: "thought",
+					body: "━━━ **The client approved the scope here.** Everything above is the agent reading the repository to write that scope — including its plan, which is a proposal, not work done. Everything below is the implementation they consented to. ━━━",
+				},
+			})
+			.catch((error: unknown) => {
+				this.logger.debug(`Could not mark consent on mirror: ${String(error)}`);
+			});
 	}
 
 	private attachNarrationShadow(
@@ -11992,6 +12030,18 @@ ${input.userComment}
 		commentTimestamp?: string,
 	): Promise<void> {
 		const log = this.logger.withContext({ sessionId });
+		// PON-212 was only wired at session CREATION, so a resumed session
+		// narrated nowhere — and a restart resumes everything. Live effect on
+		// ACM-19: the mirror showed the scope investigation and NONE of the
+		// implementation that followed approval, which is the half that makes
+		// the other half read as work-before-consent.
+		const resumedIssueId = session.issueId ?? session.issue?.id;
+		if (resumedIssueId) {
+			this.attachNarrationShadow(
+				resumedIssueId,
+				this.cockpitMirror.narrationSessionIdFor(resumedIssueId),
+			);
+		}
 		// Check for existing runner
 		const existingRunner = session.agentRunner;
 

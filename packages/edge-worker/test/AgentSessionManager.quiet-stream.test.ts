@@ -345,3 +345,57 @@ describe("AgentSessionManager - narration is redirected, not dropped (PON-212)",
 		expect(postActivity).toHaveBeenCalledTimes(1);
 	});
 });
+
+/**
+ * PON-216: the shadow was attached at session CREATION only, so a resumed
+ * session narrated nowhere — and a restart resumes everything.
+ *
+ * Live effect on ACM-19: the mirror showed the scope investigation and none
+ * of the implementation that followed approval, which is what made the
+ * pre-consent half read as work already done.
+ */
+describe("AgentSessionManager - the shadow survives a resume (PON-216)", () => {
+	beforeEach(() => {
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+	});
+
+	it("keeps narrating after the sink is re-registered", async () => {
+		const { manager } = makeManager(true);
+		const shadow = vi.fn().mockResolvedValue({ activityId: "s-1" });
+		manager.setShadowSink(SESSION_ID, {
+			sink: { postActivity: shadow, createAgentSession: vi.fn() } as never,
+			targetSessionId: "mirror-1",
+		});
+		await manager.createThoughtActivity(SESSION_ID, "before");
+		await manager.createThoughtActivity(SESSION_ID, "editing page.tsx");
+
+		// A restart drops in-memory state; the resume path re-attaches.
+		manager.setShadowSink(SESSION_ID, undefined);
+		manager.setShadowSink(SESSION_ID, {
+			sink: { postActivity: shadow, createAgentSession: vi.fn() } as never,
+			targetSessionId: "mirror-1",
+		});
+		await manager.createThoughtActivity(SESSION_ID, "after the restart");
+		await new Promise((r) => setTimeout(r, 0));
+
+		expect(JSON.stringify(shadow.mock.calls)).toContain("after the restart");
+	});
+
+	it("stops narrating when the shadow is cleared", async () => {
+		// The failure the fix addresses: no shadow means the work is invisible,
+		// not merely delayed.
+		const { manager } = makeManager(true);
+		const shadow = vi.fn().mockResolvedValue({ activityId: "s-1" });
+		manager.setShadowSink(SESSION_ID, {
+			sink: { postActivity: shadow, createAgentSession: vi.fn() } as never,
+			targetSessionId: "mirror-1",
+		});
+		await manager.createThoughtActivity(SESSION_ID, "first");
+		manager.setShadowSink(SESSION_ID, undefined);
+		await manager.createThoughtActivity(SESSION_ID, "lost work");
+		await new Promise((r) => setTimeout(r, 0));
+
+		expect(JSON.stringify(shadow.mock.calls)).not.toContain("lost work");
+	});
+});
