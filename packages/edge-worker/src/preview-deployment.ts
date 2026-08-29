@@ -20,6 +20,15 @@ export type PreviewState =
 	| "building"
 	| "ready"
 	| "failed"
+	/**
+	 * Deployed and healthy, but behind the host's login wall.
+	 *
+	 * Vercel Authentication is on by default for paid teams, and a protected
+	 * deployment reports `success` exactly like an open one — so without this
+	 * we render a confident link that lands on a login page. The reviewer hits
+	 * it as well as the client, and neither can tell it from a broken build.
+	 */
+	| "protected"
 	/** The repository has no preview deployments at all. */
 	| "none";
 
@@ -128,16 +137,55 @@ export async function fetchPreviewDeployment(
 
 		const state = toPreviewState(latest.state);
 		if (!state) return { state: "building", sha: newest.sha };
+		if (state === "ready" && latest.environment_url) {
+			const reachable = await isReachableWithoutLogin(
+				latest.environment_url,
+				fetchImpl,
+			);
+			return {
+				state: reachable === false ? "protected" : "ready",
+				sha: newest.sha,
+				url: latest.environment_url,
+			};
+		}
 		return {
 			state,
 			sha: newest.sha,
-			...(state === "ready" && latest.environment_url
-				? { url: latest.environment_url }
-				: {}),
 			...(state === "failed"
 				? { logUrl: latest.log_url ?? latest.target_url ?? undefined }
 				: {}),
 		};
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Does this preview open for someone with no account on the host?
+ *
+ * The deployment status cannot answer it — a protected deployment succeeds
+ * exactly like an open one — so the only way to know is to ask the URL. A
+ * redirect to a login endpoint is the signal.
+ *
+ * Returns undefined when we could not tell, which is deliberately different
+ * from `false`: "we did not check" and "your client cannot open this" call for
+ * different words on the mirror.
+ */
+async function isReachableWithoutLogin(
+	url: string,
+	fetchImpl: typeof fetch,
+): Promise<boolean | undefined> {
+	try {
+		const response = await fetchImpl(url, {
+			method: "GET",
+			redirect: "manual",
+			headers: { "User-Agent": "cyrus-agent" },
+		});
+		const location = response.headers?.get?.("location") ?? "";
+		if (/\/sso-api|\/sso\b|vercel\.com\/login/.test(location)) return false;
+		// 401/403 without a redirect is the password-protection shape.
+		if (response.status === 401 || response.status === 403) return false;
+		return true;
 	} catch {
 		return undefined;
 	}
@@ -166,6 +214,8 @@ export function renderPreview(preview: PreviewDeployment | undefined): string {
 			return preview.logUrl
 				? `**Preview:** the build **failed**${at} — ${preview.logUrl}`
 				: `**Preview:** the build **failed**${at}.`;
+		case "protected":
+			return `**Preview:** ${preview.url}${at} — ⚠️ **it asks for a login**, so the client cannot open their own preview. The connected project still has Vercel Authentication on for previews; onboarding asks for it to be off.`;
 		case "none":
 			return "**Preview:** this repository has no preview deployments, so review from the diff.";
 	}
