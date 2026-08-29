@@ -6,6 +6,7 @@ import {
 import { CLIENT_MESSAGES } from "../src/client-messages.js";
 import {
 	containsBypassToken,
+	verifyPreviewAccess,
 	withPreviewBypass,
 } from "../src/preview-deployment.js";
 
@@ -114,5 +115,69 @@ describe("delivery footer — the link is temporary", () => {
 			"https://github.com/acme/app/pull/7",
 		);
 		expect(footer).not.toContain("regenerate");
+	});
+});
+
+/**
+ * Verifying the value at onboarding rather than at the first delivery
+ * (PON-215). One unauthenticated request, while someone is still paying
+ * attention.
+ */
+describe("verifying the bypass value", () => {
+	/** A host that only opens when the right token is present. */
+	const host = (goodToken: string | null) =>
+		vi.fn(async (url: string) => {
+			const ok =
+				goodToken === null ||
+				String(url).includes(`x-vercel-protection-bypass=${goodToken}`);
+			return ok
+				? { ok: true, status: 200, headers: { get: () => null } }
+				: {
+						ok: true,
+						status: 302,
+						headers: {
+							get: (h: string) =>
+								h.toLowerCase() === "location"
+									? "https://vercel.com/sso-api?url=x"
+									: null,
+						},
+					};
+		}) as unknown as typeof fetch;
+
+	it("confirms a value that opens the preview", async () => {
+		expect(
+			await verifyPreviewAccess("https://a.vercel.app", "good", host("good")),
+		).toBe("works");
+	});
+
+	it("catches a value that does not", async () => {
+		expect(
+			await verifyPreviewAccess("https://a.vercel.app", "stale", host("good")),
+		).toBe("supplied-but-fails");
+	});
+
+	it("asks for nothing when the preview already opens", async () => {
+		expect(
+			await verifyPreviewAccess("https://a.vercel.app", undefined, host(null)),
+		).toBe("not-needed");
+	});
+
+	it("reports a missing value only when one is actually needed", async () => {
+		expect(
+			await verifyPreviewAccess(
+				"https://a.vercel.app",
+				undefined,
+				host("good"),
+			),
+		).toBe("missing");
+	});
+
+	it("does not blame the client when the preview is unreachable", async () => {
+		const dead = vi.fn(async () => {
+			throw new Error("network");
+		}) as unknown as typeof fetch;
+		expect(await verifyPreviewAccess("https://a.vercel.app", "x", dead)).toBe(
+			"could-not-check",
+		);
 	});
 });

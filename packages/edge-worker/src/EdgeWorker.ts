@@ -6500,6 +6500,31 @@ ${taskSection}`;
 		);
 	}
 
+	/**
+	 * Which accounts the reviewer can sign in with (PON-215).
+	 *
+	 * Rendered next to the preview link because that is the moment it is
+	 * needed: a reviewer who has to go hunting for a login in an old thread
+	 * reviews by looking rather than by using, which is the difference the
+	 * whole preview exists to make.
+	 */
+	private testAccountLines(workspaceId: string | undefined): string[] {
+		const accounts = workspaceId
+			? this.config.linearWorkspaces?.[workspaceId]?.previewTestAccounts
+			: undefined;
+		if (!accounts?.length) return [];
+		return [
+			"**Sign in as:** " +
+				accounts
+					.map((a) =>
+						a.password
+							? `${a.label} — \`${a.username}\` / \`${a.password}\``
+							: `${a.label} — \`${a.username}\``,
+					)
+					.join(" · "),
+		];
+	}
+
 	private previewBypassTokenFor(
 		workspaceId: string | undefined,
 	): string | undefined {
@@ -6738,7 +6763,13 @@ ${taskSection}`;
 					this.previewBypassTokenFor(workspaceId),
 				);
 			}
-			return [renderPreview(preview), ...files].filter(Boolean).join("\n");
+			return [
+				renderPreview(preview),
+				...this.testAccountLines(workspaceId),
+				...files,
+			]
+				.filter(Boolean)
+				.join("\n");
 		} catch (error) {
 			this.logger.warn(`Could not build the review block: ${String(error)}`);
 			return "";

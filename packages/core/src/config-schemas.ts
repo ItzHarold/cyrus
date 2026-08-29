@@ -362,6 +362,27 @@ export const LinearWorkspaceConfigSchema = z.object({
 	previewDataSeparation: z
 		.enum(["confirmed", "unconfirmed", "reads-production"])
 		.optional(),
+	/**
+	 * Accounts a reviewer can sign into on this client's preview (PON-215).
+	 *
+	 * "Exercisable" is the promise — a reviewer drives the change rather than
+	 * watching it render — and without login details it is not kept. Supplied
+	 * at onboarding, surfaced on the mirror so review starts signed in instead
+	 * of hunting for credentials in an old thread.
+	 *
+	 * Non-production accounts on a non-production database. Never a real
+	 * customer's login, and the password is a credential like any other:
+	 * never logged, never written into a worktree.
+	 */
+	previewTestAccounts: z
+		.array(
+			z.object({
+				label: z.string(),
+				username: z.string(),
+				password: z.string().optional(),
+			}),
+		)
+		.optional(),
 	anthropicAuth: z
 		.discriminatedUnion("mode", [
 			z.object({

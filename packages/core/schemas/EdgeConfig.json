@@ -531,6 +531,25 @@
 						"type": "string",
 						"enum": ["confirmed", "unconfirmed", "reads-production"]
 					},
+					"previewTestAccounts": {
+						"type": "array",
+						"items": {
+							"type": "object",
+							"properties": {
+								"label": {
+									"type": "string"
+								},
+								"username": {
+									"type": "string"
+								},
+								"password": {
+									"type": "string"
+								}
+							},
+							"required": ["label", "username"],
+							"additionalProperties": false
+						}
+					},
 					"anthropicAuth": {
 						"oneOf": [
 							{

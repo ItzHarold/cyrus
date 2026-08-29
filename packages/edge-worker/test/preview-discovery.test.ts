@@ -187,8 +187,7 @@ describe("onboarding readiness", () => {
 	it("blocks when the preview is protected and we have no bypass value", async () => {
 		const gate = assessOnboarding({
 			discovery: await base(),
-			previewProtected: true,
-			hasBypassToken: false,
+			bypass: "missing",
 			dataSeparation: "confirmed",
 		});
 		expect(gate.readiness).toBe("blocked-needs-client-action");
@@ -204,8 +203,7 @@ describe("onboarding readiness", () => {
 		// stops being believed.
 		const gate = assessOnboarding({
 			discovery: await base(),
-			previewProtected: false,
-			hasBypassToken: false,
+			bypass: "not-needed",
 			dataSeparation: "confirmed",
 		});
 		expect(gate.readiness).toBe("ready");
@@ -215,8 +213,7 @@ describe("onboarding readiness", () => {
 	it("treats an unconfirmed database as unmet, not as fine", async () => {
 		const gate = assessOnboarding({
 			discovery: await base(),
-			previewProtected: false,
-			hasBypassToken: false,
+			bypass: "not-needed",
 			dataSeparation: "unconfirmed",
 		});
 		expect(gate.readiness).toBe("blocked-needs-client-action");
@@ -225,8 +222,7 @@ describe("onboarding readiness", () => {
 	it("refuses outright when the preview reads production", async () => {
 		const gate = assessOnboarding({
 			discovery: await base(),
-			previewProtected: false,
-			hasBypassToken: false,
+			bypass: "not-needed",
 			dataSeparation: "reads-production",
 		});
 		expect(gate.blockers.join(" ")).toContain("real customer data");
@@ -239,8 +235,7 @@ describe("onboarding readiness", () => {
 		);
 		const gate = assessOnboarding({
 			discovery,
-			previewProtected: false,
-			hasBypassToken: false,
+			bypass: "not-needed",
 			dataSeparation: "unconfirmed",
 		});
 		expect(gate.readiness).toBe("needs-setup-engagement");
@@ -248,12 +243,47 @@ describe("onboarding readiness", () => {
 		expect(gate.blockers).toHaveLength(1);
 	});
 
+	it("catches a bypass value that does not actually open the preview", async () => {
+		// The failure this prevents: a typo'd or stale value looks done at
+		// onboarding and fails at the first delivery, in front of the client,
+		// on the one link the product is built around.
+		const gate = assessOnboarding({
+			discovery: await base(),
+			bypass: "supplied-but-fails",
+			dataSeparation: "confirmed",
+		});
+		expect(gate.readiness).toBe("blocked-needs-client-action");
+		// And it must not read as if they ignored us — they did the thing.
+		expect(gate.blockers.join(" ")).toContain("Thanks for the access value");
+	});
+
+	it("distinguishes an unreachable preview from a bad value", async () => {
+		const gate = assessOnboarding({
+			discovery: await base(),
+			bypass: "could-not-check",
+			dataSeparation: "confirmed",
+		});
+		expect(gate.blockers.join(" ")).toContain("could not reach");
+	});
+
+	it("blocks when there is no account to sign in with", async () => {
+		// "Exercisable" is the promise. Watching a change render is not
+		// checking that it works.
+		const gate = assessOnboarding({
+			discovery: await base(),
+			bypass: "not-needed",
+			dataSeparation: "confirmed",
+			testAccounts: 0,
+		});
+		expect(gate.readiness).toBe("blocked-needs-client-action");
+		expect(gate.blockers.join(" ")).toContain("cannot use it");
+	});
+
 	it("says plainly that work cannot start, in the client's message", async () => {
 		const discovery = await base();
 		const gate = assessOnboarding({
 			discovery,
-			previewProtected: true,
-			hasBypassToken: false,
+			bypass: "missing",
 			dataSeparation: "unconfirmed",
 		});
 		const message = renderDiscoveryAsk(discovery, "orderly", gate);
