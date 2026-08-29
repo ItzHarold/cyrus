@@ -278,6 +278,49 @@ export function withPreviewBypass(
 }
 
 /**
+ * Whether the client's bypass value actually opens their preview (PON-215).
+ *
+ * The gate used to trust that a supplied value works. It might be a typo, the
+ * wrong project's secret, or one they regenerated between copying and sending
+ * — and we would find out at the first delivery, in front of the client, on
+ * the one link the whole product is built around.
+ *
+ * Checking is one unauthenticated request, so it happens at onboarding while
+ * someone is still paying attention.
+ */
+export type BypassCheck =
+	/** Previews are open; no value is needed and none should be asked for. */
+	| "not-needed"
+	| "works"
+	/** They gave us something and it does not open the preview. */
+	| "supplied-but-fails"
+	| "missing"
+	/** Could not reach the preview at all — not the same as a bad value. */
+	| "could-not-check";
+
+export async function verifyPreviewAccess(
+	previewUrl: string | undefined,
+	token: string | undefined,
+	fetchImpl: typeof fetch = fetch,
+): Promise<BypassCheck> {
+	if (!previewUrl) return "could-not-check";
+
+	const openWithout = await isReachableWithoutLogin(previewUrl, fetchImpl);
+	if (openWithout === undefined) return "could-not-check";
+	// Previews that already open need no value, and asking for one anyway is
+	// how an onboarding message stops being believed.
+	if (openWithout) return "not-needed";
+	if (!token) return "missing";
+
+	const withToken = await isReachableWithoutLogin(
+		withPreviewBypass(previewUrl, token),
+		fetchImpl,
+	);
+	if (withToken === undefined) return "could-not-check";
+	return withToken ? "works" : "supplied-but-fails";
+}
+
+/**
  * Does this text carry a preview bypass token?
  *
  * The content policy blanks URLs before scanning, deliberately — a preview

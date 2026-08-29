@@ -21,6 +21,8 @@
  * in a questionnaire about their own setup from memory.
  */
 
+import type { BypassCheck } from "./preview-deployment.js";
+
 /** Where the app deploys. Determined from config files and the preview host. */
 export type PreviewHost =
 	| "vercel"
@@ -364,12 +366,17 @@ function buildMustAsk(input: {
  */
 export function assessOnboarding(input: {
 	discovery: PreviewDiscovery;
-	/** From an unauthenticated probe of the preview URL. */
-	previewProtected: boolean;
-	/** Whether we hold this client's bypass value. */
-	hasBypassToken: boolean;
+	/**
+	 * The RESULT of trying to open the preview, not a claim that a value
+	 * exists. A supplied value that does not work is worse than none: it
+	 * looks done, and the failure surfaces at the first delivery in front of
+	 * the client.
+	 */
+	bypass: BypassCheck;
 	/** What they told us about the preview database. */
 	dataSeparation: "confirmed" | "unconfirmed" | "reads-production";
+	/** Accounts a reviewer can sign in with on the preview. */
+	testAccounts?: number;
 }): OnboardingGate {
 	const blockers: string[] = [];
 
@@ -382,10 +389,26 @@ export function assessOnboarding(input: {
 		};
 	}
 
-	if (input.previewProtected && !input.hasBypassToken) {
-		blockers.push(
-			"Your previews are behind your hosting provider's login, so we cannot open them either — which means we cannot review the work we do for you. In Vercel: Project → Settings → Deployment Protection → Protection Bypass for Automation → generate, and send us the value. Your previews stay private to everyone else.",
-		);
+	switch (input.bypass) {
+		case "missing":
+			blockers.push(
+				"Your previews are behind your hosting provider's login, so we cannot open them either — which means we cannot review the work we do for you. In Vercel: Project → Settings → Deployment Protection → Protection Bypass for Automation → generate, and send us the value. Your previews stay private to everyone else.",
+			);
+			break;
+		case "supplied-but-fails":
+			// Said differently on purpose: they have DONE the thing, so the
+			// message must not read as if they ignored us.
+			blockers.push(
+				"Thanks for the access value — we tried it and your preview still asks us to sign in. Usually that means it was regenerated after you copied it, or it came from a different project. Could you generate a fresh one and send that?",
+			);
+			break;
+		case "could-not-check":
+			blockers.push(
+				"We could not reach your preview to check whether we can open it. Worth a look on your side — if the preview is up and we still cannot see it, tell us and we will dig in.",
+			);
+			break;
+		default:
+			break;
 	}
 
 	if (input.dataSeparation === "reads-production") {
@@ -395,6 +418,14 @@ export function assessOnboarding(input: {
 	} else if (input.dataSeparation === "unconfirmed") {
 		blockers.push(
 			"We still need to know whether your preview uses a different database from your live site. If you are not sure: open your preview and your live site side by side — does the preview show the same customers and orders?",
+		);
+	}
+
+	// "Exercisable" is the promise: a reviewer has to be able to sign in and
+	// drive the change, not watch it render. Without accounts that is not kept.
+	if (input.testAccounts !== undefined && input.testAccounts === 0) {
+		blockers.push(
+			"We need one or two accounts we can sign into on the preview — one per role that matters. Without them we can see your change but cannot use it, which is not the same as checking it works.",
 		);
 	}
 
