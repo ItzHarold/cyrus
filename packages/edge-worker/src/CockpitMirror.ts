@@ -1205,6 +1205,36 @@ export class CockpitMirror {
 	 * surface (the working thread, its links); mirror state is still never a
 	 * source of truth about the work.
 	 */
+	/**
+	 * An agent session that already exists on a mirror issue (PON-212).
+	 *
+	 * Creating a mirror issue as the app yields an agent session on its own —
+	 * the issue's `createdAt` and the session's are identical — so calling
+	 * `createAgentSession` afterwards produced a SECOND thread, and the
+	 * reviewer got a mirror showing two where the narration only went to one.
+	 * Adopt what is already there; create only when there is genuinely nothing.
+	 */
+	async existingSessionOnMirror(
+		mirrorIssueId: string,
+	): Promise<string | undefined> {
+		const config = this.guardedConfig();
+		if (!config) return undefined;
+		try {
+			const data = await this.gql<{
+				issue: { agentSessions: { nodes: Array<{ id: string }> } } | null;
+			}>(
+				config.linearWorkspaceId,
+				`query($id: String!) {
+					issue(id: $id) { agentSessions(first: 5) { nodes { id } } }
+				}`,
+				{ id: mirrorIssueId },
+			);
+			return data?.issue?.agentSessions?.nodes?.[0]?.id;
+		} catch {
+			return undefined;
+		}
+	}
+
 	/** The mirror's narration thread for a client issue (PON-212), if open. */
 	narrationSessionIdFor(clientIssueId: string): string | undefined {
 		return this.mirrors.get(clientIssueId)?.narrationSessionId;
