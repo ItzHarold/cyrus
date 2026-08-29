@@ -86,6 +86,47 @@ export interface SerializableEdgeWorkerState {
 	// completing after a restart must still post conversationally, never be
 	// held for verification or close a delegation's mirror.
 	mentionSessionIds?: string[];
+	/**
+	 * Live operator sessions on cockpit mirrors (v4.11, PON-208).
+	 *
+	 * Restored rather than recomputed: the link is the only record that a
+	 * given cockpit session is a working surface rather than a client one,
+	 * and every exemption keys on it. Losing it across a restart would not
+	 * fail loudly — it would quietly make Harold's next turn behave like a
+	 * client session (quiet, gated, and billed to the cockpit's own tenant).
+	 */
+	operatorSessions?: SerializedOperatorSession[];
+}
+
+/**
+ * One live operator session on a cockpit mirror (PON-208).
+ *
+ * The whole point is that the two workspace ids differ: the CLIENT's drives
+ * credentials, git auth and content policy; the COCKPIT's is where the
+ * activities post.
+ */
+export interface SerializedOperatorSession {
+	/** The cockpit-side Linear agent session id — the SURFACE. */
+	mirrorSessionId: string;
+	/** The cockpit mirror issue the operator is working on. */
+	mirrorIssueId: string;
+	/** The client agent session whose conversation this one continues. */
+	clientSessionId: string;
+	/** The client issue — the SUBJECT of the work. */
+	clientIssueId: string;
+	clientIssueIdentifier?: string;
+	/** Client workspace: credentials, git auth, content policy, lanes. */
+	clientWorkspaceId: string;
+	/** Cockpit workspace: where every activity from this session lands. */
+	cockpitWorkspaceId: string;
+	/** Repository the work happens in (the client's). */
+	repositoryId: string;
+	startedAt: string;
+	/**
+	 * True while the OPERATOR holds the branch ("mine"): no session runs and
+	 * the agent must not touch the working tree until a handback.
+	 */
+	operatorHoldsBranch?: boolean;
 }
 
 /**

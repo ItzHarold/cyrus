@@ -313,6 +313,78 @@ export class AgentSessionManager extends EventEmitter {
 	}
 
 	/**
+	 * Continue an existing conversation under a NEW agent session (PON-208).
+	 *
+	 * A new Linear agent session normally means a new model conversation:
+	 * `createCyrusAgentSession` mints a bare record, resume keys on
+	 * `claudeSessionId`, and nothing copies that value between sessions. That
+	 * is right for a re-delegation — and wrong for the cockpit mirror, where
+	 * the whole point is that Harold picks up the conversation the client's
+	 * session left off, in the same worktree, on the same branch and PR.
+	 *
+	 * Copies the runner session ids AND the workspace: the workspace is what
+	 * makes it the same checkout, and a resumed conversation pointed at a
+	 * different directory is worse than a fresh one.
+	 *
+	 * Returns false when there is nothing to adopt — the caller must then
+	 * start a fresh conversation rather than silently pretending continuity.
+	 */
+	adoptRunnerSession(fromSessionId: string, toSessionId: string): boolean {
+		const from = this.sessions.get(fromSessionId);
+		const to = this.sessions.get(toSessionId);
+		if (!from || !to) return false;
+		const hasConversation =
+			from.claudeSessionId ??
+			from.geminiSessionId ??
+			from.codexSessionId ??
+			from.cursorSessionId;
+		if (!hasConversation || !from.workspace?.path) return false;
+
+		to.claudeSessionId = from.claudeSessionId;
+		to.geminiSessionId = from.geminiSessionId;
+		to.codexSessionId = from.codexSessionId;
+		to.cursorSessionId = from.cursorSessionId;
+		to.workspace = from.workspace;
+		to.repositories = from.repositories;
+		to.updatedAt = Date.now();
+		this.logger.info(
+			`Adopted conversation from ${fromSessionId} into ${toSessionId} at ${from.workspace.path}`,
+		);
+		return true;
+	}
+
+	/**
+	 * Mirror the runner session ids back onto another session record.
+	 *
+	 * The SDK can hand back a new session id on each turn, so after an
+	 * operator turn the mirror record moves on and the client record does
+	 * not. Left alone the two fork: the client's next resume — a needs-info
+	 * answer, say — would continue a conversation that never saw the
+	 * operator's work, and neither side would report an error.
+	 */
+	syncRunnerSessionTo(fromSessionId: string, toSessionId: string): void {
+		const from = this.sessions.get(fromSessionId);
+		const to = this.sessions.get(toSessionId);
+		if (!from || !to) return;
+		if (
+			to.claudeSessionId === from.claudeSessionId &&
+			to.geminiSessionId === from.geminiSessionId &&
+			to.codexSessionId === from.codexSessionId &&
+			to.cursorSessionId === from.cursorSessionId
+		) {
+			return;
+		}
+		to.claudeSessionId = from.claudeSessionId;
+		to.geminiSessionId = from.geminiSessionId;
+		to.codexSessionId = from.codexSessionId;
+		to.cursorSessionId = from.cursorSessionId;
+		to.updatedAt = Date.now();
+		this.logger.debug(
+			`Synced conversation id from ${fromSessionId} back to ${toSessionId}`,
+		);
+	}
+
+	/**
 	 * Create an agent session for chat-style platforms (Slack, etc.) that are
 	 * not tied to a specific issue or repository.
 	 *

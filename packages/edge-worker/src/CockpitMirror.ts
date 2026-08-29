@@ -854,6 +854,16 @@ export class CockpitMirror {
 	}
 
 	/**
+	 * The mirror issue standing for a client issue (PON-208) — the forward
+	 * direction of the lookup above. Read only to ADDRESS the operator's own
+	 * surface (the working thread, its links); mirror state is still never a
+	 * source of truth about the work.
+	 */
+	mirrorIssueIdFor(clientIssueId: string): string | undefined {
+		return this.mirrors.get(clientIssueId)?.mirrorIssueId;
+	}
+
+	/**
 	 * Post a comment on a client issue's mirror (PON-152 escalation: the
 	 * assignee is a subscriber, so a comment is the second, louder
 	 * notification). Never throws.
