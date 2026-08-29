@@ -16,9 +16,27 @@ import {
 const REPO = { owner: "acme", repo: "webapp" };
 const SHA = "c097ef8f8e865118663d8cf0a23518ce7680d374";
 
-function githubApi(routes: Record<string, unknown>) {
+function githubApi(
+	routes: Record<string, unknown>,
+	/** How the preview URL itself answers: open, login-walled, or unreachable. */
+	preview: "open" | "protected" | "unreachable" = "open",
+) {
 	return vi.fn(async (url: string) => {
-		const path = String(url).replace("https://api.github.com", "");
+		const raw = String(url);
+		if (!raw.startsWith("https://api.github.com")) {
+			if (preview === "unreachable") throw new Error("network");
+			return {
+				ok: true,
+				status: preview === "protected" ? 302 : 200,
+				headers: {
+					get: (h: string) =>
+						h.toLowerCase() === "location" && preview === "protected"
+							? "https://vercel.com/sso-api?url=x&nonce=y"
+							: null,
+				},
+			};
+		}
+		const path = raw.replace("https://api.github.com", "");
 		const key = Object.keys(routes).find((k) => path.startsWith(k));
 		if (!key) return { ok: false, status: 404, json: async () => ({}) };
 		return { ok: true, status: 200, json: async () => routes[key] };
@@ -58,6 +76,59 @@ describe("preview deployment", () => {
 			sha: SHA,
 			url: "https://webapp-abc.vercel.app",
 		});
+	});
+
+	it("catches a preview the client cannot open (PON-206)", async () => {
+		// Vercel Authentication is on by default for paid teams, and a
+		// protected deployment reports `success` exactly like an open one — so
+		// without probing we render a confident link onto a login page.
+		const result = await fetchPreviewDeployment(
+			"tok",
+			REPO,
+			SHA,
+			githubApi(
+				{
+					"/repos/acme/webapp/deployments?sha=": [deployment],
+					"/repos/acme/webapp/deployments/1/statuses": [
+						{
+							state: "success",
+							environment_url: "https://webapp-abc.vercel.app",
+							created_at: "2026-08-29T15:40:00Z",
+						},
+					],
+				},
+				"protected",
+			),
+		);
+		expect(result?.state).toBe("protected");
+		// The URL is still reported — the operator can open it, and it is the
+		// evidence for the onboarding step that was skipped.
+		expect(result?.url).toBe("https://webapp-abc.vercel.app");
+		expect(renderPreview(result)).toContain("asks for a login");
+	});
+
+	it("does not call a preview protected just because the probe failed", async () => {
+		// "we could not check" and "your client cannot open this" are different
+		// facts, and the second one accuses the client of a misconfiguration.
+		const result = await fetchPreviewDeployment(
+			"tok",
+			REPO,
+			SHA,
+			githubApi(
+				{
+					"/repos/acme/webapp/deployments?sha=": [deployment],
+					"/repos/acme/webapp/deployments/1/statuses": [
+						{
+							state: "success",
+							environment_url: "https://webapp-abc.vercel.app",
+							created_at: "2026-08-29T15:40:00Z",
+						},
+					],
+				},
+				"unreachable",
+			),
+		);
+		expect(result?.state).toBe("ready");
 	});
 
 	it("reports a build in progress rather than a URL that is not up yet", async () => {
