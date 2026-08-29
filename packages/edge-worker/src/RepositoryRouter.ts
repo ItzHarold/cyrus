@@ -8,6 +8,7 @@ import {
 	type RepositoryConfig,
 	type Webhook,
 } from "cyrus-core";
+import { isForeignCockpitMirror } from "./CockpitMirror.js";
 import { CLIENT_MESSAGES } from "./client-messages.js";
 
 /**
@@ -626,6 +627,33 @@ export class RepositoryRouter {
 
 		if (!issue) {
 			this.logger.error("Cannot elicit repository selection without issue");
+			return;
+		}
+
+		// PON-211: never ask about someone else's cockpit mirror.
+		//
+		// Several agents can be installed in one Linear workspace, and a
+		// cockpit team lives in one of them — so every agent there is
+		// mentionable on every mirror, and all but one of them have no idea
+		// what the issue is. The others fell through to here and asked which
+		// repository to use, offering their OWN repositories for a client's
+		// work they cannot see. Observed live: a delegation to the wrong agent
+		// produced two repository-selection prompts on a mirror.
+		//
+		// Recognise it by shape and refuse, loudly, naming who can answer. No
+		// session, no elicitation, no pending selection to be answered later.
+		if (isForeignCockpitMirror(issue.title)) {
+			this.logger.warn(
+				`Refusing ${issue.identifier}: it is another agent's cockpit mirror`,
+			);
+			const tracker = this.deps.getIssueTracker(webhook.organizationId);
+			await tracker?.createAgentActivity?.({
+				agentSessionId,
+				content: {
+					type: "error",
+					body: "This is another agent's cockpit mirror — I can't see the work behind it, so there's nothing here for me to do. The mirror names the agent that can: look for the \"Work this with @…\" line in the description and delegate it to that one instead.",
+				},
+			});
 			return;
 		}
 

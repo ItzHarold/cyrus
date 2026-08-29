@@ -115,6 +115,31 @@ const SETUP_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
 const MIRROR_TITLE_PATTERN =
 	/^\[([A-Z][A-Z0-9]*-\d+)\]\s|·\s([A-Z][A-Z0-9]*-\d+)\s—\s/;
 
+/**
+ * Does this issue look like a cockpit mirror (PON-211)?
+ *
+ * Used by any instance that finds itself holding an issue it cannot route, to
+ * tell "a client issue I have no repository for" apart from "someone else's
+ * derived view that was never addressed to me". The two need opposite
+ * answers: the first is a real question for the operator, the second is a
+ * misdelegation and asking about it is noise.
+ *
+ * Title shape only — deliberately. An instance that is not the cockpit's
+ * owner has no mirror map to consult and no business reading the issue body
+ * of a team it does not serve.
+ */
+/**
+ * States where the mirror is waiting on a REVIEWER rather than on the agent
+ * or the client. Only these queue — "active" is the agent's turn and
+ * "awaiting-scope-confirm" is the client's, and neither is work anyone can
+ * pick up.
+ */
+const WAITING_STATES = new Set(["in-verification", "needs-info"]);
+
+export function isForeignCockpitMirror(title: string | undefined): boolean {
+	return MIRROR_TITLE_PATTERN.test(title ?? "");
+}
+
 export class CockpitMirror {
 	private deps: CockpitMirrorDeps;
 	private logger: ILogger;
@@ -211,8 +236,27 @@ export class CockpitMirror {
 		state: CockpitState,
 		detail?: {
 			position?: number;
-			/** Assign the mirror (in-verification: assignment IS the notification) */
-			assigneeId?: string;
+			/**
+			 * Who to NOTIFY (PON-211). Subscribers, not assignee.
+			 *
+			 * This used to stamp `assigneeId`, which quietly made claiming
+			 * impossible: the stamp was re-applied on every transition, so a
+			 * reviewer who assigned themselves had it reverted at the next
+			 * state change with no error. Linear already separates the two —
+			 * assignee is the human who owns the work, subscribers are who
+			 * hears about it — and "you are automatically subscribed to issues
+			 * assigned to you" means a real claim keeps its notifications.
+			 *
+			 * So the mirror notifies and never claims. Claiming is a human act
+			 * and nothing here undoes it.
+			 */
+			subscriberIds?: string[];
+			/**
+			 * The agent working this mirror right now, or null to clear it.
+			 * Linear's own delegate field: "the assignee remains responsible
+			 * while the agent contributes on their behalf".
+			 */
+			delegateId?: string | null;
 			/** Extra description body (the held summary, PR links) */
 			note?: string;
 			/**
@@ -242,6 +286,7 @@ export class CockpitMirror {
 			// PON-207: who this work is FOR. Resolved per write so a config
 			// hot-reload lands without a restart.
 			const teamKey = teamKeyOf(issue.issueIdentifier);
+			await this.resolveAgentHandle(config.linearWorkspaceId);
 			const client = this.deps.resolveClient(tenantWorkspaceId, teamKey);
 
 			const existing = this.mirrors.get(issue.issueId);
@@ -289,10 +334,17 @@ export class CockpitMirror {
 			// still filters and nothing is lost if the statuses go away.
 			const stateId = setup.stateIds?.[state];
 			const lifecycle = stateId ? { stateId } : {};
-			// The reviewer owns the client's lanes, so their avatar is on
-			// every card of theirs — not only the ones already in review.
-			const assigneeId = detail?.assigneeId ?? client.reviewerId;
-			const assignee = assigneeId ? { assigneeId } : {};
+			// PON-211: the mirror NEVER writes assigneeId. That field is the
+			// reviewer's claim now, and a derived view does not get to
+			// overwrite a human's decision — least of all silently, on an
+			// unrelated state change.
+			const notify = detail?.subscriberIds?.length
+				? { subscriberIds: detail.subscriberIds }
+				: {};
+			const delegate =
+				detail?.delegateId !== undefined
+					? { delegateId: detail.delegateId }
+					: {};
 			// One project per client: the swim lane.
 			const projectId = client.cockpitProjectId ?? config.projectId;
 			const project = projectId ? { projectId } : {};
@@ -352,7 +404,8 @@ export class CockpitMirror {
 							labelIds,
 							...lifecycle,
 							...project,
-							...assignee,
+							...notify,
+							...delegate,
 						},
 					},
 				);
@@ -375,7 +428,8 @@ export class CockpitMirror {
 							description,
 							labelIds,
 							...lifecycle,
-							...assignee,
+							...notify,
+							...delegate,
 						},
 					},
 				);
@@ -456,10 +510,55 @@ export class CockpitMirror {
 					record.sortOrder = rank;
 					changed++;
 				}
+				// PON-211: the order was computed and written as sortOrder, and
+				// then never said out loud. Record each waiting mirror's place
+				// so the description can state it: the client's own queue
+				// position (theirs to set) and the cross-client rank (whose
+				// turn it is). Two numbers because they are two different
+				// facts — collapsing them would misreport both.
+				// Only ask who has claimed what when something could actually be
+				// waiting. An empty or fully-active board asks nobody.
+				const anyWaiting = [...this.mirrors.values()].some((r) =>
+					WAITING_STATES.has(r.state.replace(/ \(#\d+\)$/, "")),
+				);
+				const claimed = anyWaiting
+					? await this.claimedMirrorIds(config.linearWorkspaceId)
+					: new Set<string>();
+				let waitingRank = 0;
+				const perClient = new Map<string, number>();
+				for (const issueId of order) {
+					const record = this.mirrors.get(issueId);
+					if (!record?.mirrorIssueId) continue;
+					const waiting =
+						!claimed.has(record.mirrorIssueId) &&
+						WAITING_STATES.has(record.state.replace(/ \(#\d+\)$/, ""));
+					if (!waiting) {
+						if (record.queueRank !== undefined) changed++;
+						record.queueRank = undefined;
+						record.clientQueuePosition = undefined;
+						continue;
+					}
+					const client = this.deps.resolveClient(
+						record.tenantWorkspaceId,
+						record.teamKey,
+					);
+					const within = (perClient.get(client.id) ?? 0) + 1;
+					perClient.set(client.id, within);
+					waitingRank += 1;
+					if (
+						record.queueRank !== waitingRank ||
+						record.clientQueuePosition !== within
+					) {
+						changed++;
+					}
+					record.queueRank = waitingRank;
+					record.clientQueuePosition = within;
+				}
 				if (changed > 0) {
 					this.logger.event("cockpit_ordering_resynced", {
 						mirrors: order.length,
 						changed,
+						waiting: waitingRank,
 					});
 					await this.deps.persist();
 				}
@@ -846,6 +945,81 @@ export class CockpitMirror {
 	 * the TARGET of a human action taken on a mirror — it never reads mirror
 	 * state as a source of truth.
 	 */
+	/**
+	 * This instance's own agent handle in the cockpit workspace (PON-211).
+	 *
+	 * Resolved once from `viewer` — with an app token, the viewer IS the app
+	 * user. Cached because it cannot change without a reinstall, and left
+	 * undefined on failure so the mirror omits the line rather than printing
+	 * a guess: a wrong handle sends the operator to the wrong agent, which is
+	 * the exact failure this line exists to prevent.
+	 */
+	private agentHandle: string | undefined;
+	/** Resolved once per process — success or failure. */
+	private agentHandleResolved = false;
+
+	private async resolveAgentHandle(workspaceId: string): Promise<void> {
+		if (this.agentHandleResolved) return;
+		// Set BEFORE the await: a token that cannot answer this would
+		// otherwise be re-asked on every single mirror write, forever. The
+		// answer cannot change without a reinstall, and a reinstall restarts
+		// us — so one attempt is the right number.
+		this.agentHandleResolved = true;
+		try {
+			const data = await this.gql<{ viewer: { displayName?: string } }>(
+				workspaceId,
+				`query { viewer { displayName } }`,
+				{},
+			);
+			this.agentHandle = data?.viewer?.displayName || undefined;
+		} catch (error) {
+			this.logger.warn(
+				`[cockpit] could not resolve the agent handle: ${String(error)}`,
+			);
+		}
+	}
+
+	/**
+	 * Which mirrors a reviewer has already claimed (PON-211).
+	 *
+	 * Claimed means "has an assignee" — since PON-211 the mirror never writes
+	 * that field, so anything set there was set by a human taking the work.
+	 * They come out of the queue immediately, not when they finish: next-up
+	 * answers "what should the next free reviewer take", and pointing it at
+	 * something already in someone's hands is how two people end up on one
+	 * issue.
+	 *
+	 * A failure returns empty — the queue then shows a claimed item as
+	 * waiting, which is noisy but honest. Silently treating everything as
+	 * claimed would empty the queue and hide real work.
+	 */
+	private async claimedMirrorIds(workspaceId: string): Promise<Set<string>> {
+		const claimed = new Set<string>();
+		try {
+			const config = this.deps.getConfig();
+			if (!config) return claimed;
+			const data = await this.gql<{
+				issues: {
+					nodes: Array<{ id: string; assignee: { id: string } | null }>;
+				};
+			}>(
+				workspaceId,
+				`query($teamId: ID!) {
+					issues(filter: { team: { id: { eq: $teamId } } }, first: 250) {
+						nodes { id assignee { id } }
+					}
+				}`,
+				{ teamId: config.teamId },
+			);
+			for (const node of data.issues.nodes) {
+				if (node.assignee) claimed.add(node.id);
+			}
+		} catch (error) {
+			this.logger.warn(`[cockpit] could not read claims: ${String(error)}`);
+		}
+		return claimed;
+	}
+
 	clientIssueIdFor(mirrorIssueId: string): string | undefined {
 		for (const [clientIssueId, record] of this.mirrors) {
 			if (record.mirrorIssueId === mirrorIssueId) return clientIssueId;
@@ -1051,8 +1225,25 @@ export class CockpitMirror {
 			? `[${record.issueIdentifier ?? "client issue"}](${record.issueUrl})`
 			: (record.issueIdentifier ?? "the client issue");
 		return [
-			`Derived view of ${clientLink} in **${tenant}**. The client's issue is authoritative — state and links only, discussion happens there.`,
+			`Derived view of ${clientLink} in **${tenant}**. The client's issue is authoritative.`,
+			// PON-211: name the agent, on the mirror, in the operator's own
+			// words. Several agents can be installed in one workspace, so a
+			// mirror is mentionable by all of them and only one of them can
+			// answer — the others have no idea what this issue is and will ask
+			// which repository to use. Rendered from THIS instance's own app
+			// user, so it cannot drift from whoever is actually serving it.
+			this.agentHandle
+				? `**Work this with @${this.agentHandle}** — delegate it, or just say what you want changed. Other agents installed in this workspace cannot see this work.`
+				: "",
 			"",
+			// PON-211: say the place out loud. The ordering has been computed
+			// and written as sortOrder since PON-173, which decides row order
+			// in a view — useful, and invisible on the issue itself.
+			record.queueRank === 1
+				? "▶ **Next up** — this is the one to pick up. Assign yourself to claim it."
+				: record.queueRank
+					? `**#${record.queueRank} in the review queue**${record.clientQueuePosition ? ` · #${record.clientQueuePosition} for this client` : ""} — assign yourself to claim it.`
+					: "",
 			`**State:** ${record.state} · ${new Date().toISOString()}`,
 			`**Client issue:** ${record.issueUrl ?? "(no url recorded)"} — session thread, PR and preview links live there.`,
 			// The operator brief (PON-170): what the client approved, when,

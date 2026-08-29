@@ -123,6 +123,17 @@ export interface SerializedOperatorSession {
 	repositoryId: string;
 	startedAt: string;
 	/**
+	 * Which human is driving this session (PON-211).
+	 *
+	 * The multi-reviewer seam, put in before there is a second reviewer. One
+	 * agent identity serves every mirror today, so every turn reads as the
+	 * app in Linear and nothing records who asked for it. That is fine right
+	 * up until a second reviewer exists, at which point the history is
+	 * already written and unattributable — this is the one part that cannot
+	 * be backfilled, so it goes in now even though nothing reads it yet.
+	 */
+	reviewerId?: string;
+	/**
 	 * True while the OPERATOR holds the branch ("mine"): no session runs and
 	 * the agent must not touch the working tree until a handback.
 	 */
@@ -175,6 +186,14 @@ export interface SerializedCockpitMirror {
 	clientId?: string;
 	/** Team key within the client's workspace, e.g. "ACM". */
 	teamKey?: string;
+	/**
+	 * Place in the cross-client queue of work waiting on a reviewer
+	 * (PON-211), 1-based. Undefined when this mirror is not waiting — it is
+	 * claimed, or the agent's/client's turn. Rank 1 is next up.
+	 */
+	queueRank?: number;
+	/** Place within this client's own queue, 1-based (PON-211). */
+	clientQueuePosition?: number;
 	/**
 	 * The cockpit team the mirror issue actually lives in (PON-207).
 	 *
