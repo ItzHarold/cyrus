@@ -126,6 +126,67 @@ describe("EdgeWorker - cockpit mirror wiring (PON-151)", () => {
 		expect(() => p.markConsentOnMirror("issue-with-no-mirror")).not.toThrow();
 	});
 
+	/**
+	 * PON-216: a plan on the mirror before consent is labelled a proposal. The
+	 * predicate deciding that is the interesting part — it has two ways to be
+	 * wrong in opposite directions.
+	 */
+	describe("the pre-consent predicate", () => {
+		const COCKPIT_WS = "cockpit-workspace-id";
+
+		/** Attach the shadow and hand back the predicate it was given. */
+		function predicateAfterAttach(gate: boolean): () => boolean {
+			registerSession(worker);
+			privates(worker).config.linearWorkspaces = {
+				[GATED_WS]: { linearToken: "t1", scopeConfirmGate: gate },
+			};
+			privates(worker).config.cockpit = {
+				linearWorkspaceId: COCKPIT_WS,
+				workspaceName: "Ponte Digital",
+				teamId: "team-1",
+			};
+			privates(worker).activitySinks.set(COCKPIT_WS, {
+				postActivity: vi.fn(),
+				createAgentSession: vi.fn(),
+			});
+			privates(worker).sessionRepositories.set(SESSION_ID, "repo-1");
+			privates(worker).repositories.set("repo-1", {
+				id: "repo-1",
+				linearWorkspaceId: GATED_WS,
+			});
+			privates(worker).attachNarrationShadow(ISSUE_ID, "mirror-session-1");
+			return privates(worker).agentSessionManager.shadowSinks.get(SESSION_ID)
+				?.preConsent;
+		}
+
+		it("labels while the gate is open and the client has not approved", () => {
+			expect(predicateAfterAttach(true)()).toBe(true);
+		});
+
+		it("does not depend on the approval record existing yet", () => {
+			// The plan that caused this rendered at 19:16 and the approval
+			// record was created at 19:17, when the elicitation posted. Keying
+			// on the record would have missed the exact activity Harold
+			// misread.
+			expect(privates(worker).scopeApprovals.get(ISSUE_ID)).toBeUndefined();
+			expect(predicateAfterAttach(true)()).toBe(true);
+		});
+
+		it("stops labelling once the scope is approved", () => {
+			const predicate = predicateAfterAttach(true);
+			privates(worker).scopeApprovals.recordProposed(ISSUE_ID, {});
+			privates(worker).scopeApprovals.recordApproved(ISSUE_ID);
+			expect(predicate()).toBe(false);
+		});
+
+		it("never labels on a workspace with no gate at all", () => {
+			// An ungated workspace has no consent to be waiting for, so
+			// "not yet approved" would be permanently wrong there — and a
+			// permanent label is noise that teaches a reviewer to skip labels.
+			expect(predicateAfterAttach(false)()).toBe(false);
+		});
+	});
+
 	it("scope approval mirrors as active", async () => {
 		registerSession(worker);
 		privates(worker).scopeApprovals.recordProposed(ISSUE_ID, {

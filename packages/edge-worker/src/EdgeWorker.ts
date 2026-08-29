@@ -6743,7 +6743,19 @@ ${taskSection}`;
 				targetSessionId: narrationSessionId,
 				// A closure, not a value: the shadow is attached once and the
 				// gate opens later in the same session (PON-216).
-				preConsent: () => !this.scopeApprovals.isApproved(clientIssueId),
+				//
+				// The full gate predicate, not just "unapproved". An ungated
+				// workspace has no consent to be waiting for, so labelling its
+				// plans "not yet approved" would be permanently wrong there —
+				// and it must not depend on the approval RECORD existing, since
+				// on ACM-19 the plan rendered at 19:16 and the record was only
+				// created at 19:17, when the elicitation posted. The plan that
+				// caused this predates its own gate.
+				preConsent: () =>
+					this.scopeGatePendingForIssue(
+						this.resolveWorkspaceIdForSession(session.id),
+						clientIssueId,
+					),
 			});
 		}
 	}
