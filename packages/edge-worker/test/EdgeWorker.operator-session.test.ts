@@ -439,6 +439,46 @@ describe("cockpit workability (PON-211)", () => {
 		expect([a, b, c]).toEqual(["narr-1", "narr-1", "narr-1"]);
 	});
 
+	it("adopts the thread Linear opened with the mirror instead of adding one", async () => {
+		// Creating the mirror issue as the app yields an agent session on its
+		// own — issue.createdAt and session.createdAt are identical — so
+		// creating another gave the reviewer two threads with the narration
+		// only in one.
+		const { p } = setup();
+		const createAgentSession = vi.fn().mockResolvedValue("ours-1");
+		p.activitySinks.set(COCKPIT_WS, {
+			postActivity: vi.fn(),
+			createAgentSession,
+		});
+		p.cockpitMirror.narrationSessionIdFor = vi.fn().mockReturnValue(undefined);
+		p.cockpitMirror.existingSessionOnMirror = vi
+			.fn()
+			.mockResolvedValue("linears-own-1");
+
+		const got = await p.openNarrationSessionOnce(MIRROR_ISSUE, CLIENT_ISSUE);
+
+		expect(got).toBe("linears-own-1");
+		expect(createAgentSession).not.toHaveBeenCalled();
+	});
+
+	it("creates a thread when the mirror genuinely has none", async () => {
+		const { p } = setup();
+		const createAgentSession = vi.fn().mockResolvedValue("ours-1");
+		p.activitySinks.set(COCKPIT_WS, {
+			postActivity: vi.fn(),
+			createAgentSession,
+		});
+		p.cockpitMirror.narrationSessionIdFor = vi.fn().mockReturnValue(undefined);
+		p.cockpitMirror.existingSessionOnMirror = vi
+			.fn()
+			.mockResolvedValue(undefined);
+
+		const got = await p.openNarrationSessionOnce(MIRROR_ISSUE, CLIENT_ISSUE);
+
+		expect(got).toBe("ours-1");
+		expect(createAgentSession).toHaveBeenCalledTimes(1);
+	});
+
 	it("never opens a second thread for a mirror that already has one", async () => {
 		const { p } = setup();
 		const createAgentSession = vi.fn();

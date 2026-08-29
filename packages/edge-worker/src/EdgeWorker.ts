@@ -6593,6 +6593,15 @@ ${taskSection}`;
 
 		const open = (async () => {
 			try {
+				// Linear opens a thread on the mirror as it is created, so ask
+				// before making one — otherwise the reviewer sees two threads
+				// and the narration only lands in the second.
+				const adopted =
+					await this.cockpitMirror.existingSessionOnMirror(mirrorIssueId);
+				if (adopted) {
+					this.attachNarrationShadow(clientIssueId, adopted);
+					return adopted;
+				}
 				const sessionId = await sink.createAgentSession(mirrorIssueId);
 				this.attachNarrationShadow(clientIssueId, sessionId);
 				return sessionId;
