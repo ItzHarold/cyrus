@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatMirrorAge } from "../src/CockpitMirror.js";
+import { bareCockpitState, formatMirrorAge } from "../src/CockpitMirror.js";
 
 /**
  * The mirror's own clock (PON-221).
@@ -44,5 +44,30 @@ describe("formatMirrorAge", () => {
 		// Clock skew between the box and Linear must read as new, never as
 		// work that has been waiting minus five minutes.
 		expect(at("2026-08-30T12:05:00.000Z")).toBe("just now");
+	});
+});
+
+/**
+ * The age must survive everything that rewrites a mirror without the work
+ * having moved (PON-221, adversarial review).
+ */
+describe("bareCockpitState", () => {
+	it("strips a queue position so a re-rank is not a transition", () => {
+		expect(bareCockpitState("queued (#3)")).toBe("queued");
+		expect(bareCockpitState("queued (#12)")).toBe("queued");
+		// setOperatorNote re-upserts on the already-bare state; both sides of
+		// the comparison have to land on the same string.
+		expect(bareCockpitState("queued")).toBe("queued");
+	});
+
+	it("leaves a real transition distinguishable", () => {
+		expect(bareCockpitState("queued (#1)")).not.toBe(
+			bareCockpitState("active"),
+		);
+		expect(bareCockpitState("in-verification")).toBe("in-verification");
+	});
+
+	it("tolerates an absent state", () => {
+		expect(bareCockpitState(undefined)).toBe("");
 	});
 });

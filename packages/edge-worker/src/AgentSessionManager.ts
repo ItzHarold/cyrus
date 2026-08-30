@@ -320,20 +320,52 @@ export class AgentSessionManager extends EventEmitter {
 	 */
 	async releaseHeldLinks(sessionId: string): Promise<void> {
 		const held = this.heldLinks.get(sessionId);
-		this.heldLinks.delete(sessionId);
-		if (!this.updateSessionSurface || !held?.length) return;
+		if (!held?.length) return;
+		if (!this.updateSessionSurface) return;
 
+		// Cleared only once the surface write actually lands. Deleting first
+		// would turn a transient Linear failure into permanent loss on the
+		// one path that cannot be retried by the agent — the operator would
+		// have to notice the absence of a button to know anything was wrong.
 		try {
-			await this.updateSessionSurface(sessionId, { addedExternalUrls: held });
+			const ok = await this.updateSessionSurface(sessionId, {
+				addedExternalUrls: held,
+			});
+			if (!ok) {
+				this.sessionLog(sessionId).warn(
+					`[event:client_links_release_failed] ${JSON.stringify({
+						sessionId,
+						labels: held.map((l) => l.label),
+					})}`,
+				);
+				return;
+			}
+			this.heldLinks.delete(sessionId);
 			this.sessionLog(sessionId).info(
 				`[event:client_links_released] ${JSON.stringify({
 					sessionId,
 					labels: held.map((l) => l.label),
 				})}`,
 			);
-		} catch {
-			// See above: the client already has the work.
+		} catch (error) {
+			this.sessionLog(sessionId).warn(
+				`[event:client_links_release_failed] ${JSON.stringify({
+					sessionId,
+					error: String(error).slice(0, 140),
+				})}`,
+			);
 		}
+	}
+
+	/** Held links, for persistence across a restart (PON-221). */
+	serializeHeldLinks(): Record<string, Array<{ url: string; label: string }>> {
+		return Object.fromEntries(this.heldLinks);
+	}
+
+	restoreHeldLinks(
+		held: Record<string, Array<{ url: string; label: string }>> | undefined,
+	): void {
+		this.heldLinks = new Map(Object.entries(held ?? {}));
 	}
 
 	/**

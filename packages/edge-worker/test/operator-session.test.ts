@@ -10,13 +10,15 @@ import { classifyMirrorIntent } from "../src/operator-session.js";
  * front of a client.
  */
 describe("classifyMirrorIntent — asking the client", () => {
+	// The question is forwarded VERBATIM, so it must already be written the
+	// way it should arrive: after a separator, or ending in a question mark.
 	const asks = [
 		"ask client: which date format do they want?",
-		"ask the client whether they want the totals rounded",
-		"can you ask the client for the logo files",
+		"ask the client, which column order do you want?",
+		"can you ask the client: could you send us the logo files?",
 		"Could you ask the client if Tuesday works?",
-		"check with the client on the column order",
-		"please ask the client for a decision on pricing",
+		"check with the client: is the current pricing final?",
+		"please ask the client — sorry, ask client: what should the totals round to?",
 	];
 	for (const body of asks) {
 		it(`treats "${body.slice(0, 42)}…" as an ask`, () => {
@@ -51,4 +53,45 @@ describe("classifyMirrorIntent — asking the client", () => {
 			expect(classifyMirrorIntent(body).kind).not.toBe("ask-client");
 		});
 	}
+});
+
+/**
+ * A plain-language ask that is NOT a usable question (PON-221, adversarial
+ * review).
+ *
+ * The reviewer speaks about the client in the third person while the message
+ * is addressed to them, so forwarding his phrasing verbatim sends a fragment
+ * in the wrong person. These are recognised as asks — so he gets the syntax
+ * back rather than a model turn — but nothing reaches the client.
+ */
+describe("classifyMirrorIntent — an ask that isn't a question yet", () => {
+	const unclear = [
+		["can you ask the client for the logo files", "for the logo files"],
+		["check with the client on the column order", "on the column order"],
+		[
+			"ask the client whether they want the totals rounded",
+			"whether they want the totals rounded",
+		],
+		[
+			"please ask the client for a decision on pricing",
+			"for a decision on pricing",
+		],
+		["ask client", ""],
+		["confirm with the client", ""],
+	] as const;
+
+	for (const [body, draft] of unclear) {
+		it(`does not forward "${body.slice(0, 40)}…"`, () => {
+			const intent = classifyMirrorIntent(body);
+			expect(intent.kind).toBe("ask-client-unclear");
+			expect((intent as { draft: string }).draft).toBe(draft);
+		});
+	}
+
+	it("still forwards a question the reviewer actually wrote", () => {
+		const intent = classifyMirrorIntent(
+			"ask the client for the logo files — sorry: could you send us the logo files?",
+		);
+		expect(intent.kind).toBe("ask-client");
+	});
 });

@@ -145,3 +145,61 @@ describe("work-in-progress links on a held session", () => {
 		expect(urlsFrom(updateSessionSurface)).toEqual([]);
 	});
 });
+
+/**
+ * Surviving a restart, and surviving a failed release (PON-221, adversarial
+ * review).
+ *
+ * The record that RELEASES held links is persisted, so the links must be too:
+ * a deploy between "the agent opened the PR" and "Harold approved" would
+ * otherwise drop them silently — the client gets a summary with nothing to
+ * click and nothing anywhere says why.
+ */
+describe("held links survive a restart", () => {
+	it("serializes and restores what is held", async () => {
+		const first = makeManager({ held: true });
+		await sendAssistantText(
+			first.manager,
+			`Opened ${PR_URL} and the preview is at ${PREVIEW_URL}`,
+		);
+
+		const persisted = first.manager.serializeHeldLinks();
+		expect(persisted[SESSION_ID]?.map((l) => l.url)).toEqual([
+			PR_URL,
+			PREVIEW_URL,
+		]);
+
+		// A new process comes up and the approval lands there.
+		const second = makeManager({ held: true });
+		second.manager.restoreHeldLinks(persisted);
+		await second.manager.releaseHeldLinks(SESSION_ID);
+
+		expect(urlsFrom(second.updateSessionSurface)).toEqual([
+			PR_URL,
+			PREVIEW_URL,
+		]);
+	});
+
+	it("restores cleanly from a state file written before this existed", () => {
+		const { manager } = makeManager({ held: true });
+		expect(() => manager.restoreHeldLinks(undefined)).not.toThrow();
+		expect(manager.serializeHeldLinks()).toEqual({});
+	});
+
+	it("keeps the links when the release write fails, so approving again retries", async () => {
+		const { manager, updateSessionSurface } = makeManager({ held: true });
+		await sendAssistantText(manager, `Opened ${PR_URL}`);
+
+		// Linear refuses once.
+		updateSessionSurface.mockResolvedValueOnce(false);
+		await manager.releaseHeldLinks(SESSION_ID);
+		expect(manager.serializeHeldLinks()[SESSION_ID]?.length).toBe(1);
+
+		// The operator approves again; this time it lands. Both attempts sent
+		// the same link — the first was refused, which is the point.
+		await manager.releaseHeldLinks(SESSION_ID);
+		expect(updateSessionSurface).toHaveBeenCalledTimes(2);
+		expect(urlsFrom(updateSessionSurface)).toEqual([PR_URL, PR_URL]);
+		expect(manager.serializeHeldLinks()[SESSION_ID]).toBeUndefined();
+	});
+});

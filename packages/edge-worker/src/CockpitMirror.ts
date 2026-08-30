@@ -206,6 +206,19 @@ const DESCRIPTION_VERSION = 4;
  * render a diff; minutes are the finest granularity anyone reviewing work
  * acts on. Reads as an age — "held 2h 5m" — never as a timestamp.
  */
+/**
+ * A stored state without its queue-position suffix (`queued (#3)` → `queued`).
+ *
+ * The position is a rendering detail that changes every time the work ahead
+ * drains. Comparing states WITH it made "#3 becomes #2" look like a
+ * transition — which restarted the mirror's age, so a mirror queued for hours
+ * read "for just now" precisely as it neared the front. `setOperatorNote`
+ * re-upserts on the bare state and hit the same edge from the other side.
+ */
+export function bareCockpitState(state: string | undefined): string {
+	return (state ?? "").replace(/\s*\(#\d+\)\s*$/, "");
+}
+
 export function formatMirrorAge(fromIso: string, nowMs: number): string {
 	const started = Date.parse(fromIso);
 	if (Number.isNaN(started)) return "";
@@ -465,8 +478,13 @@ export class CockpitMirror {
 				// bump) never resets the age; restarted the moment the work
 				// actually moves. A mirror restored without one adopts now —
 				// understating an age is honest, inventing one is not.
+				// Compared on the BARE state: a re-rank (#3 → #2) and an
+				// operator note both rewrite the record without the work
+				// having moved, and neither is a new state to start counting
+				// from.
 				stateSince:
-					existing && existing.state === nextState
+					existing &&
+					bareCockpitState(existing.state) === bareCockpitState(nextState)
 						? (existing.stateSince ?? new Date().toISOString())
 						: new Date().toISOString(),
 			};

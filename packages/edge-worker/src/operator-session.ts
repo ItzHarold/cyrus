@@ -55,6 +55,12 @@ export type MirrorIntent =
 	| { kind: "mine" }
 	| { kind: "handback"; notes: string }
 	| { kind: "ask-client"; question: string }
+	/**
+	 * Recognised as an ask, but the question is not usable as written
+	 * (PON-221) — a fragment, the wrong person, or nothing at all. Answered
+	 * on the mirror with the syntax; nothing reaches the client.
+	 */
+	| { kind: "ask-client-unclear"; draft: string }
 	| { kind: "iterate"; instruction: string }
 	/**
 	 * Arrived with no instruction — a bare delegation (PON-211).
@@ -89,7 +95,7 @@ export type MirrorIntent =
  * A trailing separator is `:` or `,` only.
  */
 const ASK_CLIENT =
-	/^(?:(?:can|could|would|please)\s+(?:you\s+)?)?(?:ask|check\s+with|confirm\s+with|query)\s+(?:the\s+)?client(?![-\w])\s*[:,]?\s*([\s\S]*)$/i;
+	/^(?:(?:can|could|would|please)\s+(?:you\s+)?)?(?:ask|check\s+with|confirm\s+with|query)\s+(?:the\s+)?client(?![-\w])\s*([:,])?\s*([\s\S]*)$/i;
 const HANDBACK = /^back\s+to\s+you\b[:,-]?\s*([\s\S]*)$/i;
 /**
  * "mine" must be the WHOLE message. A bare "mine" is unambiguous; "mine is
@@ -120,12 +126,27 @@ export function classifyMirrorIntent(body: string): MirrorIntent {
 	if (reject) return { kind: "reject", feedback: (reject[1] ?? "").trim() };
 
 	const askClient = ASK_CLIENT.exec(text);
-	// A bare "ask the client" carries no question. Falling through to
-	// `iterate` keeps it on the operator's own thread, where the reply can
-	// say what was missing — sending an empty question to the tenant would
-	// be the one failure this action cannot take back.
-	if (askClient && (askClient[1] ?? "").trim().length > 0)
-		return { kind: "ask-client", question: (askClient[1] ?? "").trim() };
+	if (askClient) {
+		const separator = askClient[1];
+		const rest = (askClient[2] ?? "").trim();
+		// The question is posted to the tenant VERBATIM, so it has to be
+		// written the way it should arrive. The reviewer speaks about the
+		// client in the third person — "ask the client whether THEY want the
+		// totals rounded" — while the message is addressed TO them, so
+		// forwarding his phrasing as-is sends a fragment in the wrong person:
+		// "for the logo files", "whether they want the totals rounded". No
+		// pattern fixes that, because the pronoun is the problem.
+		//
+		// So a self-contained question is required: one written after `:` or
+		// `,`, or anything ending in a question mark. Plain-language TRIGGERS
+		// still work — no keyword to remember — the question itself just has
+		// to be his own words for the client. Anything else is answered with
+		// the syntax rather than guessed at.
+		const selfContained = Boolean(separator) || rest.endsWith("?");
+		if (rest.length > 0 && selfContained)
+			return { kind: "ask-client", question: rest };
+		return { kind: "ask-client-unclear", draft: rest };
+	}
 
 	const handback = HANDBACK.exec(text);
 	if (handback) return { kind: "handback", notes: (handback[1] ?? "").trim() };

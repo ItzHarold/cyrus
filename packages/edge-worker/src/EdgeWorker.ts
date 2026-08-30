@@ -6586,13 +6586,43 @@ ${taskSection}`;
 	 * built to show them — the same trap `clientQuietSession` documents, and
 	 * the reason Harold has a preview link to click at all.
 	 */
+	/**
+	 * Issues whose entry into verification has been announced (PON-221).
+	 *
+	 * In memory only, deliberately: after a restart nobody has been told
+	 * whose move it is in THIS process, and one sign-off on the way back up
+	 * is a reminder rather than noise. It is the three-minute repeat that had
+	 * to stop, not the reminder.
+	 */
+	private verificationSignedOff = new Set<string>();
+
 	private linksHeldForSession(sessionId: string): boolean {
 		if (this.operatorSessions.isOperatorSession(sessionId)) return false;
 		const workspaceId =
 			this.resolveWorkspaceIdForSession(sessionId) ??
 			this.laneManager.workspaceOf(sessionId);
 		if (!workspaceId) return false;
-		return this.verificationGateEnabled(workspaceId);
+		if (!this.verificationGateEnabled(workspaceId)) return false;
+
+		// Every exemption below mirrors one in `holdCompletionForVerification`,
+		// and they must stay in step: that method decides whether a delivery
+		// is ever held, and `releaseHeldLinks` only runs when one is released.
+		// Hold on a session it exempts and the links have no release event
+		// coming — held forever is the same as lost. This is the ONE way this
+		// gate can be too wide, so it is checked rather than assumed.
+		const session = this.agentSessionManager.getSession(sessionId);
+		// Non-Linear (GitHub/GitLab PR-comment) sessions answer on their own
+		// thread and are never gated.
+		if (session?.issueContext?.trackerId !== "linear") return false;
+		// Mentions and child sessions are conversation, not the deliverable.
+		if (this.mentionSessionIds.has(sessionId)) return false;
+		if (this.globalSessionRegistry.getParentSessionId(sessionId)) return false;
+		// Already delivered: the work is released, so links flow normally
+		// again — a post-delivery follow-up is not work in progress.
+		const issueId = this.sessionIssueId(sessionId);
+		if (!issueId) return false;
+		if (this.verificationGate.get(issueId)?.state === "delivered") return false;
+		return true;
 	}
 
 	/**
@@ -6805,15 +6835,34 @@ ${taskSection}`;
 		// one up.
 		this.mirrorComposition = this.mirrorComposition
 			.then(() => this.composeVerificationMirror(issueId))
-			.then(() =>
-				this.endNarrationTurn(
-					issueId,
-					"**Finished this turn — over to you.** The work is complete and held; nothing has gone to the client. Read the summary and links above, then `approve:` to release it, `reject: <feedback>` to send it back, or just say what you want changed.",
-				),
-			)
+			.then(() => this.signOffIntoVerification(issueId))
 			.catch((error) => {
 				this.logger.error("Failed to compose the verification mirror:", error);
 			});
+	}
+
+	/**
+	 * Say the turn ended — exactly once per entry into verification (PON-221).
+	 *
+	 * `mirrorInVerification` is NOT a transition hook. It also runs from the
+	 * mirror refresh tick (every 3 minutes, for every pending delivery) and
+	 * from boot reconcile, because re-composing a mirror is idempotent. A
+	 * sign-off is not: chained there unguarded, it posted "Finished this turn
+	 * — over to you" onto the reviewer's thread every three minutes for as
+	 * long as the work sat unapproved. The surface built to be noticed is the
+	 * one that must never cry wolf.
+	 *
+	 * The record's own lifecycle is the key: cleared when the work leaves
+	 * verification (delivered, or rejected back to the agent), so a second
+	 * round of review signs off again — which is correct, it is a second turn.
+	 */
+	private signOffIntoVerification(issueId: string): void {
+		if (this.verificationSignedOff.has(issueId)) return;
+		this.verificationSignedOff.add(issueId);
+		this.endNarrationTurn(
+			issueId,
+			"**Finished this turn — over to you.** The work is complete and held; nothing has gone to the client. Read the summary and links above, then `approve:` to release it, `reject: <feedback>` to send it back, or just say what you want changed.",
+		);
 	}
 
 	/**
@@ -7358,6 +7407,7 @@ ${taskSection}`;
 		}
 
 		this.verificationGate.markDelivered(issueId);
+		this.verificationSignedOff.delete(issueId);
 		this.logger.event("verification_delivered", {
 			issueId,
 			issueIdentifier: record.issueIdentifier,
@@ -7391,6 +7441,9 @@ ${taskSection}`;
 		if (!record) {
 			return "Nothing is awaiting verification on this issue.";
 		}
+		// PON-221: the work is going back to the agent, so the next time it
+		// reaches review it is a genuinely new turn and says so again.
+		this.verificationSignedOff.delete(issueId);
 		this.logger.event("verification_rejected", {
 			issueId,
 			issueIdentifier: record.issueIdentifier,
@@ -7988,6 +8041,18 @@ ${taskSection}`;
 				instruction: intent.notes,
 				resumedAfterOperatorEdits: true,
 			});
+			return;
+		}
+		if (intent.kind === "ask-client-unclear") {
+			// PON-221: recognised as an ask, but not in words the client can
+			// receive. Answered here rather than passed to the agent, so a
+			// near-miss costs a sentence instead of a model turn — and never
+			// a fragment on the client's thread.
+			await reply(
+				intent.draft
+					? `I can ask them — but "${intent.draft}" would go across verbatim, and it reads as a fragment about them rather than a question to them. Write it as you want them to read it: \`ask client: ${intent.draft.endsWith("?") ? intent.draft : "<the question>"}\`, or just end it with a question mark.`
+					: 'Say what to ask: "ask client: <question>". It goes on their thread verbatim.',
+			);
 			return;
 		}
 		if (intent.kind === "ask-client") {
@@ -12011,6 +12076,7 @@ ${input.userComment}
 			needsInfo: this.needsInfo.serialize(),
 			cockpitMirrors: this.cockpitMirror.serialize(),
 			pendingDeliveries: this.verificationGate.serialize(),
+			heldClientLinks: this.agentSessionManager.serializeHeldLinks?.() ?? {},
 			mentionSessionIds: [...this.mentionSessionIds],
 			operatorSessions: this.operatorSessions.serialize(),
 		};
@@ -12105,6 +12171,12 @@ ${input.userComment}
 		// Restore held deliveries (PON-152). A restart restores these — it
 		// NEVER delivers them; that stays a human action.
 		this.verificationGate.restore(state.pendingDeliveries);
+
+		// PON-221: the links held from the client while that work is in
+		// review. Restored alongside the record that releases them — the two
+		// are one fact split across two objects, and restoring only half of
+		// it loses the links on the next approval.
+		this.agentSessionManager.restoreHeldLinks?.(state.heldClientLinks);
 
 		// Restore mention markers (PON-151/152): a mention session completing
 		// after a restart must still post conversationally, never be held.
