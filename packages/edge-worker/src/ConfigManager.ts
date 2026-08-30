@@ -203,8 +203,29 @@ export class ConfigManager extends EventEmitter {
 				repositories: parsedConfig.repositories || [],
 				ngrokAuthToken:
 					parsedConfig.ngrokAuthToken || this.config.ngrokAuthToken,
-				linearWorkspaces:
-					parsedConfig.linearWorkspaces || this.config.linearWorkspaces,
+				// Merged per workspace, NOT replaced wholesale (PON-190).
+				//
+				// A workspace present in memory but absent from the file used to
+				// disappear on the next hot-reload. That is indistinguishable
+				// from a partial write — and config.json has several writers
+				// across two processes, so a partial write is a real event, not
+				// a hypothetical. The cost of getting it wrong is asymmetric:
+				// an entry kept a little too long is inert, while an entry
+				// dropped takes a live client's credentials with it and their
+				// agent simply stops, silently.
+				//
+				// Removal is not by omission anywhere in this codebase. The
+				// deliberate path is `active: false` (`deactivateTenant`,
+				// PON-115), which still works through this merge because the
+				// parsed entry wins per key. So nothing that MEANT to remove a
+				// workspace loses that ability; only accidental omission stops
+				// being destructive.
+				linearWorkspaces: parsedConfig.linearWorkspaces
+					? {
+							...this.config.linearWorkspaces,
+							...parsedConfig.linearWorkspaces,
+						}
+					: this.config.linearWorkspaces,
 				geminiDefaultModel:
 					parsedConfig.geminiDefaultModel || this.config.geminiDefaultModel,
 				codexDefaultModel:
