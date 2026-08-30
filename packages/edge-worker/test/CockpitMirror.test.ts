@@ -83,6 +83,10 @@ describe("CockpitMirror", () => {
 						nodes: [
 							{ id: "state-todo", type: "unstarted" },
 							{ id: "state-done", type: "completed" },
+							// Real cockpit teams have one; without it every close
+							// falls back to Done and the honest-claim behaviour
+							// (PON-219) cannot be observed at all.
+							{ id: "state-canceled", type: "canceled" },
 						],
 					},
 					// "queued" exists already; the other two must be created.
@@ -255,6 +259,71 @@ describe("CockpitMirror", () => {
 		});
 
 		expect(mirror.size).toBe(0);
+	});
+
+	describe("a closed mirror makes an honest claim (PON-219)", () => {
+		const closeStateOf = () =>
+			(
+				calls
+					.filter((c) => c.query.includes("issueUpdate"))
+					.map((c) => c.variables.input as { stateId?: string })
+					.filter((i) => i.stateId)
+					.pop() as { stateId: string } | undefined
+			)?.stateId;
+
+		it("does not claim delivery for work that was merely discarded", async () => {
+			// Caught live on CKP-11. Reconcile closes a mirror that is no
+			// longer live, and once mirrors exist only for approved work an
+			// unapproved one is discarded that way with its client issue still
+			// wide open. Closing into the completed state made that read as
+			// DELIVERED on the operator's board — a positive claim about work
+			// nobody did.
+			makeMirror(
+				{ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID },
+				{ [COCKPIT_WS]: "cockpit-token", [TENANT_WS]: "tenant-token" },
+			);
+			await mirror.upsert(issue, TENANT_WS, "active");
+			stateTypeByIssue.set(issue.issueId, "started"); // still open
+			await mirror.close(issue.issueId, "reconciled");
+
+			expect(closeStateOf()).toBe("state-canceled");
+		});
+
+		it("still says Done when we actually delivered it", async () => {
+			makeMirror(
+				{ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID },
+				{ [COCKPIT_WS]: "cockpit-token", [TENANT_WS]: "tenant-token" },
+			);
+			await mirror.upsert(issue, TENANT_WS, "delivered");
+			stateTypeByIssue.set(issue.issueId, "started");
+			await mirror.close(issue.issueId, "session_ended");
+
+			expect(closeStateOf()).toBe("state-done");
+		});
+
+		it("says Done when the client closed their own issue as done", async () => {
+			makeMirror(
+				{ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID },
+				{ [COCKPIT_WS]: "cockpit-token", [TENANT_WS]: "tenant-token" },
+			);
+			await mirror.upsert(issue, TENANT_WS, "active");
+			stateTypeByIssue.set(issue.issueId, "completed");
+			await mirror.close(issue.issueId, "issue_terminal");
+
+			expect(closeStateOf()).toBe("state-done");
+		});
+
+		it("says cancelled when the client cancelled, even after delivery", async () => {
+			makeMirror(
+				{ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID },
+				{ [COCKPIT_WS]: "cockpit-token", [TENANT_WS]: "tenant-token" },
+			);
+			await mirror.upsert(issue, TENANT_WS, "delivered");
+			stateTypeByIssue.set(issue.issueId, "canceled");
+			await mirror.close(issue.issueId, "issue_terminal");
+
+			expect(closeStateOf()).toBe("state-canceled");
+		});
 	});
 
 	it("opens a narration thread for a mirror that predates it", async () => {
@@ -437,8 +506,10 @@ describe("CockpitMirror", () => {
 				(c.variables.id as string) === "mirror-stale" &&
 				(c.variables.input as { stateId?: string }).stateId !== undefined,
 		);
+		// PON-219: a mirror reconciled away was not delivered — claiming it
+		// was is a lie on the one board that has to be true.
 		expect((staleClose?.variables.input as { stateId: string }).stateId).toBe(
-			"state-done",
+			"state-canceled",
 		);
 	});
 
