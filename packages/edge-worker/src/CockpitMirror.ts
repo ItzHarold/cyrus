@@ -125,6 +125,28 @@ interface TeamSetup {
 	teamLabelIds: Record<string, string>;
 }
 
+/**
+ * Closes that mean "this was discarded", not "this finished" (PON-219).
+ *
+ * The client's own issue state answers this whenever it is terminal. These
+ * are the closes where it is NOT: the work was abandoned, superseded, or
+ * reconciled away while the client's issue is still open. Defaulting those to
+ * the completed state put "Delivered" on the operator's board for work nobody
+ * did — caught live on CKP-11, where an unapproved mirror was reconciled away
+ * and read as shipped.
+ *
+ * Everything not listed here is a genuine end of work and still closes as
+ * completed, so an ungated workspace — where a session simply ending is how
+ * work finishes — is unchanged.
+ */
+const DISCARD_REASONS = new Set([
+	"reconciled",
+	"not_started",
+	"unassigned",
+	"stopped_while_queued",
+	"scope_canceled",
+]);
+
 /** How long a failed team setup stays failed before another attempt. */
 const SETUP_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
 
@@ -740,12 +762,28 @@ export class CockpitMirror {
 			// source is the client issue itself. One read on a path that is
 			// already writing; a failure falls back to completed, which is the
 			// previous behaviour rather than a new guess.
-			const closeStateId = (await this.clientIssueWasCanceled(
+			//
+			// PON-219 sharpened this. Reconcile also closes a mirror simply
+			// because it is no longer live — and once mirrors exist only for
+			// approved work, an unapproved one gets discarded that way with
+			// its client issue still wide open. Defaulting to completed made
+			// that read as DELIVERED on the operator's board: a positive claim
+			// about work that was never delivered. Caught live on CKP-11.
+			//
+			// So completed is now the narrow case, not the default: the client
+			// closed it as done, or we actually delivered it and they have not
+			// closed their issue yet. Everything else — abandoned, discarded,
+			// reconciled away — is cancelled.
+			const clientState = await this.clientIssueStateType(
 				existing.tenantWorkspaceId,
 				issueId,
-			))
-				? (setup.canceledStateId ?? setup.completedStateId)
-				: setup.completedStateId;
+			);
+			const closeStateId =
+				clientState === "completed"
+					? setup.completedStateId
+					: clientState === "canceled" || DISCARD_REASONS.has(reason)
+						? (setup.canceledStateId ?? setup.completedStateId)
+						: setup.completedStateId;
 
 			// PON-207: a mirror left behind in a previous cockpit team cannot
 			// take this team's Done state. It was closed when the cockpit
@@ -1217,10 +1255,10 @@ export class CockpitMirror {
 	}
 
 	/** Did the client cancel this issue, rather than finish it? */
-	private async clientIssueWasCanceled(
+	private async clientIssueStateType(
 		tenantWorkspaceId: string,
 		issueId: string,
-	): Promise<boolean> {
+	): Promise<string | undefined> {
 		try {
 			const data = await this.gql<{
 				issue: { state: { type: string } | null } | null;
@@ -1229,9 +1267,9 @@ export class CockpitMirror {
 				`query($id: String!) { issue(id: $id) { state { type } } }`,
 				{ id: issueId },
 			);
-			return data?.issue?.state?.type === "canceled";
+			return data?.issue?.state?.type ?? undefined;
 		} catch {
-			return false;
+			return undefined;
 		}
 	}
 
