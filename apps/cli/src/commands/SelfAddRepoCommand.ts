@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import * as readline from "node:readline";
+import { LinearClient } from "@linear/sdk";
 import {
 	DEFAULT_BASE_BRANCH,
 	DEFAULT_CONFIG_FILENAME,
@@ -95,6 +96,49 @@ export class SelfAddRepoCommand extends BaseCommand {
 		return new Promise((resolve) => {
 			this.getReadline().question(question, (answer) => resolve(answer.trim()));
 		});
+	}
+
+	/**
+	 * The team key(s) this repository should route on (PON-190).
+	 *
+	 * Routing defaulted to a label named after the repository — and NOTHING
+	 * creates that label, because agent tokens cannot create labels. So a
+	 * freshly connected repository silently routed nothing until a human made
+	 * the label by hand, which a self-service client cannot be asked to do.
+	 *
+	 * Returns undefined when it cannot be resolved without a decision: more
+	 * than one team, none, or a failed lookup. The caller then keeps the
+	 * label routing it always had, so this can only add certainty and never
+	 * removes a working configuration.
+	 */
+	private async resolveTeamKeys(
+		workspace: WorkspaceCredentials,
+	): Promise<string[] | undefined> {
+		try {
+			const client = new LinearClient({ accessToken: workspace.token });
+			const teams = await client.teams({ first: 10 });
+			const keys = teams.nodes.map((t) => t.key).filter(Boolean);
+			if (keys.length === 1) {
+				console.log(`Routing on team key: ${keys[0]}`);
+				return [keys[0] as string];
+			}
+			if (keys.length > 1) {
+				console.log(
+					`This workspace has ${keys.length} teams (${keys.join(", ")}) — routing on the label instead.`,
+				);
+				console.log(
+					`  To route on a team, add "teamKeys": ["<KEY>"] to this repository.`,
+				);
+			}
+			return undefined;
+		} catch (error) {
+			// A failed lookup must never fail the onboarding: label routing is
+			// exactly what happened before this existed.
+			console.log(
+				`Could not read the workspace's teams (${(error as Error).message}) — routing on the label.`,
+			);
+			return undefined;
+		}
 	}
 
 	private cleanup(): void {
@@ -254,6 +298,7 @@ export class SelfAddRepoCommand extends BaseCommand {
 			// Generate UUID and add to config
 			const id = randomUUID();
 			const routingLabels = customLabels ?? [repoName];
+			const teamKeys = await this.resolveTeamKeys(selectedWorkspace);
 
 			// Determine base branch: flag > auto-detect > default
 			const baseBranch = baseBranchFlag ?? detectDefaultBranch(repositoryPath);
@@ -271,6 +316,7 @@ export class SelfAddRepoCommand extends BaseCommand {
 				linearWorkspaceId: selectedWorkspace.id,
 				isActive: true,
 				routingLabels,
+				...(teamKeys ? { teamKeys } : {}),
 			};
 
 			if (url.includes("gitlab.com") || url.includes("gitlab.")) {
