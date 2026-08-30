@@ -20,12 +20,10 @@ import {
 	type ResolvedClient,
 	teamKeyOf,
 } from "./client-registry.js";
-import { CONSENT_DESCRIPTION_NOTE } from "./consent-boundary.js";
 import { computeRoundRobinOrder, stateRankOf } from "./operator-ordering.js";
 
 /** The mirror's state labels, from the PON-151 design table. */
 export const COCKPIT_STATES = [
-	"awaiting-scope-confirm",
 	"queued",
 	"active",
 	"needs-info",
@@ -47,7 +45,6 @@ export type CockpitState = (typeof COCKPIT_STATES)[number];
  * rather than failing, and says exactly what to create.
  */
 export const COCKPIT_STATUS_NAMES: Record<CockpitState, string> = {
-	"awaiting-scope-confirm": "Awaiting scope",
 	queued: "Queued",
 	active: "Active",
 	"needs-info": "Needs info",
@@ -92,6 +89,23 @@ export interface CockpitMirrorDeps {
 		mirrorIssueId: string,
 		clientIssueId: string,
 	) => Promise<string | undefined>;
+	/**
+	 * Is this issue still inside its scope conversation? (PON-219)
+	 *
+	 * The cockpit contains only APPROVED work. Before the client approves,
+	 * the scope conversation belongs to them and the agent alone, and nothing
+	 * about it belongs in the operator's queue.
+	 *
+	 * This is a dependency rather than a check at each call site because
+	 * `upsert` has a dozen callers and any future one would have to remember.
+	 * An invariant with twelve enforcement points is twelve chances to lose
+	 * it; here it is one, and it cannot be forgotten by construction.
+	 *
+	 * Absent (or false) means no gate applies — an ungated workspace has no
+	 * approval to wait for, so its mirrors are created at delegation exactly
+	 * as before.
+	 */
+	scopeGatePending?: (tenantWorkspaceId: string, issueId: string) => boolean;
 	/** Persist EdgeWorker state (best-effort; failures already logged). */
 	persist: () => Promise<void>;
 }
@@ -144,8 +158,7 @@ const MIRROR_TITLE_PATTERN =
 /**
  * States where the mirror is waiting on a REVIEWER rather than on the agent
  * or the client. Only these queue — "active" is the agent's turn and
- * "awaiting-scope-confirm" is the client's, and neither is work anyone can
- * pick up.
+ * and an unapproved scope conversation is not a mirror at all (PON-219).
  */
 const WAITING_STATES = new Set(["in-verification", "needs-info"]);
 
@@ -313,6 +326,45 @@ export class CockpitMirror {
 			const client = this.deps.resolveClient(tenantWorkspaceId, teamKey);
 
 			const existing = this.mirrors.get(issue.issueId);
+
+			// PON-219: only approved work reaches the cockpit.
+			//
+			// Deliberately gates CREATION, not updates. Once an issue has been
+			// approved and mirrored, later transitions must keep landing even
+			// if the scope record is revised or removed — a mirror that stopped
+			// updating would be worse than one that never appeared, because the
+			// operator would be reading a stale board and not know it.
+			if (
+				!existing?.mirrorIssueId &&
+				this.deps.scopeGatePending?.(tenantWorkspaceId, issue.issueId)
+			) {
+				// One exception, and it is the important one. `in-verification`
+				// means a session finished work and it is being HELD — so if
+				// that arrives while the scope is still unapproved, the gate
+				// has been bypassed. The gate is intrinsic (a prompt step), so
+				// a model can end its turn without it; withholding here would
+				// hide a real violation behind a rule meant to reduce noise.
+				// Unapproved work that exists is exactly what an operator has
+				// to see.
+				if (state === "in-verification") {
+					this.logger.warn(
+						`[event:cockpit_unapproved_work_held] ${JSON.stringify({
+							issueIdentifier: issue.issueIdentifier,
+							note: "work reached verification without an approved scope",
+						})}`,
+					);
+				} else {
+					this.logger.info(
+						`[event:cockpit_creation_withheld] ${JSON.stringify({
+							issueIdentifier: issue.issueIdentifier,
+							state,
+							reason: "scope_not_approved",
+						})}`,
+					);
+					return;
+				}
+			}
+
 			const mergedLinks = [
 				...new Set([
 					...(existing?.briefLinks ?? []),
@@ -637,8 +689,13 @@ export class CockpitMirror {
 	/**
 	 * Record the session's internal reading on the mirror (PON-169). The
 	 * mirror keeps its current state and labels — only the description
-	 * gains (or replaces) the reading. When no mirror exists yet, one is
-	 * created as `active` (the note arrives from a running session).
+	 * gains (or replaces) the reading.
+	 *
+	 * PON-219: this no longer creates a mirror. The note is recorded before
+	 * the client is even asked to approve, so creating one here was the
+	 * earliest way unapproved work reached the board. The reading is written
+	 * to the scope record either way — that record is authoritative, and it is
+	 * carried onto the mirror when the client approves.
 	 */
 	setOperatorNote(
 		issue: CockpitIssueRef,
@@ -764,10 +821,6 @@ export class CockpitMirror {
 			tenantWorkspaceId: string;
 			position: number;
 		}>;
-		awaitingScopeConfirm: Array<{
-			issue: CockpitIssueRef;
-			tenantWorkspaceId: string;
-		}>;
 		/** Completed work awaiting operator approval (PON-152) */
 		inVerification?: Array<{
 			issue: CockpitIssueRef;
@@ -785,7 +838,6 @@ export class CockpitMirror {
 			await this.adoptAndPruneLinearMirrors([
 				...live.active.map((e) => e.issue),
 				...live.queued.map((e) => e.issue),
-				...live.awaitingScopeConfirm.map((e) => e.issue),
 				...(live.inVerification ?? []).map((e) => e.issue),
 			]);
 			// PON-209: "live" here means "our machinery still thinks this is
@@ -799,21 +851,11 @@ export class CockpitMirror {
 			// Ask it, once per tenant, and treat a terminal client issue as
 			// not live no matter what our records say.
 			const terminal = await this.terminalClientIssues([
-				...live.awaitingScopeConfirm,
 				...live.queued,
 				...live.active,
 				...(live.inVerification ?? []),
 			]);
 			const liveIds = new Set<string>();
-			for (const entry of live.awaitingScopeConfirm) {
-				if (terminal.has(entry.issue.issueId)) continue;
-				liveIds.add(entry.issue.issueId);
-				await this.upsert(
-					entry.issue,
-					entry.tenantWorkspaceId,
-					"awaiting-scope-confirm",
-				);
-			}
 			for (const entry of live.queued) {
 				if (terminal.has(entry.issue.issueId)) continue;
 				liveIds.add(entry.issue.issueId);
@@ -1468,12 +1510,6 @@ export class CockpitMirror {
 				? [
 						"",
 						`**Approved:** ${record.approvedAt} · **Revisions:** ${record.revisions ?? 0}`,
-						// PON-216: the reviewer reads the description before the
-						// thread, so the consent boundary is named here too —
-						// otherwise the marker only works for someone who already
-						// scrolled far enough to wonder about it.
-						"",
-						CONSENT_DESCRIPTION_NOTE,
 					]
 				: []),
 			// The internal reading (PON-169).

@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CockpitMirror } from "../src/CockpitMirror.js";
-import { CONSENT_DESCRIPTION_NOTE } from "../src/consent-boundary.js";
 
 /**
  * Operator-cockpit mirror (PON-151). The properties that matter: the mirror
@@ -216,13 +215,7 @@ describe("CockpitMirror", () => {
 		);
 		expect(
 			labelCreates.map((c) => (c.variables.input as { name: string }).name),
-		).toEqual([
-			"awaiting-scope-confirm",
-			"active",
-			"needs-info",
-			"in-verification",
-			"delivered",
-		]);
+		).toEqual(["active", "needs-info", "in-verification", "delivered"]);
 
 		const create = calls.find((c) => c.query.includes("issueCreate"));
 		const input = create?.variables.input as Record<string, unknown>;
@@ -252,14 +245,13 @@ describe("CockpitMirror", () => {
 				[TENANT_WS]: "tenant-token",
 			},
 		);
-		await mirror.upsert(issue, TENANT_WS, "awaiting-scope-confirm");
+		await mirror.upsert(issue, TENANT_WS, "active");
 		expect(mirror.size).toBe(1);
 
 		stateTypeByIssue.set(issue.issueId, "canceled");
 		await mirror.reconcile({
-			active: [],
+			active: [{ issue, tenantWorkspaceId: TENANT_WS }],
 			queued: [],
-			awaitingScopeConfirm: [{ issue, tenantWorkspaceId: TENANT_WS }],
 		});
 
 		expect(mirror.size).toBe(0);
@@ -332,14 +324,14 @@ describe("CockpitMirror", () => {
 		// read, and every later one adds nothing.
 		expect(calls).toHaveLength(before); // unchanged state, no write
 
-		await mirror.upsert(issue, TENANT_WS, "awaiting-scope-confirm");
+		await mirror.upsert(issue, TENANT_WS, "needs-info");
 		const update = calls
 			.slice(before)
 			.find((c) => c.query.includes("issueUpdate"));
 		expect(update).toBeDefined();
 		expect(
 			(update?.variables.input as { labelIds: string[] }).labelIds,
-		).toEqual(["label-awaiting-scope-confirm"]);
+		).toEqual(["label-needs-info"]);
 	});
 
 	it("renders the queue position into the state", async () => {
@@ -426,15 +418,17 @@ describe("CockpitMirror", () => {
 					position: 1,
 				},
 			],
-			awaitingScopeConfirm: [
+			inVerification: [
 				{
-					issue: { issueId: "awaiting-issue", issueIdentifier: "DVV-14" },
+					issue: { issueId: "held-issue", issueIdentifier: "DVV-14" },
 					tenantWorkspaceId: TENANT_WS,
 				},
 			],
 		});
 
 		// Three live mirrors tracked, the stale one closed and forgotten.
+		// PON-219: reconcile is no longer handed unapproved scope
+		// conversations at all — they are not mirrors.
 		expect(mirror.size).toBe(3);
 		expect(mirror.serialize()["stale-issue"]).toBeUndefined();
 		const staleClose = calls.find(
@@ -759,10 +753,6 @@ describe("CockpitMirror", () => {
 			expect(description).toContain("internal reading");
 			expect(description).toContain("## Links");
 			expect(description).toContain("- https://github.com/x/y/pull/9");
-			// PON-216: the consent boundary is named where the reviewer looks
-			// first. Harold read the mirror body, not the thread, and concluded
-			// work had happened before he approved.
-			expect(description).toContain(CONSENT_DESCRIPTION_NOTE);
 		});
 
 		it("brief links union — a repeated link is not duplicated", async () => {
@@ -930,5 +920,90 @@ describe("CockpitMirror", () => {
 		expect(
 			calls.some((c) => (c.variables.id as string) === "mirror-here"),
 		).toBe(true);
+	});
+
+	/**
+	 * The cockpit contains only approved work (PON-219).
+	 *
+	 * Harold's board was filling with issues still inside their scope
+	 * conversation — plans and tool calls for work the client had not yet agreed
+	 * to. The invariant lives on `upsert` rather than at its dozen call sites: an
+	 * invariant with twelve enforcement points is twelve chances to lose it.
+	 */
+	describe("only approved work reaches the board", () => {
+		const pendingFor = (ids: string[]) => ({
+			scopeGatePending: (_ws: string, issueId: string) => ids.includes(issueId),
+		});
+
+		it("creates nothing while the scope conversation is open", async () => {
+			makeMirror(
+				{ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID },
+				{ [COCKPIT_WS]: "cockpit-token" },
+				pendingFor([issue.issueId]),
+			);
+			await mirror.upsert(issue, TENANT_WS, "active");
+
+			expect(
+				calls.find((c) => c.query.includes("issueCreate")),
+			).toBeUndefined();
+			expect(mirror.size).toBe(0);
+		});
+
+		it("still creates for a workspace with no gate at all", async () => {
+			// An ungated workspace has no approval to wait for. Its mirrors are
+			// created at delegation exactly as before — this change must not be a
+			// silent behaviour change for those.
+			makeMirror(
+				{ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID },
+				{ [COCKPIT_WS]: "cockpit-token" },
+				pendingFor([]),
+			);
+			await mirror.upsert(issue, TENANT_WS, "active");
+
+			expect(calls.find((c) => c.query.includes("issueCreate"))).toBeDefined();
+			expect(mirror.size).toBe(1);
+		});
+
+		it("keeps updating a mirror whose scope record is gone", async () => {
+			// The guard is on CREATION only. Once approved and mirrored, later
+			// transitions must keep landing — a mirror that silently stopped
+			// updating is worse than one that never appeared, because the operator
+			// reads a stale board without knowing it.
+			makeMirror(
+				{ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID },
+				{ [COCKPIT_WS]: "cockpit-token" },
+				pendingFor([]),
+			);
+			await mirror.upsert(issue, TENANT_WS, "active");
+			const before = calls.length;
+
+			// Now pretend the gate reopened (a revision, say).
+			(
+				mirror as never as { deps: Record<string, unknown> }
+			).deps.scopeGatePending = () => true;
+			await mirror.upsert(issue, TENANT_WS, "in-verification");
+
+			const update = calls
+				.slice(before)
+				.find((c) => c.query.includes("issueUpdate"));
+			expect(update).toBeDefined();
+		});
+
+		it("lets held work through, because that is a gate violation worth seeing", async () => {
+			// The gate is intrinsic — a prompt step, not an interceptor — so a
+			// session CAN finish without it. Withholding here would hide a real
+			// violation behind a rule meant to reduce noise.
+			makeMirror(
+				{ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID },
+				{ [COCKPIT_WS]: "cockpit-token" },
+				pendingFor([issue.issueId]),
+			);
+			await mirror.upsert(issue, TENANT_WS, "in-verification");
+
+			expect(calls.find((c) => c.query.includes("issueCreate"))).toBeDefined();
+			expect(logger.warn.mock.calls.flat().join(" ")).toContain(
+				"cockpit_unapproved_work_held",
+			);
+		});
 	});
 });

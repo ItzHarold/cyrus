@@ -1,0 +1,262 @@
+import { describe, expect, it, vi } from "vitest";
+import { isForeignCockpitMirror } from "../src/CockpitMirror.js";
+import {
+	hoursWaiting,
+	newlyStalled,
+	renderWaitingRoom,
+	ScopeWaitingRoom,
+	WAITING_ROOM_TITLE,
+} from "../src/scope-waiting-room.js";
+
+/**
+ * Pre-approval visibility (PON-219).
+ *
+ * The cockpit contains only approved work, which removes the place an operator
+ * could notice that a scope conversation had gone quiet. This is the
+ * replacement: one issue, outside the work board, that exists only while
+ * something is actually waiting.
+ */
+
+const NOW = Date.parse("2026-08-30T12:00:00.000Z");
+const hoursAgo = (h: number) => new Date(NOW - h * 3_600_000).toISOString();
+
+const logger = {
+	info: vi.fn(),
+	warn: vi.fn(),
+	error: vi.fn(),
+	debug: vi.fn(),
+} as never;
+
+describe("the waiting list", () => {
+	const clientName = (ws?: string) =>
+		ws === "ws-acme" ? "Acme Corp" : undefined;
+
+	it("says plainly that none of this is work yet", () => {
+		// The whole point of the change is that unapproved work is not in the
+		// queue. A list that reads like a queue would undo it.
+		const body = renderWaitingRoom(
+			[
+				{
+					issueId: "i1",
+					issueIdentifier: "ACM-7",
+					workspaceId: "ws-acme",
+					proposedAt: hoursAgo(1),
+				},
+			],
+			{ now: NOW, stallAfterHours: 4, clientName },
+		);
+		expect(body).toContain("not work yet");
+		expect(body).toContain("ACM-7");
+		expect(body).toContain("Acme Corp");
+	});
+
+	it("marks the ones that have gone quiet, and only those", () => {
+		const body = renderWaitingRoom(
+			[
+				{ issueId: "fresh", issueIdentifier: "ACM-1", proposedAt: hoursAgo(1) },
+				{ issueId: "stale", issueIdentifier: "ACM-2", proposedAt: hoursAgo(9) },
+			],
+			{ now: NOW, stallAfterHours: 4, clientName },
+		);
+		const fresh = body.split("\n").find((l) => l.includes("ACM-1")) ?? "";
+		const stale = body.split("\n").find((l) => l.includes("ACM-2")) ?? "";
+		expect(fresh).not.toContain("⏳");
+		expect(stale).toContain("⏳");
+		expect(stale).toContain("9h");
+	});
+
+	it("distinguishes a revision from a first ask", () => {
+		// A revision is still the client's turn, but it is a different
+		// conversation — worth seeing which one has been re-asked.
+		const body = renderWaitingRoom(
+			[
+				{
+					issueId: "i",
+					issueIdentifier: "ACM-3",
+					proposedAt: hoursAgo(2),
+					state: "revised",
+				},
+			],
+			{ now: NOW, stallAfterHours: 4, clientName },
+		);
+		expect(body).toContain("revision sent");
+	});
+
+	it("survives a record with no timestamp rather than rendering NaN", () => {
+		const body = renderWaitingRoom(
+			[{ issueId: "i", issueIdentifier: "ACM-4" }],
+			{
+				now: NOW,
+				stallAfterHours: 4,
+				clientName,
+			},
+		);
+		expect(body).not.toContain("NaN");
+		expect(hoursWaiting({ issueId: "i" }, NOW)).toBeUndefined();
+		expect(
+			hoursWaiting({ issueId: "i", proposedAt: "not a date" }, NOW),
+		).toBeUndefined();
+	});
+});
+
+describe("stall announcements", () => {
+	it("announces a conversation once, not on every tick", () => {
+		const entries = [
+			{ issueId: "i", issueIdentifier: "ACM-7", proposedAt: hoursAgo(9) },
+		];
+		const announced = new Set<string>();
+		const first = newlyStalled(entries, announced, {
+			now: NOW,
+			stallAfterHours: 4,
+		});
+		expect(first).toHaveLength(1);
+		announced.add("i");
+		expect(
+			newlyStalled(entries, announced, { now: NOW, stallAfterHours: 4 }),
+		).toHaveLength(0);
+	});
+
+	it("says nothing about a conversation that is still fresh", () => {
+		expect(
+			newlyStalled([{ issueId: "i", proposedAt: hoursAgo(1) }], new Set(), {
+				now: NOW,
+				stallAfterHours: 4,
+			}),
+		).toHaveLength(0);
+	});
+});
+
+describe("the room's title cannot be mistaken for a mirror", () => {
+	it("is not adopted or closed by boot reconciliation", () => {
+		// Reconcile scans the cockpit TEAM and closes anything mirror-shaped
+		// that matches nothing live. The room lives in that team, so a title
+		// that looked like a mirror would be silently closed on the next boot.
+		expect(isForeignCockpitMirror(WAITING_ROOM_TITLE)).toBe(false);
+		// Sanity: the check does recognise both real mirror shapes.
+		expect(isForeignCockpitMirror("[ACM-7] Revenue totals")).toBe(true);
+		expect(isForeignCockpitMirror("Acme Corp · ACM-7 — Revenue totals")).toBe(
+			true,
+		);
+	});
+});
+
+describe("the room itself", () => {
+	function makeRoom(responses: Array<Record<string, unknown>>) {
+		const calls: Array<{ query: string; variables: Record<string, unknown> }> =
+			[];
+		const fetchMock = vi.fn(async (_url: string, init: { body: string }) => {
+			const body = JSON.parse(init.body);
+			calls.push({ query: body.query, variables: body.variables });
+			return { json: async () => ({ data: responses.shift() ?? {} }) };
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		const room = new ScopeWaitingRoom(
+			{
+				getConfig: () => ({ linearWorkspaceId: "cockpit", teamId: "team-1" }),
+				getToken: () => "tok",
+				getClientName: () => "Acme Corp",
+				stallAfterHours: () => 4,
+				now: () => NOW,
+			},
+			logger,
+		);
+		return { room, calls };
+	}
+
+	it("creates the room OUTSIDE the project, so it is never in the work queue", async () => {
+		// This is the whole design decision in one assertion: the operator's
+		// board is the project board.
+		const { room, calls } = makeRoom([
+			{ team: { issues: { nodes: [] } } },
+			{ issueCreate: { issue: { id: "room-1" } } },
+		]);
+		await room.sync([
+			{ issueId: "i", issueIdentifier: "ACM-7", proposedAt: hoursAgo(1) },
+		]);
+
+		const create = calls.find((c) => c.query.includes("issueCreate"));
+		expect(create).toBeDefined();
+		const input = create?.variables.input as Record<string, unknown>;
+		expect(input.teamId).toBe("team-1");
+		expect(input.projectId).toBeUndefined();
+		expect(input.title).toBe(WAITING_ROOM_TITLE);
+	});
+
+	it("adopts an existing room rather than minting a second one", async () => {
+		// A restart loses the id. Trusting our own map here is the exact
+		// mistake that produced duplicate mirror threads.
+		const { room, calls } = makeRoom([
+			{
+				team: {
+					issues: {
+						nodes: [
+							{
+								id: "room-existing",
+								title: WAITING_ROOM_TITLE,
+								state: { type: "started" },
+							},
+						],
+					},
+				},
+			},
+			{ issueUpdate: { success: true } },
+		]);
+		await room.sync([
+			{ issueId: "i", issueIdentifier: "ACM-7", proposedAt: hoursAgo(1) },
+		]);
+
+		expect(calls.find((c) => c.query.includes("issueCreate"))).toBeUndefined();
+		const update = calls.find((c) => c.query.includes("issueUpdate"));
+		expect(update?.variables.id).toBe("room-existing");
+	});
+
+	it("closes itself when nothing is waiting", async () => {
+		const { room, calls } = makeRoom([
+			{ team: { issues: { nodes: [] } } },
+			{ issueCreate: { issue: { id: "room-1" } } },
+			{
+				team: { states: { nodes: [{ id: "state-done", type: "completed" }] } },
+			},
+			{ issueUpdate: { success: true } },
+		]);
+		await room.sync([
+			{ issueId: "i", issueIdentifier: "ACM-7", proposedAt: hoursAgo(1) },
+		]);
+		await room.sync([]);
+
+		const close = calls
+			.filter((c) => c.query.includes("issueUpdate"))
+			.find((c) => (c.variables as { s?: string }).s === "state-done");
+		expect(close).toBeDefined();
+	});
+
+	it("does not open a room when nothing is waiting in the first place", async () => {
+		// An empty room is clutter, and clutter on a surface that exists to be
+		// noticed is what stops it being noticed.
+		const { room, calls } = makeRoom([]);
+		await room.sync([]);
+		expect(calls).toHaveLength(0);
+	});
+
+	it("never throws, whatever Linear says", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => {
+				throw new Error("network");
+			}),
+		);
+		const room = new ScopeWaitingRoom(
+			{
+				getConfig: () => ({ linearWorkspaceId: "cockpit", teamId: "team-1" }),
+				getToken: () => "tok",
+				getClientName: () => undefined,
+				stallAfterHours: () => 4,
+				now: () => NOW,
+			},
+			logger,
+		);
+		await expect(
+			room.sync([{ issueId: "i", proposedAt: hoursAgo(1) }]),
+		).resolves.toBeUndefined();
+	});
+});
