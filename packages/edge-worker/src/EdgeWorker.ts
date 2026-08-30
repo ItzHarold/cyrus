@@ -276,6 +276,14 @@ type CyrusToolsMcpContext = {
  *   managing Claude Code processes, and
  *   processes results through to Linear Agent Activity Sessions
  */
+/**
+ * The sentence Linear seeds an agent-session thread with. It is the only way
+ * to tell a delegation from a mention (the comment body is always populated),
+ * and — since PON-225 — the only way to tell Linear's boilerplate from
+ * something a person actually typed on a mirror.
+ */
+const AGENT_SESSION_THREAD_MARKER = "This thread is for an agent session";
+
 export class EdgeWorker extends EventEmitter {
 	private config: EdgeWorkerConfig;
 	private repositories: Map<string, RepositoryConfig> = new Map(); // repository 'id' (internal, stored in config.json) mapped to the full repo config
@@ -8027,6 +8035,59 @@ ${taskSection}`;
 	}
 
 	/**
+	 * May this action start the parked work? (PON-225)
+	 *
+	 * Not the same question as "who is acting", because on this path that is
+	 * usually nobody: delegating an issue reaches us as a notification, and
+	 * the agent session it needs is then created by our own recovery — so the
+	 * created webhook's creator is the app, not the person. Machinery opens
+	 * sessions on a mirror for its own reasons too (the narration thread at
+	 * birth). Authorising on the actor alone would therefore both refuse the
+	 * real gesture and, worse, let a session the machinery opened at approval
+	 * time start the work — which is precisely the auto-start PON-224 removed.
+	 *
+	 * The claim is the honest signal. The mirror never writes `assigneeId`
+	 * (PON-211), so an assignee is always a human act, and §8.3's gesture is
+	 * exactly that: assign yourself, then delegate. A known reviewer acting
+	 * directly (a comment) is accepted too.
+	 *
+	 * Silence is deliberate when the actor is unknown: that is machinery, and
+	 * a refusal posted on every mirror birth is noise on the one surface that
+	 * has to stay readable.
+	 */
+	private async mayStartParkedWork(
+		action: { actorId?: string },
+		clientIssueId: string,
+	): Promise<{ ok: boolean; say?: string }> {
+		const reviewers = this.cockpitReviewers();
+		if (reviewers.length === 0) {
+			return {
+				ok: false,
+				say: action.actorId
+					? "Starting work needs a configured reviewer (`cockpit.reviewers` or `cockpit.assigneeId`) — nobody is declared, so nothing can be started."
+					: undefined,
+			};
+		}
+		if (action.actorId && reviewers.includes(action.actorId))
+			return { ok: true };
+
+		const assignee = await this.cockpitMirror.assigneeIdFor(clientIssueId);
+		if (assignee && reviewers.includes(assignee)) return { ok: true };
+
+		this.logger.event("mirror_start_refused", {
+			clientIssueId,
+			actorId: action.actorId,
+			hasAssignee: Boolean(assignee),
+		});
+		return {
+			ok: false,
+			say: action.actorId
+				? "Assign yourself to this first and I'll pick it up — starting work on a client's repository needs a reviewer of record, and the assignee is who that is."
+				: undefined,
+		};
+	}
+
+	/**
 	 * Start the client's implementation run from a queued mirror (PON-225).
 	 *
 	 * The fresh-start twin of `runOperatorIteration`. Same subject/surface
@@ -8470,9 +8531,16 @@ ${taskSection}`;
 		clientIssueId: string,
 	): Promise<void> {
 		const { mirrorSessionId } = action;
-		const body = action.rawBody
-			.replace(/@\S+/g, " ") // strip the mention handle
-			.trim();
+		// PON-225: a body carrying Linear's own thread boilerplate IS the
+		// delegation — the whole sentence is theirs, not something a person
+		// typed, and a human's actual words arrive later as their own prompt.
+		// Read as text it classifies as `iterate` and the boilerplate becomes
+		// the work to do; read as bare, it is the gesture it actually is.
+		const body = action.rawBody.includes(AGENT_SESSION_THREAD_MARKER)
+			? ""
+			: action.rawBody
+					.replace(/@\S+/g, " ") // strip the mention handle
+					.trim();
 		const reply = async (text: string) => {
 			const tracker = this.getIssueTrackerForWorkspace(action.organizationId);
 			if (!tracker) return;
@@ -8513,16 +8581,7 @@ ${taskSection}`;
 		// Stated cost, accepted: any member can spend the client's model
 		// credential by talking to the agent. Nothing they can do reaches the
 		// client or ships anything, which is the line that matters.
-		// PON-225: starting parked work joins that list. The accepted cost
-		// above turns on "nothing they can do reaches the client or ships
-		// anything" — starting ships a branch and a draft PR into the client's
-		// repository, and spends the cockpit's own subscription, so the
-		// reasoning that leaves `iterate` open does not cover it.
-		const startsParkedWork =
-			this.scopeApprovals.isImplementationDeferred(clientIssueId) &&
-			(intent.kind === "orient" || intent.kind === "iterate");
 		const clientFacing =
-			startsParkedWork ||
 			intent.kind === "approve" ||
 			intent.kind === "reject" ||
 			intent.kind === "ask-client";
@@ -8530,9 +8589,7 @@ ${taskSection}`;
 			const reviewers = this.cockpitReviewers();
 			if (reviewers.length === 0) {
 				await reply(
-					startsParkedWork
-						? "Starting work needs a configured reviewer (`cockpit.reviewers` or `cockpit.assigneeId`) — nobody is declared, so nothing can be started."
-						: "Delivering needs a configured reviewer (`cockpit.reviewers` or `cockpit.assigneeId`) — nobody is declared, so nothing can be released.",
+					"Delivering needs a configured reviewer (`cockpit.reviewers` or `cockpit.assigneeId`) — nobody is declared, so nothing can be released.",
 				);
 				return;
 			}
@@ -8544,9 +8601,7 @@ ${taskSection}`;
 					intent: intent.kind,
 				});
 				await reply(
-					startsParkedWork
-						? "Only a configured reviewer can start work on a client's repository. Nothing has been started."
-						: "Only a configured reviewer can release work to the client. You can still work on it here — say what you want changed.",
+					"Only a configured reviewer can release work to the client. You can still work on it here — say what you want changed.",
 				);
 				return;
 			}
@@ -8558,7 +8613,15 @@ ${taskSection}`;
 		// instruction. Placed before the intent dispatch below so neither the
 		// orient reply nor runOperatorIteration's "nothing held" branch can
 		// answer for parked work any more.
-		if (startsParkedWork) {
+		if (
+			this.scopeApprovals.isImplementationDeferred(clientIssueId) &&
+			(intent.kind === "orient" || intent.kind === "iterate")
+		) {
+			const permitted = await this.mayStartParkedWork(action, clientIssueId);
+			if (!permitted.ok) {
+				if (permitted.say) await reply(permitted.say);
+				return;
+			}
 			await this.startWorkFromMirror(action, clientIssueId, {
 				instruction: intent.kind === "iterate" ? intent.instruction : "",
 			});
@@ -9458,9 +9521,8 @@ ${taskSection}`;
 		}
 
 		// HACK: This is required since the comment body is always populated, thus there is no other way to differentiate between the two trigger events
-		const AGENT_SESSION_MARKER = "This thread is for an agent session";
 		const isMentionTriggered =
-			commentBody && !commentBody.includes(AGENT_SESSION_MARKER);
+			commentBody && !commentBody.includes(AGENT_SESSION_THREAD_MARKER);
 		// Check if the comment contains the /label-based-prompt command
 		const isLabelBasedPromptRequested = commentBody?.includes(
 			"/label-based-prompt",

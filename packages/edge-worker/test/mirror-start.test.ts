@@ -102,6 +102,8 @@ function setup(opts: { parked?: boolean } = {}) {
 
 	p.cockpitMirror.mirrorIssueIdFor = vi.fn().mockReturnValue(MIRROR_ISSUE);
 	p.cockpitMirror.clientIssueIdFor = vi.fn().mockReturnValue(CLIENT_ISSUE);
+	// Claimed by the reviewer — §8.3's gesture is assign, then delegate.
+	p.cockpitMirror.assigneeIdFor = vi.fn().mockResolvedValue(HAROLD);
 	p.cockpitMirror.upsert = vi.fn().mockResolvedValue(undefined);
 	p.cockpitMirror.close = vi.fn().mockResolvedValue(undefined);
 	p.savePersistedStateStrict = vi.fn().mockResolvedValue(undefined);
@@ -238,16 +240,77 @@ describe("PON-225 — delegating a queued mirror starts the work", () => {
 		expect(p.scopeApprovals.isImplementationDeferred(CLIENT_ISSUE)).toBe(true);
 	});
 
-	it("only a configured reviewer may start work on a client's repository", async () => {
+	it("a delegation the machinery created still starts it, because the reviewer claimed it", async () => {
+		// Found live on prod: delegating an issue arrives as a notification,
+		// and the agent session is then created by our own recovery — so the
+		// created webhook's creator is the app, not the person who delegated.
+		// Authorising on the actor alone refuses the actual gesture.
+		const { p, resumed } = setup();
+
+		await p.handleMirrorAction(
+			{ ...action(""), actorId: undefined, actorName: undefined },
+			CLIENT_ISSUE,
+		);
+
+		expect(resumed).toHaveLength(1);
+	});
+
+	it("an unclaimed mirror does NOT start, and says nothing when nobody asked", async () => {
+		// The hazard this guards: the machinery opens a session on the mirror
+		// at birth (the narration thread). If that could start the work, the
+		// auto-start PON-224 removed would be back, one layer down.
 		const { p, resumed, cockpitPosts } = setup();
+		p.cockpitMirror.assigneeIdFor = vi.fn().mockResolvedValue(undefined);
+		const before = cockpitPosts.length;
+
+		await p.handleMirrorAction(
+			{ ...action(""), actorId: undefined },
+			CLIENT_ISSUE,
+		);
+
+		expect(resumed).toHaveLength(0);
+		expect(p.scopeApprovals.isImplementationDeferred(CLIENT_ISSUE)).toBe(true);
+		// Silent: a refusal on every mirror birth is noise on the one surface
+		// that has to stay readable.
+		expect(cockpitPosts.length).toBe(before);
+	});
+
+	it("a person on an unclaimed mirror is told to claim it", async () => {
+		const { p, resumed, cockpitPosts } = setup();
+		p.cockpitMirror.assigneeIdFor = vi.fn().mockResolvedValue(undefined);
 
 		await p.handleMirrorAction(action("", COLLEAGUE), CLIENT_ISSUE);
 
 		expect(resumed).toHaveLength(0);
-		expect(cockpitPosts.at(-1).content.body).toContain(
-			"Only a configured reviewer can start work",
-		);
+		expect(cockpitPosts.at(-1).content.body).toContain("Assign yourself");
 		expect(p.scopeApprovals.isImplementationDeferred(CLIENT_ISSUE)).toBe(true);
+	});
+
+	it("a mirror claimed by someone who is not a reviewer does not start", async () => {
+		const { p, resumed } = setup();
+		p.cockpitMirror.assigneeIdFor = vi.fn().mockResolvedValue(COLLEAGUE);
+
+		await p.handleMirrorAction(
+			{ ...action(""), actorId: undefined },
+			CLIENT_ISSUE,
+		);
+
+		expect(resumed).toHaveLength(0);
+	});
+
+	it("Linear's own thread boilerplate is not read as an instruction", async () => {
+		// Left in, a delegation classifies as `iterate` carrying that sentence
+		// as the work to do — observed on prod before this was stripped.
+		const { p, resumed } = setup();
+
+		await p.handleMirrorAction(
+			action("This thread is for an agent session with @pontedigital"),
+			CLIENT_ISSUE,
+		);
+
+		expect(resumed).toHaveLength(1);
+		expect(resumed[0][4]).not.toContain("This thread is for an agent session");
+		expect(resumed[0][4]).not.toContain("The reviewer added:");
 	});
 
 	it("refuses honestly when nothing binds the issue to a repository", async () => {

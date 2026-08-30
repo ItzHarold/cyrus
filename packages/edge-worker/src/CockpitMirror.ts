@@ -1358,6 +1358,35 @@ export class CockpitMirror {
 		}
 	}
 
+	/**
+	 * Who has claimed this mirror (PON-225).
+	 *
+	 * The mirror never writes `assigneeId` — claiming is a human act and
+	 * nothing here undoes it (PON-211) — which is exactly what makes it a
+	 * trustworthy signal of intent. It is read for one decision: whether the
+	 * work on a queued mirror may be started. Sessions on a mirror are often
+	 * created by machinery (the narration thread at birth, the re-delegation
+	 * recovery), and the creator of those carries no human meaning; the
+	 * assignee does.
+	 */
+	async assigneeIdFor(clientIssueId: string): Promise<string | undefined> {
+		const config = this.deps.getConfig();
+		const mirrorIssueId = this.mirrors.get(clientIssueId)?.mirrorIssueId;
+		if (!config || !mirrorIssueId) return undefined;
+		try {
+			const data = await this.gql<{
+				issue: { assignee: { id: string } | null } | null;
+			}>(
+				config.linearWorkspaceId,
+				`query($id: String!) { issue(id: $id) { assignee { id } } }`,
+				{ id: mirrorIssueId },
+			);
+			return data?.issue?.assignee?.id ?? undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
 	clientIssueIdFor(mirrorIssueId: string): string | undefined {
 		for (const [clientIssueId, record] of this.mirrors) {
 			if (record.mirrorIssueId === mirrorIssueId) return clientIssueId;
