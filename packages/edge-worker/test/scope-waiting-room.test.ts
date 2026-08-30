@@ -260,3 +260,51 @@ describe("the room itself", () => {
 		).resolves.toBeUndefined();
 	});
 });
+
+describe("a restart does not re-announce what was already quiet", () => {
+	it("stays silent on the first sync, then announces new stalls", async () => {
+		// `announced` is in-memory. Without this, every boot comments again on
+		// every conversation that was already stalled — which trains the
+		// operator to ignore the one surface built to be noticed.
+		const calls: Array<{ query: string }> = [];
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (_u: string, init: { body: string }) => {
+				const body = JSON.parse(init.body);
+				calls.push({ query: body.query });
+				if (body.query.includes("team(id:$id){ issues"))
+					return {
+						json: async () => ({ data: { team: { issues: { nodes: [] } } } }),
+					};
+				return {
+					json: async () => ({
+						data: { issueCreate: { issue: { id: "room-1" } } },
+					}),
+				};
+			}),
+		);
+		const room = new ScopeWaitingRoom(
+			{
+				getConfig: () => ({ linearWorkspaceId: "cockpit", teamId: "team-1" }),
+				getToken: () => "tok",
+				getClientName: () => "Acme Corp",
+				stallAfterHours: () => 4,
+				now: () => NOW,
+			},
+			logger,
+		);
+
+		// Boot: one conversation already long stalled.
+		await room.sync([
+			{ issueId: "old", issueIdentifier: "ACM-1", proposedAt: hoursAgo(30) },
+		]);
+		expect(calls.some((c) => c.query.includes("commentCreate"))).toBe(false);
+
+		// A second one crosses the line while we are up — that IS a transition.
+		await room.sync([
+			{ issueId: "old", issueIdentifier: "ACM-1", proposedAt: hoursAgo(30) },
+			{ issueId: "new", issueIdentifier: "ACM-2", proposedAt: hoursAgo(5) },
+		]);
+		expect(calls.some((c) => c.query.includes("commentCreate"))).toBe(true);
+	});
+});

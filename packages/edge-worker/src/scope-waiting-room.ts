@@ -132,6 +132,15 @@ export class ScopeWaitingRoom {
 	private issueId: string | undefined;
 	/** Issues already called out, so a stall is announced once, not per tick. */
 	private announced = new Set<string>();
+	/**
+	 * True until the first sync completes. A restart loses `announced`, and
+	 * without this every boot re-comments on every conversation that was
+	 * already quiet — which trains the operator to ignore the one surface
+	 * built to be noticed. The row still carries its ⏳ and its age; only the
+	 * notification is suppressed, because the notification marks a TRANSITION
+	 * into stalled and nothing transitioned while we were down.
+	 */
+	private firstSync = true;
 	/** Serializes writes: ticks and transitions both call sync(). */
 	private chain: Promise<void> = Promise.resolve();
 	private lastBody: string | undefined;
@@ -200,8 +209,9 @@ export class ScopeWaitingRoom {
 		});
 		for (const entry of stalled) {
 			this.announced.add(entry.issueId);
-			await this.announce(config, entry, now);
+			if (!this.firstSync) await this.announce(config, entry, now);
 		}
+		this.firstSync = false;
 	}
 
 	/** An open issue in the cockpit team with the room's exact title, if any. */
