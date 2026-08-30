@@ -209,7 +209,10 @@ import {
 	isScopeConfirmQuestion,
 } from "./scope-confirm-gate.js";
 import { ScopeWaitingRoom, WAITING_ROOM_TITLE } from "./scope-waiting-room.js";
-import { VerificationGate } from "./VerificationGate.js";
+import {
+	VerificationGate,
+	type VerificationRecord,
+} from "./VerificationGate.js";
 
 /** Options threaded through the created-session flow by the lane machinery. */
 interface LaneStartOptions {
@@ -6887,6 +6890,10 @@ ${taskSection}`;
 		const record = this.verificationGate.get(issueId);
 		if (!record || record.state !== "in-verification") return;
 		const checkout = await this.buildCheckoutInstructions(issueId);
+		// PON-210: record which commit this summary describes. Runs at the
+		// first composition after capture and never again (first attempt
+		// wins), so later refresh ticks cost nothing and cannot re-stamp it.
+		await this.captureSummaryHead(issueId, record);
 		const startHere = await this.buildStartHereBlock(
 			record.prUrls,
 			record.workspaceId,
@@ -7289,6 +7296,148 @@ ${taskSection}`;
 	 * never pointed at a draft. Returns a human-readable report for the
 	 * mirror thread.
 	 */
+	/**
+	 * Has the code moved since the held summary was written? (PON-210)
+	 *
+	 * Returns undefined for "cannot tell" as well as "no" — deliberately the
+	 * same answer, because both must let delivery proceed. We only ever hold
+	 * a delivery on a fact: a head we recorded and a head GitHub reports now,
+	 * both different. No captured head (a record from before this shipped, or
+	 * a summary whose mirror composition never ran), no PR, no origin, no
+	 * token, a failed lookup — every one of those is unknown, and blocking a
+	 * client's delivery on something we do not know would be worse than the
+	 * bug this fixes.
+	 */
+	/**
+	 * The PR this record's work actually lives in (PON-210).
+	 *
+	 * Own-repo only, and shared by the capture and the comparison so they can
+	 * never disagree. `prUrls` comes from model-written free text and can
+	 * quote a foreign PR; if capture stamped the head of one PR and the
+	 * comparison read another, every delivery would look stale forever — or,
+	 * worse, a genuinely stale one would look fine.
+	 */
+	private async ownRepoPullRequestFor(
+		record: VerificationRecord,
+	): Promise<{ owner: string; repo: string; number: number } | undefined> {
+		const originRef = await this.sessionRepoOriginRef(record.sessionId);
+		if (!originRef) return undefined;
+		return record.prUrls
+			.map(parsePullRequestUrl)
+			.find(
+				(pr): pr is { owner: string; repo: string; number: number } =>
+					!!pr &&
+					pr.owner.toLowerCase() === originRef.owner.toLowerCase() &&
+					pr.repo.toLowerCase() === originRef.repo.toLowerCase(),
+			);
+	}
+
+	/**
+	 * Record the commit the held summary describes (PON-210).
+	 *
+	 * Marks the attempt even when it fails, so a transient GitHub error at
+	 * capture leaves staleness permanently unknown rather than leaving the
+	 * slot for a later tick to fill with a head that already carries the
+	 * reviewer's commits.
+	 */
+	private async captureSummaryHead(
+		issueId: string,
+		record: VerificationRecord,
+	): Promise<void> {
+		if (record.capturedHeadResolved) return;
+		try {
+			const pr = await this.ownRepoPullRequestFor(record);
+			if (!pr) {
+				this.verificationGate.recordCapturedHead(issueId, undefined);
+				return;
+			}
+			const token = await this.mintGitHubTokenForRepo(pr.owner, pr.repo);
+			const facts = token
+				? await this.fetchPullRequestFacts(token, pr)
+				: undefined;
+			this.verificationGate.recordCapturedHead(issueId, facts?.headSha);
+		} catch (error) {
+			this.logger.warn(`Could not capture the summary head: ${String(error)}`);
+			this.verificationGate.recordCapturedHead(issueId, undefined);
+		}
+	}
+
+	/**
+	 * The files that changed between two commits — the real delta (PON-210).
+	 *
+	 * The PR's own file list is its diff against BASE, which is the whole
+	 * change, not what the reviewer altered. Showing that under "changed in
+	 * between" would tell them everything changed every time, which is the
+	 * same as telling them nothing.
+	 */
+	private async filesBetween(
+		token: string,
+		repo: { owner: string; repo: string },
+		base: string,
+		head: string,
+	): Promise<string[]> {
+		try {
+			const response = await fetch(
+				`https://api.github.com/repos/${repo.owner}/${repo.repo}/compare/${base}...${head}`,
+				{
+					headers: {
+						Authorization: `Bearer ${token}`,
+						Accept: "application/vnd.github+json",
+						"User-Agent": "cyrus-agent",
+					},
+				},
+			);
+			if (!response.ok) return [];
+			const body = (await response.json()) as {
+				files?: Array<{ filename: string }>;
+			};
+			return (body.files ?? []).map((f) => f.filename);
+		} catch {
+			// The delta is a courtesy on a refusal that stands without it.
+			return [];
+		}
+	}
+
+	private async summaryStaleness(record: VerificationRecord): Promise<
+		| {
+				capturedHead: string;
+				currentHead: string;
+				changedFiles: string[];
+		  }
+		| undefined
+	> {
+		try {
+			if (!record.capturedHeadSha) return undefined;
+			// The SAME selection the capture used — see ownRepoPullRequestFor.
+			const target = await this.ownRepoPullRequestFor(record);
+			if (!target) return undefined;
+			const token = await this.mintGitHubTokenForRepo(
+				target.owner,
+				target.repo,
+			);
+			if (!token) return undefined;
+			const pr = await this.fetchPullRequestFacts(token, target);
+			if (!pr?.headSha) return undefined;
+			if (pr.headSha === record.capturedHeadSha) return undefined;
+			return {
+				capturedHead: record.capturedHeadSha,
+				currentHead: pr.headSha,
+				// The delta between the two commits, not the PR's whole diff.
+				changedFiles: await this.filesBetween(
+					token,
+					target,
+					record.capturedHeadSha,
+					pr.headSha,
+				),
+			};
+		} catch (error) {
+			// Unknown, per the doc above: never hold a delivery on a failure
+			// to check.
+			this.logger.warn(`Could not check summary staleness: ${String(error)}`);
+			return undefined;
+		}
+	}
+
 	private async deliverVerifiedWork(
 		issueId: string,
 		notes?: string,
@@ -7320,6 +7469,44 @@ ${taskSection}`;
 				});
 				return `❌ Delivery refused: the notes contain internal terms the client must not see (${offending.join(", ")}). Rephrase the notes and approve again — nothing was delivered, the PR stays draft.`;
 			}
+		}
+
+		// PON-210: does the held summary still describe what merges?
+		//
+		// Review can move the code after the summary was captured — operator
+		// iteration is exempt from the gate, so nothing refreshes it — and the
+		// client was then told about a version that is not the one they get.
+		// Checked BEFORE anything irreversible, alongside the notes check
+		// above, for the same reason: nothing readied, nothing posted.
+		const staleness = await this.summaryStaleness(record);
+		if (staleness && record.staleNotifiedForSha !== staleness.currentHead) {
+			this.verificationGate.noteStaleWarned(issueId, staleness.currentHead);
+			void this.persistScopeApprovals("summary_stale");
+			this.logger.event("delivery_refused_stale_summary", {
+				issueId,
+				issueIdentifier: record.issueIdentifier,
+				capturedHead: staleness.capturedHead.slice(0, 7),
+				currentHead: staleness.currentHead.slice(0, 7),
+			});
+			return [
+				`⏸️ **Not delivered — the code moved after this summary was written.**`,
+				``,
+				`The summary describes \`${staleness.capturedHead.slice(0, 7)}\`; the PR head is now \`${staleness.currentHead.slice(0, 7)}\`. Delivering it would tell the client they are getting something other than what merges.`,
+				staleness.changedFiles.length
+					? `\nChanged in between: ${staleness.changedFiles
+							.slice(0, 8)
+							.map((f) => `\`${f}\``)
+							.join(
+								", ",
+							)}${staleness.changedFiles.length > 8 ? ` and ${staleness.changedFiles.length - 8} more` : ""}.`
+					: "",
+				``,
+				`**To get a summary that matches:** \`reject: rewrite the client summary for the code as it now stands\` — that resumes the session and holds the new summary here for you, exactly as a first pass does.`,
+				``,
+				`**To send this one anyway:** \`approve:\` again and it goes, with any notes you add.`,
+			]
+				.filter(Boolean)
+				.join("\n");
 		}
 
 		const report: string[] = [];

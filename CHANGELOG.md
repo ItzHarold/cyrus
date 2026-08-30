@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **What you are told you are getting now matches what you actually get.** The description of completed work is written when the work first finishes — but a change can still be adjusted during our review, and until now you would receive the original description regardless. If the adjustment removed something the description mentioned, you were told about a version of the change that was never delivered. Now the description is checked against the code that will actually merge, and it is rewritten before it reaches you if the two have diverged. ([PON-210](https://linear.app/ponte-digital/issue/PON-210))
 - **Work in progress no longer reaches you before it is released.** A pull request link used to appear on your issue while the work was still being reviewed, so you could open a half-finished change and read it as a delivery. Links are attached to an issue differently from messages, which is why they slipped past the hold that already covered everything else we post. Now every link — pull request, preview, deployment — is held with the work and arrives with the delivery, not before it. Nothing is lost: you get all of them the moment the work is released. ([PON-221](https://linear.app/ponte-digital/issue/PON-221))
 
 ### Changed

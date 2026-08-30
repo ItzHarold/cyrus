@@ -170,6 +170,42 @@ export interface SerializedVerificationRecord {
 	/** One-shot ladder bookkeeping */
 	escalatedAt?: string;
 	delayNotedAt?: string;
+	/**
+	 * The PR head SHA as of when `summary` was captured (v4.13, PON-210).
+	 *
+	 * The client's summary describes a specific state of the code. Review can
+	 * move the code afterwards — operator iteration is exempt from the gate,
+	 * so nothing refreshes the summary — and the client was then told about a
+	 * version that is not what merges. Keeping the head the summary described
+	 * is what makes that detectable at all.
+	 *
+	 * Cleared by `recordPending`: a new summary describes a head we have not
+	 * looked up yet. Set by the mirror composition, which already fetches it.
+	 */
+	capturedHeadSha?: string;
+	/**
+	 * Whether the head lookup has been ATTEMPTED for this summary (v4.13).
+	 *
+	 * Separate from `capturedHeadSha` because a failed first lookup must not
+	 * leave the slot open. The mirror recomposes on a 3-minute clock: if the
+	 * GitHub call blips at capture time and a later tick fills the slot, the
+	 * head recorded is the head as of THAT tick — which may already include
+	 * the reviewer's commits, so the summary is stamped as describing work it
+	 * never described and the staleness is erased by the act of looking.
+	 * First attempt wins; a failed one leaves staleness permanently unknown,
+	 * which degrades to today's behaviour rather than to a false negative.
+	 */
+	capturedHeadResolved?: boolean;
+	/**
+	 * The head the reviewer was last warned was stale (v4.13, PON-210).
+	 *
+	 * The escape hatch. A first `approve:` on a moved head refuses and asks
+	 * for a rewrite; approving again while the head is unchanged delivers,
+	 * because the reviewer has now seen the warning and chosen to proceed.
+	 * Without this a delivery could wedge — and a gate that cannot be
+	 * overridden by the human it reports to is a gate that gets worked around.
+	 */
+	staleNotifiedForSha?: string;
 }
 
 /**
