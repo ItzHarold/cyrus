@@ -5910,6 +5910,36 @@ ${taskSection}`;
 	}
 
 	/**
+	 * Drop scope records whose client issue has already reached a terminal
+	 * state (PON-219). Bounded by the number of OPEN gates, not by issues.
+	 */
+	private async pruneEndedScopeConversations(): Promise<void> {
+		let removed = 0;
+		for (const entry of this.scopeApprovals.listPending()) {
+			if (!entry.workspaceId) continue;
+			try {
+				const state = await this.cockpitMirror.clientIssueStateType(
+					entry.workspaceId,
+					entry.issueId,
+				);
+				// Unreadable is NOT a reason to forget a live gate — only an
+				// explicitly terminal state is.
+				if (state === "completed" || state === "canceled") {
+					if (this.scopeApprovals.remove(entry.issueId)) removed++;
+				}
+			} catch {
+				// A prune failure must never stop the boot.
+			}
+		}
+		if (removed > 0) {
+			this.logger.info(
+				`[event:scope_records_pruned] ${JSON.stringify({ removed })}`,
+			);
+			await this.persistScopeApprovals("pruned_ended_conversations");
+		}
+	}
+
+	/**
 	 * Refresh the pre-approval visibility list (PON-219).
 	 *
 	 * Fire-and-forget and never throws: this is an operator convenience, and
@@ -6469,7 +6499,18 @@ ${taskSection}`;
 				queued,
 				inVerification,
 			});
-			// The pre-approval list is rebuilt from the restored records.
+			// PON-219: prune scope records whose client issue is already over
+			// before rebuilding the list.
+			//
+			// The waiting room renders listPending() and holds no state of its
+			// own, which is what keeps it honest — but it inherits whatever
+			// the record store believes. A record can outlive its issue when
+			// the terminal webhook was missed, and the row then ages forever
+			// on the operator's stall list and re-announces on every restart.
+			// Reconciliation repairs drift rather than preserving it; this is
+			// the same read-Linear-not-the-map rule the mirror already lives
+			// by, applied to the one store the room depends on.
+			await this.pruneEndedScopeConversations();
 			this.syncScopeWaitingRoom();
 			// PON-212: reconcile re-upserts an in-verification mirror through
 			// the plain path, which carries no review block — so the preview

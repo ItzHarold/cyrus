@@ -1255,7 +1255,12 @@ export class CockpitMirror {
 	}
 
 	/** Did the client cancel this issue, rather than finish it? */
-	private async clientIssueStateType(
+	/**
+	 * The client issue's workflow-state type, or undefined if unreadable.
+	 * Public so the scope-record prune (PON-219) can ask the same question
+	 * without a second GraphQL client and a second token lookup.
+	 */
+	async clientIssueStateType(
 		tenantWorkspaceId: string,
 		issueId: string,
 	): Promise<string | undefined> {
