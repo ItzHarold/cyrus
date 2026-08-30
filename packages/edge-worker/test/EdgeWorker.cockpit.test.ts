@@ -136,7 +136,7 @@ describe("EdgeWorker - cockpit mirror wiring (PON-151)", () => {
 		expect(privates(worker).scopeApprovals.isApproved(ISSUE_ID)).toBe(true);
 	});
 
-	it("scope approval mirrors as active", async () => {
+	it("scope approval mirrors as queued — approval no longer starts the work (PON-224)", async () => {
 		registerSession(worker);
 		privates(worker).scopeApprovals.recordProposed(ISSUE_ID, {
 			workspaceId: GATED_WS,
@@ -153,12 +153,17 @@ describe("EdgeWorker - cockpit mirror wiring (PON-151)", () => {
 		expect(mirror.upsert).toHaveBeenCalledWith(
 			expect.objectContaining({ issueId: ISSUE_ID }),
 			GATED_WS,
-			"active",
+			"queued",
 			// PON-170: approval also composes the operator brief.
+			// PON-224: reviewers are notified at birth — queued is claimable.
 			expect.objectContaining({
 				brief: expect.objectContaining({ revisions: 0 }),
+				subscriberIds: expect.any(Array),
 			}),
 		);
+		expect(
+			privates(worker).scopeApprovals.isImplementationDeferred(ISSUE_ID),
+		).toBe(true);
 	});
 
 	it("scope cancellation closes the mirror", async () => {
