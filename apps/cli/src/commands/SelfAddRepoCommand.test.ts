@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
 	mockWriteFileSync: vi.fn(),
 	mockQuestion: vi.fn(),
 	mockClose: vi.fn(),
+	mockTeams: vi.fn(),
 }));
 
 // Mock modules
@@ -20,11 +21,31 @@ vi.mock("node:crypto", () => ({
 	randomUUID: mocks.mockRandomUUID,
 }));
 
+// PON-190: team-key resolution talks to Linear. Mocked so the tests are
+// deterministic and offline — before this they reached the network and only
+// passed because the call failed and fell back to label routing.
+vi.mock("@linear/sdk", async (importOriginal) => ({
+	...(await importOriginal<typeof import("@linear/sdk")>()),
+	// `function`, not an arrow: the command calls `new LinearClient(...)`.
+	LinearClient: vi.fn(function LinearClientMock() {
+		return { teams: mocks.mockTeams };
+	}),
+}));
+
 vi.mock("node:fs", () => ({
 	existsSync: mocks.mockExistsSync,
 	readFileSync: mocks.mockReadFileSync,
 	writeFileSync: mocks.mockWriteFileSync,
 	chmodSync: vi.fn(),
+	// PON-190: config writes now go through cyrus-core's locked writer, which
+	// needs these too. Mocked at the syscall level so the real
+	// updateConfigFile still runs — the assertions below are about the config
+	// that gets written, and that stays true.
+	openSync: vi.fn(() => 1),
+	closeSync: vi.fn(),
+	unlinkSync: vi.fn(),
+	renameSync: vi.fn(),
+	statSync: vi.fn(() => ({ mtimeMs: Date.now() })),
 }));
 
 vi.mock("node:path", async (importOriginal) => {
@@ -890,5 +911,48 @@ describe("SelfAddRepoCommand", () => {
 				expect.stringContaining("Workspace: My Workspace"),
 			);
 		});
+	});
+});
+
+/**
+ * Routing on the team key rather than a label (PON-190 item 2).
+ *
+ * The default routing label is the repository name and NOTHING creates it —
+ * agent tokens cannot create labels — so a client who onboarded without a
+ * human making that label by hand had a connected repo that routed nothing.
+ */
+describe("SelfAddRepoCommand — team key resolution", () => {
+	const resolveFor = async (teams: unknown) => {
+		const { SelfAddRepoCommand } = await import("./SelfAddRepoCommand.js");
+		const command = new SelfAddRepoCommand({ cyrusHome: "/tmp" } as never);
+		mocks.mockTeams.mockReset();
+		if (teams instanceof Error) mocks.mockTeams.mockRejectedValue(teams);
+		else mocks.mockTeams.mockResolvedValue(teams);
+		return (
+			command as unknown as {
+				resolveTeamKeys: (w: unknown) => Promise<string[] | undefined>;
+			}
+		).resolveTeamKeys({ id: "ws", name: "WS", token: "t" });
+	};
+
+	it("routes on the team key when the workspace has exactly one team", async () => {
+		expect(await resolveFor({ nodes: [{ key: "ACM" }] })).toEqual(["ACM"]);
+	});
+
+	it("leaves routing to the label when the workspace has several teams", async () => {
+		// Ambiguity is the one case that should ask rather than guess.
+		expect(
+			await resolveFor({ nodes: [{ key: "ACM" }, { key: "OPS" }] }),
+		).toBeUndefined();
+	});
+
+	it("leaves routing to the label when the lookup fails", async () => {
+		// A failed lookup must never fail the onboarding: label routing is
+		// exactly what happened before this existed.
+		expect(await resolveFor(new Error("401 unauthorized"))).toBeUndefined();
+	});
+
+	it("leaves routing to the label when the workspace has no teams", async () => {
+		expect(await resolveFor({ nodes: [] })).toBeUndefined();
 	});
 });

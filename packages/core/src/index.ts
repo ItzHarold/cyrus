@@ -73,6 +73,12 @@ export {
 	LINEAR_MCP_WRITE_TOOLS,
 	SLACK_DEFAULT_ALLOWED_TOOLS,
 } from "./allowed-tools-defaults.js";
+// Safe config.json writes (PON-190): a lock across the read-modify-write,
+// then temp+rename. Four writers across two processes share this file.
+export {
+	updateConfigFile,
+	writeConfigAtomicUnlocked,
+} from "./atomic-config.js";
 export type {
 	BaseBranchResolution,
 	CyrusAgentSession,

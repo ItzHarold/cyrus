@@ -19,6 +19,15 @@ vi.mock("node:fs", () => ({
 	readFileSync: mocks.mockReadFileSync,
 	writeFileSync: mocks.mockWriteFileSync,
 	chmodSync: vi.fn(),
+	// PON-190: config writes now go through cyrus-core's locked writer, which
+	// needs these too. Mocked at the syscall level so the real
+	// updateConfigFile still runs — the assertions below are about the config
+	// that gets written, and that stays true.
+	openSync: vi.fn(() => 1),
+	closeSync: vi.fn(),
+	unlinkSync: vi.fn(),
+	renameSync: vi.fn(),
+	statSync: vi.fn(() => ({ mtimeMs: Date.now() })),
 }));
 
 // Mock Fastify

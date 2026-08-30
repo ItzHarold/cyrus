@@ -1,13 +1,15 @@
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import * as readline from "node:readline";
+import { LinearClient } from "@linear/sdk";
 import {
 	DEFAULT_BASE_BRANCH,
 	DEFAULT_CONFIG_FILENAME,
 	type EdgeConfig,
 	migrateEdgeConfig,
+	updateConfigFile,
 } from "cyrus-core";
 import {
 	GIT_NO_AMBIENT_CREDENTIALS,
@@ -95,6 +97,44 @@ export class SelfAddRepoCommand extends BaseCommand {
 		return new Promise((resolve) => {
 			this.getReadline().question(question, (answer) => resolve(answer.trim()));
 		});
+	}
+
+	/**
+	 * The team key(s) this repository should route on (PON-190).
+	 *
+	 * Returns undefined when it cannot be resolved without a decision — more
+	 * than one team, or a lookup that failed. The caller then keeps the
+	 * label-based routing it always had, so this can only ever add certainty,
+	 * never remove a working configuration.
+	 */
+	private async resolveTeamKeys(
+		workspace: WorkspaceCredentials,
+	): Promise<string[] | undefined> {
+		try {
+			const client = new LinearClient({ accessToken: workspace.token });
+			const teams = await client.teams({ first: 10 });
+			const keys = teams.nodes.map((t) => t.key).filter(Boolean);
+			if (keys.length === 1) {
+				console.log(`Routing on team key: ${keys[0]}`);
+				return [keys[0] as string];
+			}
+			if (keys.length > 1) {
+				console.log(
+					`This workspace has ${keys.length} teams (${keys.join(", ")}) — routing on the label instead.`,
+				);
+				console.log(
+					`  To route on a team, add "teamKeys": ["<KEY>"] to this repository.`,
+				);
+			}
+			return undefined;
+		} catch (error) {
+			// A failed lookup must not fail the onboarding: label routing is
+			// what happened before this existed.
+			console.log(
+				`Could not read the workspace's teams (${(error as Error).message}) — routing on the label.`,
+			);
+			return undefined;
+		}
 	}
 
 	private cleanup(): void {
@@ -255,6 +295,16 @@ export class SelfAddRepoCommand extends BaseCommand {
 			const id = randomUUID();
 			const routingLabels = customLabels ?? [repoName];
 
+			// PON-190: resolve the team key rather than leaving routing to a
+			// label. The default routing label is the repository name, and
+			// nothing creates it — agent tokens cannot create labels — so a
+			// client who onboarded without a human making that label by hand
+			// had a connected repo that silently routed nothing. A workspace
+			// with exactly one team has no ambiguity to resolve; more than one
+			// is the only case worth asking about, and the label routing
+			// stays as the fallback there.
+			const teamKeys = await this.resolveTeamKeys(selectedWorkspace);
+
 			// Determine base branch: flag > auto-detect > default
 			const baseBranch = baseBranchFlag ?? detectDefaultBranch(repositoryPath);
 			if (baseBranch !== DEFAULT_BASE_BRANCH) {
@@ -271,6 +321,7 @@ export class SelfAddRepoCommand extends BaseCommand {
 				linearWorkspaceId: selectedWorkspace.id,
 				isActive: true,
 				routingLabels,
+				...(teamKeys ? { teamKeys } : {}),
 			};
 
 			if (url.includes("gitlab.com") || url.includes("gitlab.")) {
@@ -279,15 +330,22 @@ export class SelfAddRepoCommand extends BaseCommand {
 				repoConfig.githubUrl = url.replace(/\.git$/, "");
 			}
 
-			config.repositories.push(repoConfig);
-
-			// 0600: this file holds per-workspace Linear OAuth tokens.
-			writeFileSync(configPath, JSON.stringify(config, null, "\t"), {
-				encoding: "utf-8",
-				mode: 0o600,
-			});
-			// mode only applies on create, so tighten pre-existing configs too.
-			chmodSync(configPath, 0o600);
+			// PON-190: the append happens INSIDE the lock, against the file as
+			// it is at that moment — not against the copy read at the top of
+			// this command. Between those two points a token rotation or
+			// another signup can have written, and writing our stale copy back
+			// would erase it. 0600 throughout: this file holds every
+			// workspace's Linear OAuth tokens.
+			updateConfigFile<typeof config>(
+				configPath,
+				(current) => {
+					const next = current ?? config;
+					next.repositories = next.repositories ?? [];
+					next.repositories.push(repoConfig);
+					return next;
+				},
+				{ mode: 0o600, indent: "\t" },
+			);
 
 			console.log(`\nAdded: ${repoName}`);
 			console.log(`  ID: ${id}`);

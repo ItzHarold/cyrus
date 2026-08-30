@@ -6,7 +6,11 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { type EdgeConfig, getDefaultWorktreesDir } from "cyrus-core";
+import {
+	type EdgeConfig,
+	getDefaultWorktreesDir,
+	updateConfigFile,
+} from "cyrus-core";
 import { pruneBackups } from "../backupRetention.js";
 import {
 	type ApiResponse,
@@ -115,13 +119,11 @@ export async function handleCyrusConfig(
 
 		// Write config file
 		try {
-			writeFileSync(configPath, JSON.stringify(config, null, 2), {
-				encoding: "utf-8",
-				mode: 0o600,
-			});
-			// PON-148: correct by construction, not by accident — an existing
-			// file keeps its mode, so enforce it every write.
-			chmodSync(configPath, 0o600);
+			// PON-190: through the shared locked writer, so this cannot
+			// interleave with the CLI's onboarding writes or lose a tenant
+			// added between this handler's read and its write. It keeps
+			// PON-148's 0600 + chmod, which the writer enforces on every write.
+			updateConfigFile(configPath, () => config, { mode: 0o600 });
 
 			return {
 				success: true,

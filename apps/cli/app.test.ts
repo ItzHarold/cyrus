@@ -26,6 +26,12 @@ vi.mock("node:fs", () => ({
 	writeFileSync: mockWriteFileSync,
 	copyFileSync: vi.fn(),
 	chmodSync: vi.fn(),
+	// PON-190: the shared locked config writer needs these too.
+	openSync: vi.fn(() => 1),
+	closeSync: vi.fn(),
+	unlinkSync: vi.fn(),
+	renameSync: vi.fn(),
+	statSync: vi.fn(() => ({ mtimeMs: Date.now() })),
 }));
 
 // Mock path

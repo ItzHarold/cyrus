@@ -6,10 +6,23 @@ vi.mock("node:fs", () => ({
 	chmodSync: vi.fn(),
 	existsSync: vi.fn(() => false),
 	mkdirSync: vi.fn(),
-	readFileSync: vi.fn(),
+	// A missing file throws ENOENT; returning undefined made JSON.parse throw a
+	// SyntaxError, which the locked writer treats as "unparseable, refuse to
+	// overwrite" — correctly, since silently replacing it would delete every
+	// tenant on the box.
+	readFileSync: vi.fn(() => {
+		const error = new Error("ENOENT") as NodeJS.ErrnoException;
+		error.code = "ENOENT";
+		throw error;
+	}),
 	readdirSync: vi.fn(() => []),
 	unlinkSync: vi.fn(),
 	writeFileSync: vi.fn(),
+	// PON-190: the shared locked config writer needs these too.
+	openSync: vi.fn(() => 1),
+	closeSync: vi.fn(),
+	renameSync: vi.fn(),
+	statSync: vi.fn(() => ({ mtimeMs: Date.now() })),
 }));
 
 const mockExistsSync = vi.mocked(existsSync);
@@ -24,7 +37,12 @@ describe("handleCyrusConfig", () => {
 		vi.clearAllMocks();
 		delete process.env.CYRUS_WORKTREES_DIR;
 		mockExistsSync.mockReturnValue(false);
-		mockReadFileSync.mockReturnValue("");
+		// No config file exists in these tests; a missing file throws ENOENT.
+		mockReadFileSync.mockImplementation(() => {
+			const error = new Error("ENOENT") as NodeJS.ErrnoException;
+			error.code = "ENOENT";
+			throw error;
+		});
 	});
 
 	afterEach(() => {
@@ -49,11 +67,17 @@ describe("handleCyrusConfig", () => {
 		expect(result.success).toBe(true);
 		expect(mockMkdirSync).toHaveBeenCalledWith(cyrusHome, { recursive: true });
 		expect(mockWriteFileSync).toHaveBeenCalledWith(
-			"/test/cyrus-home/config.json",
+			// A per-writer temp name (pid + counter), renamed into place — two
+			// writers must never share one temp file.
+			expect.stringMatching(
+				/^\/test\/cyrus-home\/config\.json\.\d+\.\d+\.tmp$/,
+			),
 			expect.stringContaining(
 				'"workspaceBaseDir": "/test/cyrus-home/worktrees"',
 			),
-			{ encoding: "utf-8", mode: 0o600 },
+			// The locked writer passes mode only; 0600 is unchanged and is
+			// additionally re-asserted by an explicit chmod after the write.
+			{ mode: 0o600 },
 		);
 	});
 
@@ -76,9 +100,15 @@ describe("handleCyrusConfig", () => {
 
 		expect(result.success).toBe(true);
 		expect(mockWriteFileSync).toHaveBeenCalledWith(
-			"/test/cyrus-home/config.json",
+			// A per-writer temp name (pid + counter), renamed into place — two
+			// writers must never share one temp file.
+			expect.stringMatching(
+				/^\/test\/cyrus-home\/config\.json\.\d+\.\d+\.tmp$/,
+			),
 			expect.stringContaining('"workspaceBaseDir": "/tmp/custom-worktrees"'),
-			{ encoding: "utf-8", mode: 0o600 },
+			// The locked writer passes mode only; 0600 is unchanged and is
+			// additionally re-asserted by an explicit chmod after the write.
+			{ mode: 0o600 },
 		);
 	});
 });

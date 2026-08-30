@@ -1,12 +1,6 @@
-import {
-	chmodSync,
-	existsSync,
-	mkdirSync,
-	readFileSync,
-	writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { migrateEdgeConfig } from "cyrus-core";
+import { migrateEdgeConfig, updateConfigFile } from "cyrus-core";
 import type { EdgeConfig } from "../config/types.js";
 import type { Logger } from "./Logger.js";
 
@@ -141,12 +135,16 @@ export class ConfigService {
 			mkdirSync(configDir, { recursive: true });
 		}
 
-		// 0600: this file holds per-workspace Linear OAuth tokens.
-		writeFileSync(this.configPath, JSON.stringify(config, null, 2), {
-			mode: 0o600,
-		});
-		// mode only applies on create, so tighten pre-existing configs too.
-		chmodSync(this.configPath, 0o600);
+		// PON-190: a whole-file replace, but it still takes the lock so it
+		// cannot interleave with the merging writers. A lock only some writers
+		// take is not a lock — it is false confidence.
+		//
+		// Residual, stated: this API replaces the caller's config wholesale,
+		// so a caller that read the file long before calling save() can still
+		// write back a stale copy. Closing that means making save() merge,
+		// which is a change to every caller; the lock at least makes the
+		// write atomic and mutually exclusive.
+		updateConfigFile(this.configPath, () => config, { mode: 0o600 });
 	}
 
 	/**

@@ -1,10 +1,11 @@
-import { chmodSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { LinearClient } from "@linear/sdk";
 import {
 	DEFAULT_CONFIG_FILENAME,
 	type EdgeConfig,
 	migrateEdgeConfig,
+	updateConfigFile,
 } from "cyrus-core";
 import Fastify, { type FastifyInstance } from "fastify";
 import open from "open";
@@ -119,7 +120,7 @@ export class SelfAuthCommand extends BaseCommand {
 				revokedAt: _previouslyRevokedAt,
 				...preservedSettings
 			} = existingWorkspace ?? ({} as NonNullable<typeof existingWorkspace>);
-			config.linearWorkspaces![workspace.id] = {
+			const workspaceEntry = {
 				...preservedSettings,
 				linearToken: tokens.accessToken,
 				...(tokens.refreshToken
@@ -130,13 +131,21 @@ export class SelfAuthCommand extends BaseCommand {
 				...(workspace.appUserId ? { appUserId: workspace.appUserId } : {}),
 				installedAt: preservedSettings.installedAt ?? new Date().toISOString(),
 			};
-			// 0600: this file holds per-workspace Linear OAuth tokens.
-			writeFileSync(configPath, JSON.stringify(config, null, "\t"), {
-				encoding: "utf-8",
-				mode: 0o600,
-			});
-			// mode only applies on create, so tighten pre-existing configs too.
-			chmodSync(configPath, 0o600);
+			config.linearWorkspaces![workspace.id] = workspaceEntry;
+			// PON-190: write ONE workspace key into the file as it is inside
+			// the lock. Writing our whole copy back would erase any workspace
+			// added — or any token rotated — since this command read it, which
+			// on a box serving several tenants means losing a client.
+			updateConfigFile<typeof config>(
+				configPath,
+				(current) => {
+					const next = current ?? config;
+					next.linearWorkspaces = next.linearWorkspaces ?? {};
+					next.linearWorkspaces[workspace.id] = workspaceEntry;
+					return next;
+				},
+				{ mode: 0o600, indent: "\t" },
+			);
 
 			this.logSuccess(`Saved credentials for workspace: ${workspace.name}`);
 			if (!config.repositories || config.repositories.length === 0) {
@@ -147,7 +156,10 @@ export class SelfAuthCommand extends BaseCommand {
 
 			console.log();
 			this.logSuccess(
-				"Authentication complete! Restart cyrus to use the new tokens.",
+				// PON-190: config hot-reloads and has since before the fork. Telling
+				// the operator to restart taught the one habit most likely to
+				// interrupt a live client session.
+				"Authentication complete. The running agent picks this up on its own — no restart needed.",
 			);
 			process.exit(0);
 		} catch (error) {
