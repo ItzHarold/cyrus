@@ -6757,6 +6757,18 @@ ${taskSection}`;
 						clientIssueId,
 					),
 			});
+			// PON-216: the attach is the thing that silently stopped happening
+			// on resume, and there was no way to see it. A mirror going quiet
+			// looks identical to an agent with nothing to say, so the absence
+			// had to be inferred from missing activities weeks later. Journal
+			// it: whether narration is wired is now a grep, not an inference.
+			this.logger.info(
+				`[event:narration_shadow_attached] ${JSON.stringify({
+					sessionId: session.id,
+					issueId: clientIssueId,
+					narrationSessionId,
+				})}`,
+			);
 		}
 	}
 
