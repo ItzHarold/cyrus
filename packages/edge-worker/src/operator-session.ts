@@ -214,6 +214,79 @@ machine, and their work must never be lost:
 }
 
 /**
+ * The instruction block for the FIRST implementation run, started from a
+ * queued mirror (PON-225).
+ *
+ * Same thread and same silence as an operator turn, one difference that
+ * changes the whole shape: this run's final response IS the summary the
+ * client receives. `buildOperatorSessionBlock` forbids exactly that — it is
+ * written for a reviewer conversation after the work exists — so reusing it
+ * here would produce a turn whose closing text must never reach a client,
+ * which is the one text this run has to get right.
+ *
+ * The two registers coexist deliberately: narration is for the reviewer
+ * (technical, files, trade-offs), the closing summary is for the client
+ * (deliverable framing, no internals). That is the same split a client-side
+ * implementation session already runs under; only the audience of the
+ * narration moved.
+ */
+export function buildMirrorImplementationBlock(input: {
+	issueIdentifier?: string;
+	branchName?: string;
+	clientScope?: string;
+	instruction?: string;
+}): string {
+	const ident = input.issueIdentifier ?? "the client's issue";
+	return `
+
+<mirror_implementation_session>
+This is the working thread for ${ident}. It is INTERNAL: the person reading is
+the reviewer at Ponte Digital, and the client cannot see anything here. The
+client has approved the scope below and is waiting; nothing reaches them until
+the reviewer releases it.
+${
+	input.clientScope
+		? `
+The scope the client approved:
+
+${input.clientScope}
+`
+		: ""
+}
+Do the work:
+- Implement it in this worktree, on the branch already checked out${input.branchName ? ` (\`${input.branchName}\`)` : ""}. Do not create another branch.
+- Commit and push to the client's repository as you normally would, and open a
+  pull request there as a DRAFT. Leave it a draft — marking it ready is the
+  reviewer's action at release, never yours.
+- Verify your work the way you would on any change: build it, run the tests,
+  and say what you actually ran.
+${input.instruction ? `\nThe reviewer added: ${input.instruction}\n` : ""}
+While you work, talk to the reviewer directly. They are technical — name
+files, show trade-offs, flag anything you are unsure about. This narration is
+theirs and the client never sees it.
+
+Then end your turn with the summary THE CLIENT will read. This is the one
+piece of client-facing writing in the run, it is held for the reviewer to
+approve, and it is what the client receives on release:
+- Their language, not ours: what now works and how they can see it working.
+  No file names, no internal paths, no mechanics, no mention of this thread.
+- Write the pull request URL and the preview URL out in full. They are read
+  back out of this text to build the client's links — a shortened or
+  paraphrased URL is a link they do not get.
+- Describe what is actually true of the branch as it stands now.
+
+If you need something only the client can answer, say so and stop. Do not
+contact them: the reviewer decides what reaches the client.
+
+Git safety — the reviewer may commit to this branch from their own machine:
+never \`git reset --hard\`, \`git checkout -- .\`, \`git clean -fd\`, or any force
+push. If a push is rejected as non-fast-forward, integrate with
+\`git pull --rebase\` and push again; if that cannot be done cleanly, stop and
+say so rather than forcing.
+</mirror_implementation_session>`;
+}
+
+/**
  * Destructive git, denied for operator sessions (PON-208, R9).
  *
  * Be honest about what this is: a guardrail, not a boundary. The tool layer

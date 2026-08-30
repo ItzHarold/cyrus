@@ -4,6 +4,12 @@ This changelog documents internal development changes, refactors, tooling update
 
 ## [Unreleased]
 
+### Added
+- Delegating a queued cockpit mirror now starts the client's implementation run on the mirror itself: the client's repository and worktree, the cockpit's thread, and a draft pull request on the client's repo. The run's closing summary is held by the verification gate exactly as before, so `approve:` still delivers it. Starting is reviewer-gated and takes the client's lane, refusing with the reason when that client is already building. ([PON-225](https://linear.app/ponte-digital/issue/PON-225))
+
+### Changed
+- Sessions on a cockpit mirror now resolve their Anthropic credential against the cockpit workspace rather than the client's. This is the locked auth split — our own implementation and review work rides the subscription, and a tenant's metered key pays only for what the client is actually talked to with. ([PON-225](https://linear.app/ponte-digital/issue/PON-225))
+
 ## [0.2.68] - 2026-08-05
 
 ### Added
