@@ -55,6 +55,12 @@ export type MirrorIntent =
 	| { kind: "mine" }
 	| { kind: "handback"; notes: string }
 	| { kind: "ask-client"; question: string }
+	/**
+	 * Recognised as an ask, but the question is not usable as written
+	 * (PON-221) — a fragment, the wrong person, or nothing at all. Answered
+	 * on the mirror with the syntax; nothing reaches the client.
+	 */
+	| { kind: "ask-client-unclear"; draft: string }
 	| { kind: "iterate"; instruction: string }
 	/**
 	 * Arrived with no instruction — a bare delegation (PON-211).
@@ -66,7 +72,30 @@ export type MirrorIntent =
 	 */
 	| { kind: "orient" };
 
-const ASK_CLIENT = /^ask[\s-]+client\b[:,-]?\s*([\s\S]*)$/i;
+/**
+ * Asking the client, in plain language (PON-221).
+ *
+ * `ask client: …` still works, but a reviewer mid-review writes "can you ask
+ * the client whether they want the totals rounded" — and being told that is
+ * not the magic phrase is exactly the kind of friction that makes a feature
+ * go unused.
+ *
+ * The word **client** is required, deliberately. This is the one action that
+ * reaches the tenant's own thread, so the asymmetry matters: failing to
+ * recognise an ask costs a re-phrase, while misreading an internal
+ * instruction as one puts operator words in front of a client. "ask them",
+ * "check with them" and similar are NOT matched — "them" is ambiguous in a
+ * thread that also talks about users, reviewers and maintainers.
+ *
+ * `client` must also END there: `(?![-\w])` is what stops "ask the
+ * client-facing team to review the copy" from being read as an ask and
+ * sending the client the words "facing team to review the copy". The first
+ * draft of this pattern used `\b[:,-]?` and did exactly that — the hyphen it
+ * accepted as a separator is the same hyphen that starts a compound noun.
+ * A trailing separator is `:` or `,` only.
+ */
+const ASK_CLIENT =
+	/^(?:(?:can|could|would|please)\s+(?:you\s+)?)?(?:ask|check\s+with|confirm\s+with|query)\s+(?:the\s+)?client(?![-\w])\s*([:,])?\s*([\s\S]*)$/i;
 const HANDBACK = /^back\s+to\s+you\b[:,-]?\s*([\s\S]*)$/i;
 /**
  * "mine" must be the WHOLE message. A bare "mine" is unambiguous; "mine is
@@ -97,8 +126,27 @@ export function classifyMirrorIntent(body: string): MirrorIntent {
 	if (reject) return { kind: "reject", feedback: (reject[1] ?? "").trim() };
 
 	const askClient = ASK_CLIENT.exec(text);
-	if (askClient)
-		return { kind: "ask-client", question: (askClient[1] ?? "").trim() };
+	if (askClient) {
+		const separator = askClient[1];
+		const rest = (askClient[2] ?? "").trim();
+		// The question is posted to the tenant VERBATIM, so it has to be
+		// written the way it should arrive. The reviewer speaks about the
+		// client in the third person — "ask the client whether THEY want the
+		// totals rounded" — while the message is addressed TO them, so
+		// forwarding his phrasing as-is sends a fragment in the wrong person:
+		// "for the logo files", "whether they want the totals rounded". No
+		// pattern fixes that, because the pronoun is the problem.
+		//
+		// So a self-contained question is required: one written after `:` or
+		// `,`, or anything ending in a question mark. Plain-language TRIGGERS
+		// still work — no keyword to remember — the question itself just has
+		// to be his own words for the client. Anything else is answered with
+		// the syntax rather than guessed at.
+		const selfContained = Boolean(separator) || rest.endsWith("?");
+		if (rest.length > 0 && selfContained)
+			return { kind: "ask-client", question: rest };
+		return { kind: "ask-client-unclear", draft: rest };
+	}
 
 	const handback = HANDBACK.exec(text);
 	if (handback) return { kind: "handback", notes: (handback[1] ?? "").trim() };

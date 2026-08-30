@@ -82,6 +82,17 @@ export interface SerializableEdgeWorkerState {
 	// work whose client-facing summary is held until the operator approves.
 	// NEVER auto-released — a restart must restore these, not deliver them.
 	pendingDeliveries?: Record<string, SerializedVerificationRecord>;
+	/**
+	 * Links held from the client while their work is in review (v4.12,
+	 * PON-221). Keyed by session id.
+	 *
+	 * Persisted for the same reason `pendingDeliveries` is: the record that
+	 * releases these survives a restart, so these have to as well. Without
+	 * it, a deploy between "the agent opened the PR" and "Harold approved"
+	 * would drop the links silently — the summary would reach the client with
+	 * nothing to click, and nothing anywhere would say why.
+	 */
+	heldClientLinks?: Record<string, Array<{ url: string; label: string }>>;
 	// Mention-session markers (v4.5, PON-151/152). A mention session
 	// completing after a restart must still post conversationally, never be
 	// held for verification or close a delegation's mirror.
@@ -237,6 +248,16 @@ export interface SerializedCockpitMirror {
 	approvedAt?: string;
 	revisions?: number;
 	briefLinks?: string[];
+	/**
+	 * When this mirror entered its current state, ISO (PON-221).
+	 *
+	 * The mirror's own clock, not the client issue's. Harold read "10 hours
+	 * ago" on a mirror that was minutes old, because the only age on the
+	 * board belonged to the client's issue — which had been open all night
+	 * while its scope was being agreed. A mirror's age is the age of the
+	 * review, and the review starts when the mirror does.
+	 */
+	stateSince?: string;
 	/**
 	 * Last round-robin rank written as the mirror's Linear sortOrder
 	 * (PON-173) — cached so unchanged ranks skip the write.

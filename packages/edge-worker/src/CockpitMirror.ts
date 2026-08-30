@@ -192,7 +192,49 @@ const WAITING_STATES = new Set(["in-verification", "needs-info"]);
  * existing mirror showing the old body until its work happens to move. Bump it
  * in the same commit as any rendering change.
  */
-const DESCRIPTION_VERSION = 3;
+// Bumped to 4 for PON-221: the state line now carries the mirror's own age,
+// the client-issue line no longer promises links that are held, and the
+// preview renders as an anchor. Mirrors written by the previous release
+// refresh themselves on first touch rather than showing the old wording.
+const DESCRIPTION_VERSION = 4;
+
+/**
+ * A duration in the reviewer's words (PON-221).
+ *
+ * Coarse on purpose. The mirror's body is rewritten on transitions and on a
+ * refresh clock, and a value that changes every second would make every
+ * render a diff; minutes are the finest granularity anyone reviewing work
+ * acts on. Reads as an age — "held 2h 5m" — never as a timestamp.
+ */
+/**
+ * A stored state without its queue-position suffix (`queued (#3)` → `queued`).
+ *
+ * The position is a rendering detail that changes every time the work ahead
+ * drains. Comparing states WITH it made "#3 becomes #2" look like a
+ * transition — which restarted the mirror's age, so a mirror queued for hours
+ * read "for just now" precisely as it neared the front. `setOperatorNote`
+ * re-upserts on the bare state and hit the same edge from the other side.
+ */
+export function bareCockpitState(state: string | undefined): string {
+	return (state ?? "").replace(/\s*\(#\d+\)\s*$/, "");
+}
+
+export function formatMirrorAge(fromIso: string, nowMs: number): string {
+	const started = Date.parse(fromIso);
+	if (Number.isNaN(started)) return "";
+	const ms = nowMs - started;
+	if (ms < 0) return "just now";
+	const minutes = Math.floor(ms / 60_000);
+	if (minutes < 1) return "just now";
+	if (minutes < 60) return `${minutes}m`;
+	const hours = Math.floor(minutes / 60);
+	const restMinutes = minutes % 60;
+	if (hours < 24)
+		return restMinutes ? `${hours}h ${restMinutes}m` : `${hours}h`;
+	const days = Math.floor(hours / 24);
+	const restHours = hours % 24;
+	return restHours ? `${days}d ${restHours}h` : `${days}d`;
+}
 
 export function isForeignCockpitMirror(title: string | undefined): boolean {
 	return MIRROR_TITLE_PATTERN.test(title ?? "");
@@ -393,6 +435,14 @@ export class CockpitMirror {
 					...(detail?.brief?.addLinks ?? []),
 				]),
 			];
+			// The state exactly as it will be stored, position suffix and all.
+			// `stateSince` compares against THIS: comparing against the bare
+			// state would restart the mirror's clock on every re-rank, which
+			// is the opposite of what an age is for.
+			const nextState =
+				detail?.position !== undefined
+					? `${state} (#${detail.position})`
+					: state;
 			const record: SerializedCockpitMirror = {
 				mirrorIssueId: existing?.mirrorIssueId ?? "",
 				renderVersion: DESCRIPTION_VERSION,
@@ -402,10 +452,7 @@ export class CockpitMirror {
 					: {}),
 				clientQueuePosition: existing?.clientQueuePosition,
 				tenantWorkspaceId,
-				state:
-					detail?.position !== undefined
-						? `${state} (#${detail.position})`
-						: state,
+				state: nextState,
 				issueIdentifier: issue.issueIdentifier ?? existing?.issueIdentifier,
 				issueUrl: issue.url ?? existing?.issueUrl,
 				title: issue.title ?? existing?.title,
@@ -426,6 +473,20 @@ export class CockpitMirror {
 					? { revisions: detail?.brief?.revisions ?? existing?.revisions }
 					: {}),
 				...(mergedLinks.length ? { briefLinks: mergedLinks } : {}),
+				// PON-221: the mirror's own clock. Preserved while the state
+				// is unchanged so a re-render (a refresh tick, a renderer
+				// bump) never resets the age; restarted the moment the work
+				// actually moves. A mirror restored without one adopts now —
+				// understating an age is honest, inventing one is not.
+				// Compared on the BARE state: a re-rank (#3 → #2) and an
+				// operator note both rewrite the record without the work
+				// having moved, and neither is a new state to start counting
+				// from.
+				stateSince:
+					existing &&
+					bareCockpitState(existing.state) === bareCockpitState(nextState)
+						? (existing.stateSince ?? new Date().toISOString())
+						: new Date().toISOString(),
 			};
 			const description =
 				this.renderDescription(record, tenantWorkspaceId) +
@@ -1331,6 +1392,17 @@ export class CockpitMirror {
 	}
 
 	/**
+	 * The state last written for a client issue's mirror (PON-221).
+	 *
+	 * Lets a caller tell "no held work because it is still being built" from
+	 * "no held work at all" — two situations that read identically from the
+	 * verification gate and mean opposite things to a reviewer.
+	 */
+	stateFor(clientIssueId: string): string | undefined {
+		return this.mirrors.get(clientIssueId)?.state;
+	}
+
+	/**
 	 * Post a comment on a client issue's mirror (PON-152 escalation: the
 	 * assignee is a subscriber, so a comment is the second, louder
 	 * notification). Never throws.
@@ -1541,8 +1613,22 @@ export class CockpitMirror {
 				: record.queueRank
 					? `**#${record.queueRank} in the review queue**${record.clientQueuePosition ? ` · #${record.clientQueuePosition} for this client` : ""} — assign yourself to claim it.`
 					: "",
-			`**State:** ${record.state} · ${new Date().toISOString()}`,
-			`**Client issue:** ${record.issueUrl ?? "(no url recorded)"} — session thread, PR and preview links live there.`,
+			// PON-221: an age the reviewer can act on, measured from this
+			// mirror's own transition. The ISO stamp this replaced was
+			// regenerated on every write, so it told you when the body was
+			// last rewritten — never how long the work had been waiting.
+			(() => {
+				const age = record.stateSince
+					? formatMirrorAge(record.stateSince, Date.now())
+					: "";
+				return age
+					? `**State:** ${record.state} · for ${age}`
+					: `**State:** ${record.state}`;
+			})(),
+			// PON-221: it used to say the PR and preview links live on the
+			// client's thread. They no longer do until release — that was the
+			// leak, not a description of it.
+			`**Client issue:** ${record.issueUrl ?? "(no url recorded)"} — their session thread. The links below stay here until you release the work.`,
 			// The operator brief (PON-170): what the client approved, when,
 			// after how many revisions. Renders on every re-render, so a
 			// later transition never erases it.
@@ -1552,7 +1638,16 @@ export class CockpitMirror {
 			...(record.approvedAt
 				? [
 						"",
-						`**Approved:** ${record.approvedAt} · **Revisions:** ${record.revisions ?? 0}`,
+						// PON-221: the approval is the mirror's birth, so it is
+						// the one client-side timestamp that IS true for the
+						// mirror's life — shown as an age like everything else
+						// here, rather than as a raw ISO string.
+						(() => {
+							const age = record.approvedAt
+								? formatMirrorAge(record.approvedAt, Date.now())
+								: "";
+							return `**Approved:** ${age ? `${age} ago` : record.approvedAt} · **Revisions:** ${record.revisions ?? 0}`;
+						})(),
 					]
 				: []),
 			// The internal reading (PON-169).

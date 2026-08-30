@@ -817,9 +817,13 @@ describe("CockpitMirror", () => {
 			).input.description;
 			expect(description).toContain("## Client scope");
 			expect(description).toContain("**Outcome** — CSV export works.");
-			expect(description).toContain(
-				"**Approved:** 2026-08-25T10:00:00.000Z · **Revisions:** 2",
+			// PON-221: shown as an age, not a raw ISO stamp. Matched by shape
+			// because the age is measured against the wall clock — pinning the
+			// literal would make this test fail a day after it was written.
+			expect(description).toMatch(
+				/\*\*Approved:\*\* .+ ago · \*\*Revisions:\*\* 2/,
 			);
+			expect(description).not.toContain("2026-08-25T10:00:00.000Z");
 			expect(description).toContain("## Internal reading");
 			expect(description).toContain("internal reading");
 			expect(description).toContain("## Links");

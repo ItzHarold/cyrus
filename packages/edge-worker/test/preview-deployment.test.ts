@@ -104,7 +104,7 @@ describe("preview deployment", () => {
 		// The URL is still reported — the operator can open it, and it is the
 		// evidence for the onboarding step that was skipped.
 		expect(result?.url).toBe("https://webapp-abc.vercel.app");
-		expect(renderPreview(result)).toContain("asks for a login");
+		expect(renderPreview(result)).toContain("asks for a Vercel login");
 	});
 
 	it("does not call a preview protected just because the probe failed", async () => {
@@ -369,6 +369,6 @@ describe("preview deployment — with a tenant bypass value", () => {
 			hostWhereOnlyBypassOpens("good"),
 		);
 		expect(result?.state).toBe("protected");
-		expect(renderPreview(result)).toContain("asks for a login");
+		expect(renderPreview(result)).toContain("asks for a Vercel login");
 	});
 });
