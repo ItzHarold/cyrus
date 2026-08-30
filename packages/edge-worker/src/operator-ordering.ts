@@ -41,8 +41,10 @@ export function stateRankOf(state: string): number {
 			return 0;
 		case "needs-info":
 			return 1;
-		case "awaiting-scope-confirm":
-			return 2;
+		// PON-219: "awaiting-scope-confirm" had rank 2. Unreachable now —
+		// unapproved work never becomes a mirror, so it never enters the
+		// ordering. The gap is left rather than renumbering, because the
+		// ranks are only ever compared, never displayed.
 		case "active":
 			return 3;
 		case "queued": {

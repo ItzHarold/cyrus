@@ -159,10 +159,20 @@ describe("EdgeWorker - operator note delivery (PON-169)", () => {
 		const record = privates(worker).scopeApprovals.get(ISSUE_ID);
 		expect(record?.state).toBe("approved");
 		expect(upsert).toHaveBeenCalledWith(
-			{ issueId: ISSUE_ID, issueIdentifier: "DVV-42" },
+			// PON-219: this write is the mirror's BIRTH now, so it has to
+			// carry the title and the internal reading. Before, both arrived
+			// on an earlier transition that no longer happens — the mirror
+			// would have rendered "(untitled)" with no reading on it.
+			{
+				issueId: ISSUE_ID,
+				issueIdentifier: "DVV-42",
+				title: "Add CSV export",
+				url: undefined,
+			},
 			GATED_WS,
 			"active",
 			{
+				operatorNote: "internal reading",
 				brief: {
 					clientScope: "**Outcome** — export works.",
 					approvedAt: record?.approvedAt,

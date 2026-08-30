@@ -87,11 +87,11 @@ describe("EdgeWorker - cockpit mirror wiring (PON-151)", () => {
 		mirror = spyMirror(worker);
 	});
 
-	it("scope-confirm proposal mirrors as awaiting-scope-confirm", async () => {
+	it("a scope proposal puts NOTHING on the operator's board (PON-219)", async () => {
+		// The cockpit contains only approved work. While the client is still
+		// deciding, the conversation is theirs and the agent's — an issue in
+		// the operator's queue is work he has not been asked to do yet.
 		registerSession(worker);
-		// PON-188/191: the confirmation ask only goes out once the client
-		// scope has been commented on the issue, so the mirror transition now
-		// sits behind that precondition too.
 		privates(worker).scopeApprovals.recordOperatorNote(
 			ISSUE_ID,
 			"internal reading",
@@ -110,81 +110,30 @@ describe("EdgeWorker - cockpit mirror wiring (PON-151)", () => {
 			new AbortController().signal,
 		);
 
-		expect(mirror.upsert).toHaveBeenCalledWith(
-			expect.objectContaining({ issueId: ISSUE_ID }),
-			GATED_WS,
-			"awaiting-scope-confirm",
+		expect(mirror.upsert).not.toHaveBeenCalled();
+	});
+
+	it("records the approval even if the mirror cannot be created", async () => {
+		// The mirror is now BORN on this path, so a throw here lands at the
+		// moment consent is recorded. The approval is the fact and the SLA
+		// start; the mirror is a derived view, and a broken view must never
+		// cost us the fact.
+		registerSession(worker);
+		privates(worker).scopeApprovals.recordProposed(ISSUE_ID, {
+			workspaceId: GATED_WS,
+			issueIdentifier: "DVV-42",
+		});
+		privates(worker).askUserQuestionHandler = {
+			getPendingQuestion: () => confirmQuestion,
+			clearPendingQuestion: vi.fn(),
+		};
+		mirror.upsert = vi.fn(() => {
+			throw new Error("cockpit unreachable");
+		});
+		await privates(worker).interpretScopeConfirmReply(
+			promptedWebhook("Approve scope"),
 		);
-	});
-
-	it("records the approval even if the mirror write cannot happen", async () => {
-		// This runs on the scope-APPROVAL path. A cosmetic write to an operator
-		// surface must never be able to stop a client's consent being recorded
-		// — the mirror is a derived view, the approval is the fact. Found by a
-		// partial test double throwing here.
-		const p = worker as never as Record<string, (id: string) => void>;
-		expect(() => p.markConsentOnMirror("issue-with-no-mirror")).not.toThrow();
-	});
-
-	/**
-	 * PON-216: a plan on the mirror before consent is labelled a proposal. The
-	 * predicate deciding that is the interesting part — it has two ways to be
-	 * wrong in opposite directions.
-	 */
-	describe("the pre-consent predicate", () => {
-		const COCKPIT_WS = "cockpit-workspace-id";
-
-		/** Attach the shadow and hand back the predicate it was given. */
-		function predicateAfterAttach(gate: boolean): () => boolean {
-			registerSession(worker);
-			privates(worker).config.linearWorkspaces = {
-				[GATED_WS]: { linearToken: "t1", scopeConfirmGate: gate },
-			};
-			privates(worker).config.cockpit = {
-				linearWorkspaceId: COCKPIT_WS,
-				workspaceName: "Ponte Digital",
-				teamId: "team-1",
-			};
-			privates(worker).activitySinks.set(COCKPIT_WS, {
-				postActivity: vi.fn(),
-				createAgentSession: vi.fn(),
-			});
-			privates(worker).sessionRepositories.set(SESSION_ID, "repo-1");
-			privates(worker).repositories.set("repo-1", {
-				id: "repo-1",
-				linearWorkspaceId: GATED_WS,
-			});
-			privates(worker).attachNarrationShadow(ISSUE_ID, "mirror-session-1");
-			return privates(worker).agentSessionManager.shadowSinks.get(SESSION_ID)
-				?.preConsent;
-		}
-
-		it("labels while the gate is open and the client has not approved", () => {
-			expect(predicateAfterAttach(true)()).toBe(true);
-		});
-
-		it("does not depend on the approval record existing yet", () => {
-			// The plan that caused this rendered at 19:16 and the approval
-			// record was created at 19:17, when the elicitation posted. Keying
-			// on the record would have missed the exact activity Harold
-			// misread.
-			expect(privates(worker).scopeApprovals.get(ISSUE_ID)).toBeUndefined();
-			expect(predicateAfterAttach(true)()).toBe(true);
-		});
-
-		it("stops labelling once the scope is approved", () => {
-			const predicate = predicateAfterAttach(true);
-			privates(worker).scopeApprovals.recordProposed(ISSUE_ID, {});
-			privates(worker).scopeApprovals.recordApproved(ISSUE_ID);
-			expect(predicate()).toBe(false);
-		});
-
-		it("never labels on a workspace with no gate at all", () => {
-			// An ungated workspace has no consent to be waiting for, so
-			// "not yet approved" would be permanently wrong there — and a
-			// permanent label is noise that teaches a reviewer to skip labels.
-			expect(predicateAfterAttach(false)()).toBe(false);
-		});
+		expect(privates(worker).scopeApprovals.isApproved(ISSUE_ID)).toBe(true);
 	});
 
 	it("scope approval mirrors as active", async () => {
@@ -359,12 +308,11 @@ describe("EdgeWorker - cockpit mirror wiring (PON-151)", () => {
 				position: 1,
 			},
 		]);
-		expect(live.awaitingScopeConfirm).toEqual([
-			{
-				issue: { issueId: "issue-awaiting", issueIdentifier: "DVV-8" },
-				tenantWorkspaceId: GATED_WS,
-			},
-		]);
+		// PON-219: an open scope conversation is NOT handed to reconcile any
+		// more. It used to be the belt-and-braces that recreated a mirror for
+		// anything unapproved, which would have quietly undone the creation
+		// guard on the very next boot.
+		expect(live.awaitingScopeConfirm).toBeUndefined();
 	});
 
 	it("cockpit mirrors serialize through serializeMappings and restore back", () => {

@@ -171,7 +171,6 @@ import {
 } from "./client-content-policy.js";
 import { CLIENT_MESSAGES } from "./client-messages.js";
 import { ClientRegistry, teamKeyOf } from "./client-registry.js";
-import { CONSENT_MARKER } from "./consent-boundary.js";
 import { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
 import { EgressProxy } from "./EgressProxy.js";
 import { GitService, WorktreeCreationRefusedError } from "./GitService.js";
@@ -209,6 +208,7 @@ import {
 	interpretScopeConfirmAnswer,
 	isScopeConfirmQuestion,
 } from "./scope-confirm-gate.js";
+import { ScopeWaitingRoom, WAITING_ROOM_TITLE } from "./scope-waiting-room.js";
 import { VerificationGate } from "./VerificationGate.js";
 
 /** Options threaded through the created-session flow by the lane machinery. */
@@ -335,6 +335,14 @@ export class EdgeWorker extends EventEmitter {
 	private needsInfo: NeedsInfoStore = new NeedsInfoStore();
 	/** Operator-cockpit mirror (PON-151) — derived view, write-only from here */
 	private cockpitMirror!: CockpitMirror;
+	/**
+	 * Where a stalled scope conversation becomes noticeable (PON-219).
+	 *
+	 * Pre-approval work is off the board entirely, so this is the only place
+	 * an operator can see that a client has gone quiet mid-scope. It holds no
+	 * state of its own — it renders `scopeApprovals.listPending()`.
+	 */
+	private scopeWaitingRoom!: ScopeWaitingRoom;
 	/**
 	 * Sessions that started from an @mention (PON-151). A mention is a
 	 * conversation on the issue, not the delegated work — its end must not
@@ -618,12 +626,45 @@ export class EdgeWorker extends EventEmitter {
 				// read instead of being dropped.
 				openNarrationSession: (mirrorIssueId, clientIssueId) =>
 					this.openNarrationSessionOnce(mirrorIssueId, clientIssueId),
+				// PON-219: the invariant that keeps unapproved work off the
+				// operator's board. Read live, per write — an issue crosses this
+				// line exactly once, mid-session, and a value captured earlier
+				// would be the wrong answer on the write that matters.
+				scopeGatePending: (workspaceId, issueId) =>
+					this.scopeGatePendingForIssue(workspaceId, issueId),
 				// Trailing-debounced: a lane dequeue re-renders every queued
 				// mirror, and N back-to-back transitions must not become N
 				// full state-file writes.
 				persist: async () => {
 					this.scheduleCockpitPersist();
 				},
+			},
+			this.logger,
+		);
+
+		this.scopeWaitingRoom = new ScopeWaitingRoom(
+			{
+				getConfig: () =>
+					this.config.cockpit
+						? {
+								linearWorkspaceId: this.config.cockpit.linearWorkspaceId,
+								teamId: this.config.cockpit.teamId,
+							}
+						: undefined,
+				getToken: (workspaceId) =>
+					this.config.linearWorkspaces?.[workspaceId]?.linearToken,
+				getClientName: (workspaceId) =>
+					workspaceId
+						? new ClientRegistry(this.config.clients).resolveFor(workspaceId)
+								.displayName
+						: undefined,
+				// Same threshold as the verification ladder's first rung: the
+				// operator already has one calibrated sense of "this has been
+				// quiet too long", and a second number would just be another
+				// thing to tune.
+				stallAfterHours: () =>
+					this.config.verificationEscalation?.remindAfterHours ?? 4,
+				now: () => Date.now(),
 			},
 			this.logger,
 		);
@@ -5124,6 +5165,24 @@ ${taskSection}`;
 				);
 				return;
 			}
+			// PON-219: the waiting room is an operator artefact in the cockpit
+			// team, and the natural response to its stall comment is to reply
+			// in the thread — which Linear delivers here as a delegation. It
+			// is not a mirror, so the check above does not catch it, and
+			// falling through starts a paid session that would try to route an
+			// operator list to a client repository. Answer and stop.
+			if (
+				workspaceId === this.config.cockpit?.linearWorkspaceId &&
+				webhook.agentSession.issue?.title === WAITING_ROOM_TITLE
+			) {
+				await this.agentSessionManager
+					.createResponseActivity?.(
+						sessionId,
+						"This is a list, not a piece of work — it shows scope conversations still waiting on a client. Nudging them happens on the client's own issue; nothing here is mine to pick up. The list clears itself as clients reply.",
+					)
+					.catch(() => {});
+				return;
+			}
 		}
 
 		// PON-112: serialized-lane admission, before the ack so the FIRST
@@ -5844,6 +5903,32 @@ ${taskSection}`;
 				error,
 			);
 		}
+		// PON-219: every scope-state change funnels through here — proposed,
+		// approved, revised, cancelled — so the waiting room is refreshed from
+		// one place rather than at each of its callers.
+		this.syncScopeWaitingRoom();
+	}
+
+	/**
+	 * Refresh the pre-approval visibility list (PON-219).
+	 *
+	 * Fire-and-forget and never throws: this is an operator convenience, and
+	 * a failure here must never touch a client's scope conversation.
+	 */
+	private syncScopeWaitingRoom(): void {
+		try {
+			void this.scopeWaitingRoom?.sync(
+				this.scopeApprovals.listPending().map((entry) => ({
+					issueId: entry.issueId,
+					issueIdentifier: entry.issueIdentifier,
+					workspaceId: entry.workspaceId,
+					proposedAt: entry.proposedAt,
+					state: entry.state,
+				})),
+			);
+		} catch (error) {
+			this.logger.debug(`Waiting room sync skipped: ${String(error)}`);
+		}
 	}
 
 	/**
@@ -5904,32 +5989,69 @@ ${taskSection}`;
 					revisions: record?.revisions ?? 0,
 				});
 				await this.persistScopeApprovals("scope_confirmed");
-				// Draw the line the reviewer needs. Everything the session did
-				// before this was investigation to WRITE the scope — including
-				// its plan, which reads like completed work when it is the only
-				// thing on the thread. Say where consent happened so nobody has
-				// to reconstruct it from timestamps.
-				this.markConsentOnMirror(issueId as string);
-				// Cockpit (PON-151): approved — work resumes. The mirror
-				// becomes the operator brief (PON-170): what the client
-				// approved, when, after how many revisions. The internal
-				// reading (PON-169) is already on the mirror record.
-				void this.cockpitMirror.upsert(
-					{ issueId: issueId as string, issueIdentifier: identifier },
-					workspaceId,
-					"active",
-					{
-						brief: {
-							...(record?.clientScope !== undefined
-								? { clientScope: record.clientScope }
-								: {}),
-							...(record?.approvedAt !== undefined
-								? { approvedAt: record.approvedAt }
-								: {}),
-							revisions: record?.revisions ?? 0,
+				// PON-219: this is now the mirror's BIRTH, not a transition on
+				// an existing one — the cockpit contains only approved work.
+				//
+				// Two consequences that were easy to miss. First, this write is
+				// the first one, so it has to carry the issue's title and url;
+				// the delegation-time create used to supply them, and without
+				// them the mirror renders "(untitled)" with no link back — the
+				// exact way CKP-1 was left. Second, the internal reading is on
+				// the SCOPE record, not on a mirror record that no longer
+				// exists before this moment, so it has to be passed through
+				// here or PON-169's reading silently stops reaching the board.
+				const approvedIssue = webhook.agentSession.issue;
+				// PON-219: the mirror is born here, so its FIRST state has to
+				// be the truth. An approved issue whose session is still
+				// waiting for the lane has not started — under the old design
+				// the mirror already existed as `queued` and this write was
+				// only a transition, so "active" was harmless. As a BIRTH
+				// state it would put not-yet-started work in the Active
+				// column, which is the same lie this change removes.
+				const queuedPosition = this.laneManager
+					.queuedEntriesOf(workspaceId)
+					.find((entry) => entry.issueId === issueId)?.position;
+				// Wrapped, because this write now happens at the moment consent
+				// is recorded rather than as one transition among many. `void`
+				// swallows a rejected promise but not a synchronous throw, and
+				// the approval is the fact the whole gate exists to capture —
+				// a derived view failing must never be able to cost us it.
+				try {
+					void this.cockpitMirror.upsert(
+						{
+							issueId: issueId as string,
+							issueIdentifier: identifier,
+							title:
+								approvedIssue?.title ??
+								this.agentSessionManager.getSession(sessionId)?.issue?.title,
+							url: (approvedIssue as { url?: string } | undefined)?.url,
 						},
-					},
-				);
+						workspaceId,
+						queuedPosition === undefined ? "active" : "queued",
+						{
+							...(queuedPosition !== undefined
+								? { position: queuedPosition }
+								: {}),
+							...(record?.operatorNote !== undefined
+								? { operatorNote: record.operatorNote }
+								: {}),
+							brief: {
+								...(record?.clientScope !== undefined
+									? { clientScope: record.clientScope }
+									: {}),
+								...(record?.approvedAt !== undefined
+									? { approvedAt: record.approvedAt }
+									: {}),
+								revisions: record?.revisions ?? 0,
+							},
+						},
+					);
+				} catch (error) {
+					this.logger.error(
+						"Could not create the cockpit mirror at approval:",
+						error,
+					);
+				}
 			}
 		} else if (verdict === "revision") {
 			if (this.scopeApprovals.recordRevised(issueId as string)) {
@@ -6327,16 +6449,12 @@ ${taskSection}`;
 					});
 				}
 			}
-			const awaitingScopeConfirm = this.scopeApprovals
-				.listPending()
-				.filter((record) => record.workspaceId)
-				.map((record) => ({
-					issue: {
-						issueId: record.issueId,
-						issueIdentifier: record.issueIdentifier,
-					},
-					tenantWorkspaceId: record.workspaceId as string,
-				}));
+			// PON-219: reconcile no longer rebuilds mirrors for open scope
+			// gates. It used to be the belt-and-braces that made a mirror
+			// reappear for anything unapproved, which is precisely the
+			// behaviour being removed — and it would have quietly undone the
+			// creation guard on the next boot. Those conversations surface in
+			// the waiting room instead, which this same boot refreshes.
 			const inVerification = this.verificationGate
 				.listPending()
 				.map((record) => ({
@@ -6349,9 +6467,10 @@ ${taskSection}`;
 			await this.cockpitMirror.reconcile({
 				active,
 				queued,
-				awaitingScopeConfirm,
 				inVerification,
 			});
+			// The pre-approval list is rebuilt from the restored records.
+			this.syncScopeWaitingRoom();
 			// PON-212: reconcile re-upserts an in-verification mirror through
 			// the plain path, which carries no review block — so the preview
 			// link, the changed files and the held summary only ever appeared
@@ -6683,48 +6802,6 @@ ${taskSection}`;
 		return open;
 	}
 
-	/**
-	 * Post the consent boundary into the mirror's narration thread (PON-216).
-	 *
-	 * Harold read a mirror as showing work done before the client approved.
-	 * Nothing had been: the worktree, the commit and the PR all postdate
-	 * approval. What he saw was the scope session's own PLAN — a task list
-	 * containing "Verify and open the pull request" — redirected to the mirror
-	 * and timestamped before consent.
-	 *
-	 * A reviewer should never have to reconstruct that from timestamps. The
-	 * gate is the client's consent and the SLA start; where it falls has to be
-	 * legible at a glance.
-	 */
-	private markConsentOnMirror(clientIssueId: string): void {
-		// Wrapped and optional-called throughout: this runs on the scope
-		// APPROVAL path, and a cosmetic write to an operator surface must
-		// never be able to break the client's consent being recorded. The
-		// mirror is a derived view; the approval is the fact.
-		try {
-			const narrationSessionId =
-				this.cockpitMirror.narrationSessionIdFor?.(clientIssueId);
-			const cockpitWs = this.config.cockpit?.linearWorkspaceId;
-			if (!narrationSessionId || !cockpitWs) return;
-			const tracker = this.issueTrackers.get(cockpitWs);
-			void tracker
-				?.createAgentActivity?.({
-					agentSessionId: narrationSessionId,
-					content: {
-						type: "thought",
-						body: CONSENT_MARKER,
-					},
-				})
-				.catch((error: unknown) => {
-					this.logger.debug(
-						`Could not mark consent on mirror: ${String(error)}`,
-					);
-				});
-		} catch (error) {
-			this.logger.debug(`Could not mark consent on mirror: ${String(error)}`);
-		}
-	}
-
 	private attachNarrationShadow(
 		clientIssueId: string,
 		narrationSessionId: string | undefined,
@@ -6741,21 +6818,6 @@ ${taskSection}`;
 			this.agentSessionManager.setShadowSink?.(session.id, {
 				sink,
 				targetSessionId: narrationSessionId,
-				// A closure, not a value: the shadow is attached once and the
-				// gate opens later in the same session (PON-216).
-				//
-				// The full gate predicate, not just "unapproved". An ungated
-				// workspace has no consent to be waiting for, so labelling its
-				// plans "not yet approved" would be permanently wrong there —
-				// and it must not depend on the approval RECORD existing, since
-				// on ACM-19 the plan rendered at 19:16 and the record was only
-				// created at 19:17, when the elicitation posted. The plan that
-				// caused this predates its own gate.
-				preConsent: () =>
-					this.scopeGatePendingForIssue(
-						this.resolveWorkspaceIdForSession(session.id),
-						clientIssueId,
-					),
 			});
 			// PON-216: the attach is the thing that silently stopped happening
 			// on resume, and there was no way to see it. A mirror going quiet
@@ -7915,6 +7977,11 @@ ${taskSection}`;
 	}
 
 	private async runVerificationLadder(): Promise<void> {
+		// PON-219: ages change with the clock, not with an event, so the
+		// waiting room needs a tick. Reusing this one rather than arming a
+		// second timer — same cadence, same "has this been quiet too long"
+		// question.
+		this.syncScopeWaitingRoom();
 		const remindMs =
 			(this.config.verificationEscalation?.remindAfterHours ?? 4) * 3600_000;
 		const delayNoteMs =
@@ -11353,17 +11420,12 @@ ${input.userComment}
 					proposedAt: this.scopeApprovals.get(gateIssueId as string)
 						?.proposedAt,
 				});
+				// PON-219: no mirror here any more. Until the client approves,
+				// the scope conversation is theirs and the agent's alone, and
+				// an unapproved issue in the operator's queue is work he has
+				// not been asked to do yet. persistScopeApprovals refreshes the
+				// waiting room, which is where a stalled conversation surfaces.
 				await this.persistScopeApprovals("scope_confirm_posted");
-				// Cockpit (PON-151): the invisible-by-construction state, made
-				// visible.
-				void this.cockpitMirror.upsert(
-					{
-						issueId: gateIssueId as string,
-						issueIdentifier: session?.issueContext?.issueIdentifier,
-					},
-					organizationId,
-					"awaiting-scope-confirm",
-				);
 			}
 			// PON-172: a needs-info ask gets its own bookkeeping — a distinct
 			// release reason, a cockpit state, and a persisted record so the

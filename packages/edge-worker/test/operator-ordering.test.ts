@@ -17,10 +17,11 @@ function item(
 describe("operator ordering (PON-173)", () => {
 	describe("stateRankOf", () => {
 		it("puts in-verification first — the operator is the blocker there", () => {
+			// PON-219: "awaiting-scope-confirm" is gone from this list because
+			// an unapproved scope conversation is no longer a mirror at all.
 			const ranks = [
 				"in-verification",
 				"needs-info",
-				"awaiting-scope-confirm",
 				"active",
 				"queued",
 				"delivered",
