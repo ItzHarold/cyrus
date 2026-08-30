@@ -253,8 +253,14 @@ export function renderPreview(preview: PreviewDeployment | undefined): string {
 	const at = preview.sha ? ` (\`${preview.sha.slice(0, 7)}\`)` : "";
 	switch (preview.state) {
 		case "ready":
+			// An explicit markdown link, not a bare URL (PON-221). With a
+			// bypass value appended the raw form is a 150-character blob whose
+			// visible text is dominated by a secret, and it relies on Linear's
+			// autolinker surviving the `?` and `&` — which is how a reviewer
+			// ends up with something that looks like a link and does not
+			// behave like one. Short anchor text, everything else in the href.
 			return preview.url
-				? `**Preview:** ${preview.url}${at} — open it and click through.`
+				? `**Preview:** [▶ Open the running app](${preview.url})${at} — opens without a Vercel account.`
 				: `**Preview:** ready${at}, but the deployment did not publish a URL.`;
 		case "building":
 			return `**Preview:** building${at} — the link appears here when it finishes.`;
@@ -263,9 +269,12 @@ export function renderPreview(preview: PreviewDeployment | undefined): string {
 				? `**Preview:** the build **failed**${at} — ${preview.logUrl}`
 				: `**Preview:** the build **failed**${at}.`;
 		case "protected":
-			return `**Preview:** ${preview.url}${at} — ⚠️ **it asks for a login**, so the client cannot open their own preview. The connected project still has Vercel Authentication on for previews; onboarding asks for it to be off.`;
+			// Deliberately NOT "open the running app": this link does not
+			// reach the app, and anchor text that promises it would send the
+			// reviewer to a login wall wondering what they did wrong.
+			return `**Preview:** [the deployment](${preview.url})${at} — ⚠️ **it asks for a Vercel login**, so the client cannot open their own preview. The connected project still has Vercel Authentication on for previews; onboarding asks for it to be off.`;
 		case "bypass-failed":
-			return `**Preview:** ${preview.url}${at} — ⚠️ **the access value we hold no longer opens it.** Nothing is wrong with their Vercel setting; ask the client to regenerate the Protection Bypass value and send it again. Review from the diff until then.`;
+			return `**Preview:** [the deployment](${preview.url})${at} — ⚠️ **the access value we hold no longer opens it.** Nothing is wrong with their Vercel setting; ask the client to regenerate the Protection Bypass value and send it again. Review from the diff until then.`;
 		case "no-access":
 			return "**Preview:** I can't read deployments on this repository — the GitHub App is missing the `deployments: read` permission. An org owner grants it once, in the App's settings, and the installation then has to accept it.";
 		case "none":

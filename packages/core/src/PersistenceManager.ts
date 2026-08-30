@@ -238,6 +238,16 @@ export interface SerializedCockpitMirror {
 	revisions?: number;
 	briefLinks?: string[];
 	/**
+	 * When this mirror entered its current state, ISO (PON-221).
+	 *
+	 * The mirror's own clock, not the client issue's. Harold read "10 hours
+	 * ago" on a mirror that was minutes old, because the only age on the
+	 * board belonged to the client's issue — which had been open all night
+	 * while its scope was being agreed. A mirror's age is the age of the
+	 * review, and the review starts when the mirror does.
+	 */
+	stateSince?: string;
+	/**
 	 * Last round-robin rank written as the mirror's Linear sortOrder
 	 * (PON-173) — cached so unchanged ranks skip the write.
 	 */

@@ -788,6 +788,29 @@ export class EdgeWorker extends EventEmitter {
 				}
 			},
 		);
+		// PON-221: the same hold, applied to the session SURFACE. Links are
+		// attached to the client's agent session rather than posted as an
+		// activity, so neither the quiet funnel nor the interceptor above
+		// ever sees them — a client could watch the draft PR button arrive
+		// mid-review. Held here, released by `deliverHeldSummary`.
+		if (typeof this.agentSessionManager.setLinkPublicationHold !== "function") {
+			this.logger.warn(
+				"AgentSessionManager has no setLinkPublicationHold — work-in-progress links are NOT held (PON-221)",
+			);
+		}
+		this.agentSessionManager.setLinkPublicationHold?.((sessionId: string) => {
+			try {
+				return this.linksHeldForSession(sessionId);
+			} catch (error) {
+				// Fail CLOSED, unlike the poster above. The asymmetry is the
+				// point: a suppressed link costs the client one extra look at
+				// their own repository, while a leaked one hands them work in
+				// progress that Harold has not released. Only the second is
+				// unrecoverable.
+				this.logger.error("Link hold check failed — holding the links:", error);
+				return true;
+			}
+		});
 
 		// Initialize repositories with path resolution
 		for (const repo of config.repositories) {
@@ -6550,6 +6573,29 @@ ${taskSection}`;
 	}
 
 	/**
+	 * Is this session's work still held from its client? (PON-221)
+	 *
+	 * Governs the session SURFACE — the external-URL buttons — where the
+	 * verification gate governs the summary. Same question, different
+	 * channel, so the same answer: while a delivery is held for review, the
+	 * client gets neither the words nor the links.
+	 *
+	 * An operator session is excluded FIRST and explicitly. Its subject is
+	 * the client's repository, so every workspace lookup below would resolve
+	 * against the CLIENT's workspace and hold the links on the one surface
+	 * built to show them — the same trap `clientQuietSession` documents, and
+	 * the reason Harold has a preview link to click at all.
+	 */
+	private linksHeldForSession(sessionId: string): boolean {
+		if (this.operatorSessions.isOperatorSession(sessionId)) return false;
+		const workspaceId =
+			this.resolveWorkspaceIdForSession(sessionId) ??
+			this.laneManager.workspaceOf(sessionId);
+		if (!workspaceId) return false;
+		return this.verificationGateEnabled(workspaceId);
+	}
+
+	/**
 	 * The final-response interceptor body (PON-152). Returns true when the
 	 * summary was stored for verification instead of posted.
 	 */
@@ -6680,13 +6726,17 @@ ${taskSection}`;
 			? this.config.linearWorkspaces?.[workspaceId]?.previewTestAccounts
 			: undefined;
 		if (!accounts?.length) return [];
+		// Sits directly under the preview link, because the link alone gets a
+		// reviewer as far as the application's own login screen and no
+		// further (PON-221). "The preview opens" and "the reviewer can use
+		// the preview" are different questions.
 		return [
-			"**Sign in as:** " +
+			"**Sign in with:** " +
 				accounts
 					.map((a) =>
 						a.password
-							? `${a.label} — \`${a.username}\` / \`${a.password}\``
-							: `${a.label} — \`${a.username}\``,
+							? `${a.label} \`${a.username}\` / \`${a.password}\``
+							: `${a.label} \`${a.username}\``,
 					)
 					.join(" · "),
 		];
@@ -6706,6 +6756,46 @@ ${taskSection}`;
 	}
 
 	/** Upsert the cockpit mirror to in-verification, assigned, with the held summary. */
+	/**
+	 * End the mirror's narration turn in plain words (PON-221).
+	 *
+	 * A Linear agent session that simply stops posting is marked `stale`, and
+	 * Linear renders that to the reviewer as **"Stopped responding"** — which
+	 * reads like a crash. What actually happened is that the agent finished
+	 * its turn and it is now someone else's move. Harold read it as a fault,
+	 * which is the correct reading of those words and the wrong picture of the
+	 * state.
+	 *
+	 * So every path that ends a turn says what state the work is in and whose
+	 * move it is. Posted as a `response`, not a thought: the activity TYPE is
+	 * what tells Linear the turn completed, so a thought here would leave the
+	 * session looking hung no matter how good the sentence was.
+	 *
+	 * Best-effort throughout — a missing sign-off must never hold up the work
+	 * it is describing.
+	 */
+	private endNarrationTurn(clientIssueId: string, body: string): void {
+		try {
+			const narrationSessionId =
+				this.cockpitMirror.narrationSessionIdFor?.(clientIssueId);
+			const cockpitWs = this.config.cockpit?.linearWorkspaceId;
+			if (!narrationSessionId || !cockpitWs) return;
+			const tracker = this.issueTrackers.get(cockpitWs);
+			void tracker
+				?.createAgentActivity?.({
+					agentSessionId: narrationSessionId,
+					content: { type: "response", body },
+				})
+				.catch((error: unknown) => {
+					this.logger.debug(
+						`Could not end the narration turn: ${String(error)}`,
+					);
+				});
+		} catch (error) {
+			this.logger.debug(`Could not end the narration turn: ${String(error)}`);
+		}
+	}
+
 	private mirrorInVerification(issueId: string): void {
 		const record = this.verificationGate.get(issueId);
 		if (!record || record.state !== "in-verification") return;
@@ -6715,6 +6805,12 @@ ${taskSection}`;
 		// one up.
 		this.mirrorComposition = this.mirrorComposition
 			.then(() => this.composeVerificationMirror(issueId))
+			.then(() =>
+				this.endNarrationTurn(
+					issueId,
+					"**Finished this turn — over to you.** The work is complete and held; nothing has gone to the client. Read the summary and links above, then `approve:` to release it, `reject: <feedback>` to send it back, or just say what you want changed.",
+				),
+			)
 			.catch((error) => {
 				this.logger.error("Failed to compose the verification mirror:", error);
 			});
@@ -7249,6 +7345,9 @@ ${taskSection}`;
 				clientSummary,
 			);
 			report.push("✅ Client summary posted.");
+			// PON-221: the work is released, so the links may follow it. Held
+			// since implementation; attached now, with the delivery.
+			await this.agentSessionManager.releaseHeldLinks?.(record.sessionId);
 		} catch (error) {
 			// Delivery of the summary is the point — if it failed, do NOT
 			// mark delivered; the operator retries.
@@ -7270,6 +7369,10 @@ ${taskSection}`;
 			{ issueId, issueIdentifier: record.issueIdentifier },
 			record.workspaceId,
 			"delivered",
+		);
+		this.endNarrationTurn(
+			issueId,
+			"**Released to the client — nobody's move.** The summary is on their thread and the pull request is theirs to merge. Nothing further is needed here.",
 		);
 		return report.join("\n");
 	}
@@ -7570,6 +7673,10 @@ ${taskSection}`;
 			record.workspaceId,
 			"needs-info",
 		);
+		this.endNarrationTurn(
+			clientIssueId,
+			"**Waiting on the client — their move.** I asked them on their own thread and nothing else is happening until they answer. Their reply comes back into this same work; the delivery stays held meanwhile.",
+		);
 		this.logger.event("operator_asked_client", {
 			clientIssueId,
 			issueIdentifier: record.issueIdentifier,
@@ -7618,8 +7725,18 @@ ${taskSection}`;
 
 		const record = this.verificationGate.get(clientIssueId);
 		if (!record) {
+			// PON-221: the mirror is created the moment the client approves
+			// the scope, so its FIRST message used to be "there is nothing to
+			// iterate on" — stated a beat before the work started, and read
+			// as "this is dead" rather than "this is beginning". The gate is
+			// empty in both cases; only the mirror's own state tells them
+			// apart.
+			const state = this.cockpitMirror.stateFor?.(clientIssueId) ?? "";
+			const underway = /^(active|queued|needs-info)/i.test(state);
 			await reply(
-				"There is no completed work held on this issue yet, so there is nothing to iterate on. Nothing was sent to the client.",
+				underway
+					? "**Work is underway — my move.** Nothing is held for review yet; I'll post the summary, the changed files and a preview link here the moment it is. Nothing has gone to the client, and nothing will until you release it. Say what you want changed at any point and I'll pick it up."
+					: "There is no completed work held on this issue yet, so there is nothing to iterate on. Nothing was sent to the client.",
 			);
 			return;
 		}

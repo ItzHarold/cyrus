@@ -66,7 +66,30 @@ export type MirrorIntent =
 	 */
 	| { kind: "orient" };
 
-const ASK_CLIENT = /^ask[\s-]+client\b[:,-]?\s*([\s\S]*)$/i;
+/**
+ * Asking the client, in plain language (PON-221).
+ *
+ * `ask client: …` still works, but a reviewer mid-review writes "can you ask
+ * the client whether they want the totals rounded" — and being told that is
+ * not the magic phrase is exactly the kind of friction that makes a feature
+ * go unused.
+ *
+ * The word **client** is required, deliberately. This is the one action that
+ * reaches the tenant's own thread, so the asymmetry matters: failing to
+ * recognise an ask costs a re-phrase, while misreading an internal
+ * instruction as one puts operator words in front of a client. "ask them",
+ * "check with them" and similar are NOT matched — "them" is ambiguous in a
+ * thread that also talks about users, reviewers and maintainers.
+ *
+ * `client` must also END there: `(?![-\w])` is what stops "ask the
+ * client-facing team to review the copy" from being read as an ask and
+ * sending the client the words "facing team to review the copy". The first
+ * draft of this pattern used `\b[:,-]?` and did exactly that — the hyphen it
+ * accepted as a separator is the same hyphen that starts a compound noun.
+ * A trailing separator is `:` or `,` only.
+ */
+const ASK_CLIENT =
+	/^(?:(?:can|could|would|please)\s+(?:you\s+)?)?(?:ask|check\s+with|confirm\s+with|query)\s+(?:the\s+)?client(?![-\w])\s*[:,]?\s*([\s\S]*)$/i;
 const HANDBACK = /^back\s+to\s+you\b[:,-]?\s*([\s\S]*)$/i;
 /**
  * "mine" must be the WHOLE message. A bare "mine" is unambiguous; "mine is
@@ -97,7 +120,11 @@ export function classifyMirrorIntent(body: string): MirrorIntent {
 	if (reject) return { kind: "reject", feedback: (reject[1] ?? "").trim() };
 
 	const askClient = ASK_CLIENT.exec(text);
-	if (askClient)
+	// A bare "ask the client" carries no question. Falling through to
+	// `iterate` keeps it on the operator's own thread, where the reply can
+	// say what was missing — sending an empty question to the tenant would
+	// be the one failure this action cannot take back.
+	if (askClient && (askClient[1] ?? "").trim().length > 0)
 		return { kind: "ask-client", question: (askClient[1] ?? "").trim() };
 
 	const handback = HANDBACK.exec(text);

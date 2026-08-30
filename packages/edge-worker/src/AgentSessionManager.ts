@@ -111,6 +111,15 @@ export class AgentSessionManager extends EventEmitter {
 	) => Promise<boolean>;
 	private planTrackers: Map<string, SessionPlanTracker> = new Map();
 	private linkTrackers: Map<string, SessionLinkTracker> = new Map();
+	/**
+	 * Links discovered while the work is held for review (PON-221).
+	 *
+	 * They are not dropped, only deferred: `releaseHeldLinks` attaches them
+	 * when the operator approves and the summary reaches the client. A link
+	 * the client never gets is as wrong as one they get too early.
+	 */
+	private heldLinks: Map<string, Array<{ url: string; label: string }>> =
+		new Map();
 	private activeStatusActivitiesBySession: Map<string, string> = new Map(); // Maps session ID to active compacting status activity ID
 	private stopRequestedSessions: Set<string> = new Set(); // Sessions explicitly stopped by user signal
 	// Per-session serialization queue for handleClaudeMessage. The EdgeWorker's
@@ -278,10 +287,52 @@ export class AgentSessionManager extends EventEmitter {
 		const found = tracker?.scan(text);
 		if (!found?.length) return;
 
+		// Held work: keep them until the operator releases the delivery.
+		if (this.holdLinkPublication?.(sessionId)) {
+			const held = this.heldLinks.get(sessionId) ?? [];
+			for (const link of found)
+				if (!held.some((h) => h.url === link.url)) held.push(link);
+			this.heldLinks.set(sessionId, held);
+			this.sessionLog(sessionId).info(
+				`[event:client_links_held] ${JSON.stringify({
+					sessionId,
+					labels: found.map((l) => l.label),
+					heldTotal: held.length,
+				})}`,
+			);
+			return;
+		}
+
 		try {
 			await this.updateSessionSurface(sessionId, { addedExternalUrls: found });
 		} catch {
 			// Cosmetic. A link that fails to attach must not disturb the session.
+		}
+	}
+
+	/**
+	 * Attach the links held during review (PON-221).
+	 *
+	 * Called once the client has the summary, so the buttons appear with the
+	 * delivery rather than before it. Best-effort by the same reasoning as
+	 * `publishLinks`: the delivery is the deliverable, and a button that
+	 * fails to attach must never fail the release that already happened.
+	 */
+	async releaseHeldLinks(sessionId: string): Promise<void> {
+		const held = this.heldLinks.get(sessionId);
+		this.heldLinks.delete(sessionId);
+		if (!this.updateSessionSurface || !held?.length) return;
+
+		try {
+			await this.updateSessionSurface(sessionId, { addedExternalUrls: held });
+			this.sessionLog(sessionId).info(
+				`[event:client_links_released] ${JSON.stringify({
+					sessionId,
+					labels: held.map((l) => l.label),
+				})}`,
+			);
+		} catch {
+			// See above: the client already has the work.
 		}
 	}
 
@@ -683,6 +734,27 @@ export class AgentSessionManager extends EventEmitter {
 		) => boolean,
 	): void {
 		this.finalResponseInterceptor = interceptor;
+	}
+
+	/**
+	 * PON-221: true while this session's delivery is held for review.
+	 *
+	 * External URLs are a SESSION SURFACE write, not an activity, so they
+	 * reach the client through neither the client-quiet funnel nor the
+	 * final-response hold — both of which only ever see activities. That is
+	 * how a client watched a draft pull request button appear on their thread
+	 * while Harold was still reviewing the work. This is the fourth path to a
+	 * client surface, and the first that is not a post.
+	 *
+	 * Deliberately NOT keyed on client-quiet: PON-182 decoupled narration
+	 * suppression from the gates, so a workspace can be quiet without ever
+	 * having a release event — and holding links there would strand them
+	 * forever. "Held" must mean "there is an approval coming".
+	 */
+	private holdLinkPublication?: (sessionId: string) => boolean;
+
+	setLinkPublicationHold(hold: (sessionId: string) => boolean): void {
+		this.holdLinkPublication = hold;
 	}
 
 	async completeSession(
