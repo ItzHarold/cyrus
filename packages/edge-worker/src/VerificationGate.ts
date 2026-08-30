@@ -65,6 +65,41 @@ export class VerificationGate {
 		return this.records.get(issueId);
 	}
 
+	/**
+	 * Remember the PR head the held summary describes (PON-210).
+	 *
+	 * Write-once per summary, deliberately. The mirror is recomposed on a
+	 * refresh clock and on boot as well as on a real transition, so a setter
+	 * that overwrote would quietly re-point the record at whatever the head
+	 * is NOW — which is the staleness we are trying to detect, erased by the
+	 * act of looking for it. `recordPending` rebuilds the record and drops
+	 * this field, so a genuinely new summary re-captures.
+	 */
+	recordCapturedHead(issueId: string, headSha: string | undefined): void {
+		const record = this.records.get(issueId);
+		if (!record || record.state !== "in-verification") return;
+		// First ATTEMPT wins, not first success. A lookup that failed at
+		// capture time must leave staleness unknown rather than leaving the
+		// slot open for a later refresh tick to fill with a head that already
+		// carries the reviewer's commits.
+		if (record.capturedHeadResolved) return;
+		record.capturedHeadResolved = true;
+		if (headSha) record.capturedHeadSha = headSha;
+	}
+
+	/**
+	 * The reviewer has been told this head is stale (PON-210).
+	 *
+	 * Keyed by the head they were warned about, not a boolean: if the code
+	 * moves again after the warning, the next approve warns again rather than
+	 * silently shipping a summary that is stale in a NEW way.
+	 */
+	noteStaleWarned(issueId: string, headSha: string): void {
+		const record = this.records.get(issueId);
+		if (!record) return;
+		record.staleNotifiedForSha = headSha;
+	}
+
 	/** True while a completion sits unapproved. */
 	/** Issues whose work is held awaiting a reviewer (PON-212 refresh clock). */
 	pendingIssueIds(): string[] {

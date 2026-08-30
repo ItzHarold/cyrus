@@ -207,10 +207,16 @@ describe("EdgeWorker - verify-before-client-sees (PON-152)", () => {
 	});
 
 	describe("delivery on approval", () => {
-		beforeEach(() => {
+		beforeEach(async () => {
 			registerSession(worker);
 			privates(worker).laneManager.acquire(GATED_WS, SESSION_ID);
 			hold();
+			// Let the detached mirror composition finish BEFORE the spies go
+			// in. It reaches GitHub of its own accord (the review block, and
+			// since PON-210 the head capture), so a test asserting "delivery
+			// touched nothing" was really asserting that setup's async work
+			// had not got there yet — timing, not behaviour.
+			await settleMirror();
 			mirror.upsert.mockClear();
 			// PR scoping: the session repo's origin, resolved without git.
 			privates(worker).sessionRepoOriginRef = vi
@@ -1004,5 +1010,194 @@ describe("EdgeWorker - verify-before-client-sees (PON-152)", () => {
 				privates(restoredWorker).verificationGate.isPending(ISSUE_ID),
 			).toBe(true);
 		});
+	});
+});
+
+/**
+ * The client is delivered what actually merges (PON-210).
+ *
+ * Review can move the code after the summary was captured — operator
+ * iteration is exempt from the gate, so nothing refreshes it. Delivering then
+ * tells the client they are getting something other than what they get.
+ *
+ * The properties: a moved head refuses ONCE and asks for a rewrite; the
+ * reviewer can always override by approving again; and "cannot tell" is
+ * treated as "not stale", because holding a client's delivery on a fact we do
+ * not have would be worse than the bug.
+ */
+describe("EdgeWorker - stale client summary (PON-210)", () => {
+	let worker: EdgeWorker;
+	let mirror: ReturnType<typeof spyMirror>;
+
+	const CAPTURED = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+	const MOVED = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+	beforeEach(() => {
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		worker = createTestWorker([]);
+		privates(worker).config.linearWorkspaces = {
+			[GATED_WS]: { linearToken: "t1" },
+		};
+		privates(worker).config.cockpit = {
+			linearWorkspaceId: "cockpit-ws",
+			workspaceName: "Cockpit",
+			teamId: "team-1",
+			assigneeId: "approver-user-id",
+		};
+		privates(worker).savePersistedStateStrict = vi
+			.fn()
+			.mockResolvedValue(undefined);
+		mirror = spyMirror(worker);
+		registerSession(worker);
+		privates(worker).laneManager.acquire(GATED_WS, SESSION_ID);
+		privates(worker).holdCompletionForVerification(SESSION_ID, SUMMARY, false);
+		privates(worker).sessionRepoOriginRef = vi
+			.fn()
+			.mockResolvedValue({ owner: "acme", repo: "webapp" });
+		privates(worker).mintGitHubTokenForRepo = vi
+			.fn()
+			.mockResolvedValue("gh-token");
+		// Delivery's own IO, stubbed so a non-stale path can complete.
+		privates(worker).agentSessionManager.postResponseActivityStrict = vi
+			.fn()
+			.mockResolvedValue("activity-1");
+		privates(worker).markPullRequestReady = vi.fn().mockResolvedValue("ready");
+		void mirror;
+	});
+
+	const setCaptured = (sha: string) =>
+		privates(worker).verificationGate.recordCapturedHead(ISSUE_ID, sha);
+	const currentHeadIs = (sha: string) => {
+		privates(worker).fetchPullRequestFacts = vi.fn().mockResolvedValue({
+			headSha: sha,
+			files: [{ path: "src/orders.ts", additions: 3, deletions: 1 }],
+			truncated: false,
+		});
+	};
+	const deliver = (notes?: string) =>
+		privates(worker).deliverVerifiedWork(ISSUE_ID, notes);
+
+	it("refuses once when the code moved, and points at reject for a fresh summary", async () => {
+		setCaptured(CAPTURED);
+		currentHeadIs(MOVED);
+
+		const report = await deliver();
+
+		expect(report).toContain("Not delivered");
+		expect(report).toContain(CAPTURED.slice(0, 7));
+		expect(report).toContain(MOVED.slice(0, 7));
+		// The rewrite goes through `reject:`, which already resumes the
+		// session correctly and holds the result. A second bespoke resume of
+		// the CLIENT session raced this refusal's own override and could post
+		// itself to the client once the record was delivered.
+		expect(report).toContain("reject:");
+		// Nothing irreversible happened: still held, client told nothing.
+		expect(privates(worker).verificationGate.get(ISSUE_ID)?.state).toBe(
+			"in-verification",
+		);
+		expect(
+			privates(worker).agentSessionManager.postResponseActivityStrict,
+		).not.toHaveBeenCalled();
+	});
+
+	it("delivers when the reviewer approves again on the same head", async () => {
+		setCaptured(CAPTURED);
+		currentHeadIs(MOVED);
+		privates(worker).requestClientSummaryRewrite = vi
+			.fn()
+			.mockResolvedValue(true);
+
+		await deliver();
+		const second = await deliver("shipping as-is, I read the diff");
+
+		expect(second).not.toContain("Not delivered");
+		expect(privates(worker).verificationGate.get(ISSUE_ID)?.state).toBe(
+			"delivered",
+		);
+		expect(
+			privates(worker).agentSessionManager.postResponseActivityStrict,
+		).toHaveBeenCalled();
+	});
+
+	it("warns again when the code moves a SECOND time after a warning", async () => {
+		setCaptured(CAPTURED);
+		currentHeadIs(MOVED);
+		privates(worker).requestClientSummaryRewrite = vi
+			.fn()
+			.mockResolvedValue(true);
+		await deliver();
+
+		// It moved again while the reviewer was reading — a new staleness.
+		currentHeadIs("cccccccccccccccccccccccccccccccccccccccc");
+		const report = await deliver();
+
+		expect(report).toContain("Not delivered");
+		expect(privates(worker).verificationGate.get(ISSUE_ID)?.state).toBe(
+			"in-verification",
+		);
+	});
+
+	it("delivers normally when the head still matches the summary", async () => {
+		setCaptured(CAPTURED);
+		currentHeadIs(CAPTURED);
+
+		const report = await deliver();
+
+		expect(report).not.toContain("Not delivered");
+		expect(privates(worker).verificationGate.get(ISSUE_ID)?.state).toBe(
+			"delivered",
+		);
+	});
+
+	it("delivers when staleness cannot be determined", async () => {
+		// No captured head — a record from before this shipped.
+		currentHeadIs(MOVED);
+
+		const report = await deliver();
+
+		// Unknown is not stale: never hold a client's delivery on a fact we
+		// do not have.
+		expect(report).not.toContain("Not delivered");
+		expect(privates(worker).verificationGate.get(ISSUE_ID)?.state).toBe(
+			"delivered",
+		);
+	});
+
+	it("starts no session of its own when it refuses", async () => {
+		setCaptured(CAPTURED);
+		currentHeadIs(MOVED);
+		const resume = vi.fn().mockResolvedValue(undefined);
+		privates(worker).resumeAgentSession = resume;
+
+		await deliver();
+
+		// The refusal must not resume the CLIENT session. A fire-and-forget
+		// rewrite there raced the override: once the reviewer approved, the
+		// record was delivered, the gate was open, and the rewrite posted
+		// itself to the client with nobody having read it.
+		expect(resume).not.toHaveBeenCalled();
+	});
+
+	it("leaves staleness unknown when the first head lookup failed", () => {
+		// A blip at capture time must not leave the slot for a 3-minute
+		// refresh tick to fill with a head that already carries the
+		// reviewer's commits.
+		privates(worker).verificationGate.recordCapturedHead(ISSUE_ID, undefined);
+		privates(worker).verificationGate.recordCapturedHead(ISSUE_ID, MOVED);
+		expect(
+			privates(worker).verificationGate.get(ISSUE_ID)?.capturedHeadSha,
+		).toBeUndefined();
+	});
+
+	it("does not re-point the captured head on a later composition", () => {
+		setCaptured(CAPTURED);
+		setCaptured(MOVED);
+		// Write-once: a refresh tick must not erase the staleness by
+		// recording the head it just looked up.
+		expect(
+			privates(worker).verificationGate.get(ISSUE_ID)?.capturedHeadSha,
+		).toBe(CAPTURED);
 	});
 });
