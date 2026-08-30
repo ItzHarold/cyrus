@@ -6829,16 +6829,20 @@ ${taskSection}`;
 					.join("\n");
 			}
 
-			const preview = await fetchPreviewDeployment(token, first, pr.headSha);
-			// PON-213: open the reviewer's link too. Without the tenant's
-			// bypass token this is a no-op, so an unconfigured client keeps
-			// today's behaviour rather than getting a broken link.
-			if (preview?.url) {
-				preview.url = withPreviewBypass(
-					preview.url,
-					this.previewBypassTokenFor(workspaceId),
-				);
-			}
+			// PON-213: the bypass goes IN to the fetch, not on after it. The
+			// reachability probe has to run against the link we publish —
+			// appending the bypass afterwards left the state decided by a
+			// probe of the bare URL, so a link that opens rendered next to
+			// "it asks for a login" and an instruction to change a Vercel
+			// setting that was no longer the problem. Without a token this is
+			// unchanged behaviour for an unconfigured client.
+			const preview = await fetchPreviewDeployment(
+				token,
+				first,
+				pr.headSha,
+				undefined,
+				this.previewBypassTokenFor(workspaceId),
+			);
 			return [
 				renderPreview(preview),
 				...this.testAccountLines(workspaceId),

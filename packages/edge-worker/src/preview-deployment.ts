@@ -29,6 +29,15 @@ export type PreviewState =
 	 * it as well as the client, and neither can tell it from a broken build.
 	 */
 	| "protected"
+	/**
+	 * Behind the login wall, and the bypass value we hold does not open it.
+	 *
+	 * Distinct from `protected` because the fix is the opposite one: nothing
+	 * is wrong with the client's Vercel setting, our stored value is stale.
+	 * Telling an operator to go turn off Vercel Authentication would send
+	 * them to change a setting that is not the problem.
+	 */
+	| "bypass-failed"
 	/** The repository has no preview deployments at all. */
 	| "none"
 	/**
@@ -102,6 +111,16 @@ export async function fetchPreviewDeployment(
 	repo: { owner: string; repo: string },
 	sha: string,
 	fetchImpl: typeof fetch = fetch,
+	/**
+	 * The tenant's Vercel bypass value, when we hold one (PON-213).
+	 *
+	 * The reachability probe has to run against the link we are actually
+	 * going to publish. Probing the bare URL and then appending the bypass
+	 * afterwards produced the worst possible mirror line: a link that opens,
+	 * next to a warning that it does not, next to an instruction to change a
+	 * Vercel setting that no longer needs changing.
+	 */
+	bypassToken?: string,
 ): Promise<PreviewDeployment | undefined> {
 	let forbidden = false;
 	const api = async <T>(path: string): Promise<T | undefined> => {
@@ -157,8 +176,22 @@ export async function fetchPreviewDeployment(
 				latest.environment_url,
 				fetchImpl,
 			);
+			if (reachable !== false) {
+				return { state: "ready", sha: newest.sha, url: latest.environment_url };
+			}
+			// Behind the wall. If we hold the tenant's bypass value, the link
+			// we publish is the bypassed one — so that is the link to judge.
+			if (bypassToken) {
+				const bypassed = withPreviewBypass(latest.environment_url, bypassToken);
+				const opens = await isReachableWithoutLogin(bypassed, fetchImpl);
+				return {
+					state: opens ? "ready" : "bypass-failed",
+					sha: newest.sha,
+					url: opens ? bypassed : latest.environment_url,
+				};
+			}
 			return {
-				state: reachable === false ? "protected" : "ready",
+				state: "protected",
 				sha: newest.sha,
 				url: latest.environment_url,
 			};
@@ -231,6 +264,8 @@ export function renderPreview(preview: PreviewDeployment | undefined): string {
 				: `**Preview:** the build **failed**${at}.`;
 		case "protected":
 			return `**Preview:** ${preview.url}${at} — ⚠️ **it asks for a login**, so the client cannot open their own preview. The connected project still has Vercel Authentication on for previews; onboarding asks for it to be off.`;
+		case "bypass-failed":
+			return `**Preview:** ${preview.url}${at} — ⚠️ **the access value we hold no longer opens it.** Nothing is wrong with their Vercel setting; ask the client to regenerate the Protection Bypass value and send it again. Review from the diff until then.`;
 		case "no-access":
 			return "**Preview:** I can't read deployments on this repository — the GitHub App is missing the `deployments: read` permission. An org owner grants it once, in the App's settings, and the installation then has to accept it.";
 		case "none":
