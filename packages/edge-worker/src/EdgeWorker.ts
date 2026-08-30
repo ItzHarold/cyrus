@@ -189,6 +189,7 @@ import {
 	NEEDS_INFO_HEADER,
 } from "./needs-info.js";
 import {
+	buildMirrorImplementationBlock,
 	buildOperatorSessionBlock,
 	classifyMirrorIntent,
 	OPERATOR_GIT_DENY,
@@ -6701,7 +6702,14 @@ ${taskSection}`;
 		// would mint a SECOND pending delivery for one issue and overwrite the
 		// summary the client is actually owed. The existing held record stays
 		// pending — release is still only an explicit `approve:`.
-		if (this.operatorSessions.isOperatorSession(sessionId)) return false;
+		//
+		// PON-225 narrows that to operator sessions which do NOT own the
+		// delivery. A session started from a queued mirror is the client's
+		// implementation run wearing an operator session's clothes: its
+		// closing summary IS the deliverable, so the gate must hold it. The
+		// reasoning above still holds for every other operator turn.
+		const operatorLink = this.operatorSessions.get(sessionId);
+		if (operatorLink && !operatorLink.ownsDelivery) return false;
 		const issueId = this.sessionIssueId(sessionId);
 		if (!issueId || !this.verificationGateEnabled(workspaceId)) return false;
 		const session = this.agentSessionManager.getSession(sessionId);
@@ -6735,9 +6743,16 @@ ${taskSection}`;
 		}
 
 		this.verificationGate.recordPending(issueId, {
-			workspaceId: workspaceId as string,
+			workspaceId: operatorLink?.clientWorkspaceId ?? (workspaceId as string),
 			issueIdentifier: session?.issueContext?.issueIdentifier,
-			sessionId,
+			// PON-225: the record names the session the DELIVERY posts to, not
+			// the one that produced it. `deliverVerifiedWork` posts to
+			// `record.sessionId`; storing the mirror session here would deliver
+			// the client's work onto the cockpit thread and mark it delivered
+			// with the client none the wiser. Everything else that reads this
+			// field — the origin ref for PR-readying, the branch in the
+			// checkout instructions — wants the client side too.
+			sessionId: operatorLink?.clientSessionId ?? sessionId,
 			summary: content,
 			isError,
 		});
@@ -7710,8 +7725,18 @@ ${taskSection}`;
 			"active",
 		);
 
-		const session = this.agentSessionManager.getSession(record.sessionId);
-		const repoId = this.sessionRepositories.get(record.sessionId);
+		// PON-225: work started from the mirror is continued ON the mirror.
+		// The record names the CLIENT session (that is where delivery posts),
+		// so resuming it blindly would move the conversation off the thread
+		// the reviewer is standing in and onto the client's — silent, and a
+		// fork of the very conversation that produced the work.
+		const owning = this.operatorSessions.forClientIssue(issueId);
+		const resumeSessionId =
+			owning?.ownsDelivery && owning.mirrorSessionId
+				? owning.mirrorSessionId
+				: record.sessionId;
+		const session = this.agentSessionManager.getSession(resumeSessionId);
+		const repoId = this.sessionRepositories.get(resumeSessionId);
 		const repository = repoId ? this.repositories.get(repoId) : undefined;
 		if (!session || !repository) {
 			return "Rejection recorded, but the session could not be resumed automatically (session or repository no longer known). Prompt the client issue's thread directly to continue.";
@@ -7720,7 +7745,7 @@ ${taskSection}`;
 		void this.resumeAgentSession(
 			session,
 			repository,
-			record.sessionId,
+			resumeSessionId,
 			this.agentSessionManager,
 			prompt,
 			"",
@@ -8002,14 +8027,229 @@ ${taskSection}`;
 	}
 
 	/**
+	 * Start the client's implementation run from a queued mirror (PON-225).
+	 *
+	 * The fresh-start twin of `runOperatorIteration`. Same subject/surface
+	 * split — the client's repository and credentials, the cockpit's thread —
+	 * and the same registration, so every operator exemption applies. Two
+	 * things differ, and both follow from there being no prior run:
+	 *
+	 *   - there is nothing to adopt, so this starts a new conversation with
+	 *     the full issue prompt rather than continuing one;
+	 *   - the link carries `ownsDelivery`, which keeps the verification gate
+	 *     armed for this session. This run's closing summary is the client's
+	 *     deliverable, not a report to the reviewer, and the gate is the whole
+	 *     reason it does not reach them unread.
+	 */
+	private async startWorkFromMirror(
+		action: {
+			organizationId: string;
+			mirrorSessionId: string;
+			actorId?: string;
+			actorName?: string;
+		},
+		clientIssueId: string,
+		opts: { instruction: string },
+	): Promise<void> {
+		const { mirrorSessionId } = action;
+		const reply = async (text: string) => {
+			const tracker = this.getIssueTrackerForWorkspace(action.organizationId);
+			try {
+				await tracker?.createAgentActivity({
+					agentSessionId: mirrorSessionId,
+					content: { type: "response", body: text },
+				});
+			} catch (error) {
+				this.logger.error("Failed to reply on mirror thread:", error);
+			}
+		};
+
+		// The scope record is the authority on the client side of a parked
+		// issue: it carries the workspace, the identifier, and the text the
+		// client actually approved. It exists by construction — the parked
+		// flag lives on that same record.
+		const scope = this.scopeApprovals.get(clientIssueId);
+		const clientWorkspaceId = scope?.workspaceId;
+		if (!clientWorkspaceId) {
+			await reply(
+				"I can't tell which workspace this issue belongs to any more, so I won't start work against a repository I can't confirm. Nothing has been started.",
+			);
+			return;
+		}
+
+		// The scoping conversation is what binds this issue to a repository
+		// and a worktree. Reusing its workspace is what keeps the same-branch
+		// invariant: the branch the client's issue named is the branch the
+		// reviewer reviews and the client eventually merges.
+		const clientSession = this.agentSessionManager
+			.getSessionsByIssueId(clientIssueId)
+			.find((session) => this.sessionRepositories.get(session.id));
+		const repoId = clientSession
+			? this.sessionRepositories.get(clientSession.id)
+			: undefined;
+		const repository = repoId ? this.repositories.get(repoId) : undefined;
+		if (!clientSession || !repository || !clientSession.issue) {
+			await reply(
+				"I can't reach the original conversation for this issue or its repository any more, so I can't start the work here. Nothing has been started.",
+			);
+			return;
+		}
+
+		const sink = this.activitySinks.get(action.organizationId);
+		if (!sink) {
+			await reply(
+				"I can't post into this thread (no activity sink for the cockpit workspace), so I won't start work I can't report on.",
+			);
+			return;
+		}
+
+		// One active build per client (PON-112). This run is the client's
+		// actual implementation, which is exactly what the lane serializes —
+		// unlike an operator review turn, which deliberately takes no lane.
+		// A busy lane refuses rather than queues: the reviewer chose this
+		// moment, so the honest answer is what is in the way, not a silent
+		// wait they cannot see.
+		let laneHeld = false;
+		if (this.laneManager.isEnabled(clientWorkspaceId)) {
+			laneHeld = this.laneManager.acquire(clientWorkspaceId, mirrorSessionId);
+			if (!laneHeld) {
+				const holder = this.laneManager.activeSessionOf(clientWorkspaceId);
+				const holderIssue = holder
+					? (this.agentSessionManager.getSession(holder)?.issueContext
+							?.issueIdentifier ?? "another issue")
+					: "another issue";
+				await reply(
+					`This client already has work in progress on ${holderIssue}, and they get one build at a time. Nothing has been started here — pick this up once that one is released.`,
+				);
+				return;
+			}
+		}
+
+		try {
+			// The mirror-side session record. Its issue is the CLIENT's issue —
+			// the work is about that issue, the worktree and branch are named
+			// from it, and every issue-keyed lookup downstream expects it.
+			const operatorSession =
+				this.agentSessionManager.getSession(mirrorSessionId) ??
+				this.agentSessionManager.createCyrusAgentSession(
+					mirrorSessionId,
+					clientIssueId,
+					clientSession.issue,
+					clientSession.workspace,
+					"linear",
+					clientSession.repositories ?? [],
+				);
+
+			// Subject before the runner: auth, git credentials and content
+			// policy all resolve through this mapping.
+			this.sessionRepositories.set(mirrorSessionId, repository.id);
+			// Surface: the cockpit's sink. Set after the session exists — the
+			// link tracker it builds reads the session's issue identifier, and
+			// without it no preview link is ever emitted.
+			this.agentSessionManager.setActivitySink(mirrorSessionId, sink);
+
+			// Registered BEFORE the resume: every exemption keys on this and
+			// they are consulted while the runner is being built.
+			const previous = this.operatorSessions.forClientIssue(clientIssueId);
+			this.operatorSessions.register({
+				mirrorSessionId,
+				mirrorIssueId:
+					this.cockpitMirror.mirrorIssueIdFor(clientIssueId) ?? clientIssueId,
+				clientSessionId: clientSession.id,
+				clientIssueId,
+				clientIssueIdentifier:
+					scope.issueIdentifier ?? clientSession.issueContext?.issueIdentifier,
+				clientWorkspaceId,
+				cockpitWorkspaceId: action.organizationId,
+				repositoryId: repository.id,
+				startedAt: new Date().toISOString(),
+				...(action.actorId ? { reviewerId: action.actorId } : {}),
+				operatorHoldsBranch: false,
+				ownsDelivery: true,
+			});
+			if (previous && previous.mirrorSessionId !== mirrorSessionId) {
+				this.operatorSessions.release(previous.mirrorSessionId);
+			}
+
+			// The park is over. Client-thread sessions stop carrying the
+			// "implementation has not started" block from here on.
+			if (this.scopeApprovals.markImplementationStarted(clientIssueId)) {
+				await this.persistScopeApprovals("implementation_started");
+			}
+			void this.cockpitMirror.upsert(
+				{
+					issueId: clientIssueId,
+					issueIdentifier: scope.issueIdentifier,
+				},
+				clientWorkspaceId,
+				"active",
+			);
+
+			this.logger.event("mirror_work_started", {
+				clientIssueId,
+				issueIdentifier: scope.issueIdentifier,
+				mirrorSessionId,
+				clientSessionId: clientSession.id,
+				clientWorkspaceId,
+				cockpitWorkspaceId: action.organizationId,
+				repositoryId: repository.id,
+				reviewerId: action.actorId,
+				laneHeld,
+				hasInstruction: opts.instruction.length > 0,
+			});
+			void this.savePersistedState();
+
+			const prompt =
+				`Implement ${scope.issueIdentifier ?? "this issue"}.` +
+				buildMirrorImplementationBlock({
+					issueIdentifier: scope.issueIdentifier,
+					branchName: clientSession.workspace?.path
+						? basename(clientSession.workspace.path)
+						: undefined,
+					clientScope: scope.clientScope,
+					instruction: opts.instruction,
+				});
+
+			await this.resumeAgentSession(
+				operatorSession,
+				repository,
+				mirrorSessionId,
+				this.agentSessionManager,
+				prompt,
+				"",
+				// A new conversation: there is no earlier implementation run to
+				// continue, so the model gets the full issue prompt.
+				true,
+				[],
+				// The CLIENT's workspace — this selects the tracker that fetches
+				// their issue. The Anthropic credential is resolved separately,
+				// from the cockpit link (PON-225/D7).
+				clientWorkspaceId,
+			);
+		} catch (error) {
+			this.logger.error("Could not start work from the mirror:", error);
+			if (laneHeld) {
+				this.releaseLaneAndContinue(
+					clientWorkspaceId,
+					mirrorSessionId,
+					"mirror_start_failed",
+				);
+			}
+			await reply(
+				"I couldn't start the work. Nothing has been sent to the client — say the word and I'll try again.",
+			);
+		}
+	}
+
+	/**
 	 * Run one turn of operator iteration on the mirror (PON-208).
 	 *
 	 * This is the whole feature. The session it starts has two different
 	 * workspaces, and that split is the design:
 	 *
-	 *   SUBJECT  = the client's repository → the client's Anthropic
-	 *              credential (NOT the cockpit's, which is a metered API key),
-	 *              the client's GitHub App token, the client's content policy.
+	 *   SUBJECT  = the client's repository → the client's GitHub App token,
+	 *              the client's content policy. (The Anthropic credential
+	 *              follows the COCKPIT — see `buildAgentRunnerConfig`.)
 	 *   SURFACE  = the cockpit's activity sink → every thought, action and
 	 *              response lands on the mirror thread.
 	 *
@@ -8273,7 +8513,16 @@ ${taskSection}`;
 		// Stated cost, accepted: any member can spend the client's model
 		// credential by talking to the agent. Nothing they can do reaches the
 		// client or ships anything, which is the line that matters.
+		// PON-225: starting parked work joins that list. The accepted cost
+		// above turns on "nothing they can do reaches the client or ships
+		// anything" — starting ships a branch and a draft PR into the client's
+		// repository, and spends the cockpit's own subscription, so the
+		// reasoning that leaves `iterate` open does not cover it.
+		const startsParkedWork =
+			this.scopeApprovals.isImplementationDeferred(clientIssueId) &&
+			(intent.kind === "orient" || intent.kind === "iterate");
 		const clientFacing =
+			startsParkedWork ||
 			intent.kind === "approve" ||
 			intent.kind === "reject" ||
 			intent.kind === "ask-client";
@@ -8281,7 +8530,9 @@ ${taskSection}`;
 			const reviewers = this.cockpitReviewers();
 			if (reviewers.length === 0) {
 				await reply(
-					"Delivering needs a configured reviewer (`cockpit.reviewers` or `cockpit.assigneeId`) — nobody is declared, so nothing can be released.",
+					startsParkedWork
+						? "Starting work needs a configured reviewer (`cockpit.reviewers` or `cockpit.assigneeId`) — nobody is declared, so nothing can be started."
+						: "Delivering needs a configured reviewer (`cockpit.reviewers` or `cockpit.assigneeId`) — nobody is declared, so nothing can be released.",
 				);
 				return;
 			}
@@ -8293,10 +8544,37 @@ ${taskSection}`;
 					intent: intent.kind,
 				});
 				await reply(
-					"Only a configured reviewer can release work to the client. You can still work on it here — say what you want changed.",
+					startsParkedWork
+						? "Only a configured reviewer can start work on a client's repository. Nothing has been started."
+						: "Only a configured reviewer can release work to the client. You can still work on it here — say what you want changed.",
 				);
 				return;
 			}
+		}
+
+		// PON-225: on parked work, picking the mirror up IS the start gesture.
+		// Both shapes arrive here — a bare delegation (`orient`) and a comment
+		// (`iterate`) — and both start, with the comment carried in as extra
+		// instruction. Placed before the intent dispatch below so neither the
+		// orient reply nor runOperatorIteration's "nothing held" branch can
+		// answer for parked work any more.
+		if (startsParkedWork) {
+			await this.startWorkFromMirror(action, clientIssueId, {
+				instruction: intent.kind === "iterate" ? intent.instruction : "",
+			});
+			return;
+		}
+		if (
+			this.scopeApprovals.isImplementationDeferred(clientIssueId) &&
+			(intent.kind === "mine" || intent.kind === "handback")
+		) {
+			// Nothing has been built, so there is no branch to take or hand
+			// back. Say that rather than minting a hold on work that does not
+			// exist.
+			await reply(
+				"Nothing has been built on this issue yet — the client's scope is approved and it is waiting in the queue. Delegate this mirror to me and I'll start it.",
+			);
+			return;
 		}
 
 		if (intent.kind === "orient") {
@@ -8745,7 +9023,14 @@ ${taskSection}`;
 		// anyway re-rendered the entire description (two GitHub round trips)
 		// underneath the reviewer while they were mid-conversation. The
 		// conversation-id sync above is the part that matters here.
-		if (operatorLink) {
+		//
+		// PON-225: a session that OWNS the delivery is the exception. Its end
+		// is the end of the client's implementation run, so the mirror has to
+		// move to in-verification and pick up its review block — the reasoning
+		// above applies to review turns on work that already exists, not to
+		// the run that produced it. It falls through to the same transitions
+		// and the same lane release a client session gets.
+		if (operatorLink && !operatorLink.ownsDelivery) {
 			const opWorkspaceId = this.laneManager.workspaceOf(sessionId);
 			if (opWorkspaceId && this.laneManager.isActive(sessionId)) {
 				this.releaseLaneAndContinue(opWorkspaceId, sessionId, reason);
@@ -11720,8 +12005,20 @@ ${input.userComment}
 			// only on a box whose config was never gated through
 			// `cyrus check-workspace-auth`.
 			try {
+				// PON-225/D7: on a cockpit mirror the credential follows the
+				// cockpit, exactly as the session surface already does. These
+				// are our own implementation and review sessions in our own
+				// workspace; the locked split puts them on the subscription and
+				// leaves the tenant's metered key paying only for what the
+				// client is actually talked to with. Reading it off the operator
+				// link rather than threading a parameter keeps it true for every
+				// mirror session, including the ones that resume after a restart.
+				const cockpitAuthWorkspaceId =
+					this.operatorSessions.get(sessionId)?.cockpitWorkspaceId;
 				sessionAuthEnv = this.resolveAuthEnvForWorkspace(
-					linearWorkspaceId ?? repository.linearWorkspaceId,
+					cockpitAuthWorkspaceId ??
+						linearWorkspaceId ??
+						repository.linearWorkspaceId,
 					log,
 				);
 			} catch (authError) {

@@ -149,6 +149,18 @@ export interface SerializedOperatorSession {
 	 * the agent must not touch the working tree until a handback.
 	 */
 	operatorHoldsBranch?: boolean;
+	/**
+	 * This session owns the CLIENT's delivery (v4.15, PON-225).
+	 *
+	 * An operator session normally reports to the reviewer and its completion
+	 * is deliberately exempt from the verification gate — holding it would
+	 * mint a second pending delivery and overwrite the summary the client is
+	 * owed. A session STARTED from a queued mirror is the opposite case: it
+	 * is the client's implementation run, so its completion is the thing the
+	 * gate exists to hold. This flag is that distinction, and nothing else
+	 * about the session changes.
+	 */
+	ownsDelivery?: boolean;
 }
 
 /**
