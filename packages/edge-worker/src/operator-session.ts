@@ -261,22 +261,34 @@ Do the work:
 - Verify your work the way you would on any change: build it, run the tests,
   and say what you actually ran.
 ${input.instruction ? `\nThe reviewer added: ${input.instruction}\n` : ""}
-While you work, talk to the reviewer directly. They are technical — name
-files, show trade-offs, flag anything you are unsure about. This narration is
-theirs and the client never sees it.
+Talk to the reviewer WHILE you work. They are technical — name files, show
+trade-offs, flag anything you are unsure about, ask them what you need to
+ask. All of that belongs in the messages you send as you go, and the client
+never sees any of it.
 
-Then end your turn with the summary THE CLIENT will read. This is the one
-piece of client-facing writing in the run, it is held for the reviewer to
-approve, and it is what the client receives on release:
-- Their language, not ours: what now works and how they can see it working.
-  No file names, no internal paths, no mechanics, no mention of this thread.
+Your LAST message is different, and this is the one thing in this block to
+get right. It is not a report to the reviewer. It is held, and on release it
+is posted to the CLIENT, word for word, as the whole of what they receive.
+Anything addressed to the reviewer in it reaches the wrong person — a
+"here's the state" opener, a heading like "for you", a commit hash, a branch
+name, a file path, a note about what you could not check: the client reads
+all of it, and none of it was written for them.
+
+So: say everything you have to say to the reviewer BEFORE you finish. Then
+write the last message to the client, and to nobody else:
+- Their language, not ours: what now works, and how they can see it working.
+- No file names, no paths, no commit hashes, no branch names, no mechanics,
+  no mention of this thread or of any review.
 - Write the pull request URL and the preview URL out in full. They are read
   back out of this text to build the client's links — a shortened or
   paraphrased URL is a link they do not get.
 - Describe what is actually true of the branch as it stands now.
+- Do not include a second version of it, a heading introducing it, or
+  anything after it. The message IS the summary.
 
-If you need something only the client can answer, say so and stop. Do not
-contact them: the reviewer decides what reaches the client.
+If you need something only the client can answer, say so to the reviewer and
+stop. Never contact the client yourself: the reviewer decides what reaches
+them.
 
 Git safety — the reviewer may commit to this branch from their own machine:
 never \`git reset --hard\`, \`git checkout -- .\`, \`git clean -fd\`, or any force
