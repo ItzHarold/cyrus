@@ -147,7 +147,10 @@ export class SelfAuthCommand extends BaseCommand {
 
 			console.log();
 			this.logSuccess(
-				"Authentication complete! Restart cyrus to use the new tokens.",
+				// PON-190: config has hot-reloaded since before the fork. The old line
+				// was wrong, and it taught the one habit most likely to interrupt a
+				// live client session.
+				"Authentication complete. The running agent picks this up on its own — no restart needed.",
 			);
 			process.exit(0);
 		} catch (error) {
