@@ -313,6 +313,26 @@ describe("PON-225 — delegating a queued mirror starts the work", () => {
 		expect(resumed[0][4]).not.toContain("The reviewer added:");
 	});
 
+	it("tells the run that its LAST message is the client's, not the reviewer's", async () => {
+		// The defect this pins, found on the first live run: the model wrote a
+		// reviewer report and appended a client summary to it, the interceptor
+		// captured the whole message, and the client was delivered "Here's the
+		// state", a commit hash, a branch name and a "four things for you"
+		// section. The block has to make the audience of the last message
+		// unmistakable, because the whole of it is what the client receives.
+		const { p, resumed } = setup();
+
+		await p.handleMirrorAction(action(""), CLIENT_ISSUE);
+		const prompt: string = resumed[0][4];
+
+		expect(prompt).toContain("Your LAST message is different");
+		expect(prompt).toContain("posted to the CLIENT, word for word");
+		expect(prompt).toContain(
+			"say everything you have to say to the reviewer BEFORE you finish",
+		);
+		expect(prompt).toContain("The message IS the summary.");
+	});
+
 	it("refuses honestly when nothing binds the issue to a repository", async () => {
 		const { p, resumed, cockpitPosts } = setup();
 		p.sessionRepositories.delete(CLIENT_SESSION);
