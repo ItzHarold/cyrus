@@ -278,3 +278,97 @@ describe("preview rendering", () => {
 		).toContain("https://x.vercel.app");
 	});
 });
+
+/**
+ * The bypass has to be judged on the link we publish (PON-213).
+ *
+ * Found live on Acme: the probe ran against the bare URL and the bypass was
+ * appended afterwards, so the mirror was about to render a link that opens,
+ * directly beside a warning that it does not, beside an instruction to change
+ * a Vercel setting that was no longer the problem. A block that contradicts
+ * itself on its headline item is worse than one that says nothing.
+ */
+describe("preview deployment — with a tenant bypass value", () => {
+	/** A host where only the bypassed URL opens; GitHub answers normally. */
+	function hostWhereOnlyBypassOpens(goodToken: string | null) {
+		return vi.fn(async (url: string) => {
+			const raw = String(url);
+			if (!raw.startsWith("https://api.github.com")) {
+				const ok =
+					goodToken !== null &&
+					raw.includes(`x-vercel-protection-bypass=${goodToken}`);
+				return {
+					ok: true,
+					status: ok ? 200 : 302,
+					headers: {
+						get: (h: string) =>
+							h.toLowerCase() === "location" && !ok
+								? "https://vercel.com/sso-api?url=x"
+								: null,
+					},
+				};
+			}
+			const path = raw.replace("https://api.github.com", "");
+			const routes: Record<string, unknown> = {
+				"/repos/acme/webapp/deployments?sha=": [deployment],
+				"/repos/acme/webapp/deployments/1/statuses": [
+					{
+						state: "success",
+						environment_url: "https://webapp-abc.vercel.app",
+						created_at: "2026-08-29T15:40:00Z",
+					},
+				],
+			};
+			const key = Object.keys(routes).find((k) => path.startsWith(k));
+			if (!key) return { ok: false, status: 404, json: async () => ({}) };
+			return { ok: true, status: 200, json: async () => routes[key] };
+		}) as unknown as typeof fetch;
+	}
+
+	it("reports ready, and publishes the link that actually opens", async () => {
+		const result = await fetchPreviewDeployment(
+			"tok",
+			REPO,
+			SHA,
+			hostWhereOnlyBypassOpens("good"),
+			"good",
+		);
+		expect(result?.state).toBe("ready");
+		expect(result?.url).toContain("x-vercel-protection-bypass=good");
+		// And the rendered line must not still be telling the reviewer the
+		// preview asks for a login.
+		expect(renderPreview(result)).not.toContain("asks for a login");
+	});
+
+	it("says the value is stale rather than blaming their Vercel setting", async () => {
+		// The fix for a dead token is the opposite of the fix for protection
+		// being on. Sending an operator to turn off Vercel Authentication when
+		// the real problem is a regenerated secret wastes the one action they
+		// were going to take.
+		const result = await fetchPreviewDeployment(
+			"tok",
+			REPO,
+			SHA,
+			hostWhereOnlyBypassOpens("good"),
+			"stale",
+		);
+		expect(result?.state).toBe("bypass-failed");
+		const rendered = renderPreview(result);
+		expect(rendered).toContain("no longer opens it");
+		expect(rendered).toContain("regenerate");
+		expect(rendered).not.toContain("onboarding asks for it to be off");
+		// It must not hand out a link carrying a value that does not work.
+		expect(result?.url).not.toContain("x-vercel-protection-bypass");
+	});
+
+	it("leaves a tenant with no value on exactly today's behaviour", async () => {
+		const result = await fetchPreviewDeployment(
+			"tok",
+			REPO,
+			SHA,
+			hostWhereOnlyBypassOpens("good"),
+		);
+		expect(result?.state).toBe("protected");
+		expect(renderPreview(result)).toContain("asks for a login");
+	});
+});
