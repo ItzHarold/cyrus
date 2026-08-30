@@ -925,6 +925,16 @@ export class CockpitMirror {
 			issue: CockpitIssueRef;
 			tenantWorkspaceId: string;
 		}>;
+		/**
+		 * Approved work whose implementation is parked until the reviewer
+		 * starts it (PON-224). No lane entry, no session, no held delivery —
+		 * the queued mirror is the only live trace, so reconcile must count
+		 * it or every boot closes it as an orphan.
+		 */
+		parked?: Array<{
+			issue: CockpitIssueRef;
+			tenantWorkspaceId: string;
+		}>;
 	}): Promise<void> {
 		try {
 			if (!this.deps.getConfig()) return;
@@ -938,6 +948,7 @@ export class CockpitMirror {
 				...live.active.map((e) => e.issue),
 				...live.queued.map((e) => e.issue),
 				...(live.inVerification ?? []).map((e) => e.issue),
+				...(live.parked ?? []).map((e) => e.issue),
 			]);
 			// PON-209: "live" here means "our machinery still thinks this is
 			// open" — a scope record, a lane entry, a held delivery. None of
@@ -953,8 +964,16 @@ export class CockpitMirror {
 				...live.queued,
 				...live.active,
 				...(live.inVerification ?? []),
+				...(live.parked ?? []),
 			]);
 			const liveIds = new Set<string>();
+			// PON-224: parked before queued — a lane-derived entry for the same
+			// issue carries a position and should win the final write.
+			for (const entry of live.parked ?? []) {
+				if (terminal.has(entry.issue.issueId)) continue;
+				liveIds.add(entry.issue.issueId);
+				await this.upsert(entry.issue, entry.tenantWorkspaceId, "queued");
+			}
 			for (const entry of live.queued) {
 				if (terminal.has(entry.issue.issueId)) continue;
 				liveIds.add(entry.issue.issueId);

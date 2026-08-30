@@ -91,17 +91,41 @@ Before you change any file, create any commit, or open any PR:
 
    The option descriptions are yours and they must stand on their own. Assume the client reads them in an email with no surrounding text: each one says what happens if it is chosen, in one sentence.
 5. Act on the answer:
-   - "${SCOPE_APPROVE_LABEL}": proceed with the work as described. Do not ask again.
+   - "${SCOPE_APPROVE_LABEL}": the work is accepted into the queue. Post exactly one short confirmation in the client's terms — the work is accepted and they will hear back when there is something to review — then end your turn. Do not start implementing and do not ask again: implementation is scheduled separately and never begins in this conversation.
    - "${SCOPE_REVISE_LABEL}": incorporate the reply, re-record the operator note AND the revised client_scope, then ask again — the new ask carries the revised scope inline, which is how the client sees the revision.
    - "${SCOPE_CANCEL_LABEL}": post one short comment acknowledging the cancellation and stop.
    - Anything else is not an approval. Treat it as context, update the note, post a revised deliverable-framed scope, and ask again. Never start implementing without an explicit "${SCOPE_APPROVE_LABEL}".
 
-Until approval, make no changes to the repository: no file edits, no commits, no branches beyond the pre-created worktree, no PRs. Reading code, searching, and posting comments are all fine.
+Make no changes to the repository in this conversation, before or after approval: no file edits, no commits, no branches beyond the pre-created worktree, no PRs. Reading code, searching, and posting comments are all fine. Implementation happens in a separate working session once the work is picked up from the queue — this conversation only scopes the work and confirms it is accepted.
 
 If this session is a side conversation on the issue (for example, it started from a mention) or is resuming after the confirmation question was already posted: answer questions freely, but the rule above still holds — nothing is implemented on this issue until its scope is approved, and any request to implement routes through that confirmation.
 
 This gate applies once per issue. If the issue's scope was already approved in an earlier session, you will not see this block — do not re-ask.
 </scope_confirm_gate>`;
+}
+
+/**
+ * System prompt block for sessions on an issue whose scope is approved but
+ * whose implementation is parked (PON-224): the v3 cockpit starts
+ * implementation from the mirror, so the client-thread session must never
+ * pick the work up itself — not on the approval turn, and not when the
+ * client asks a follow-up while the work waits in the queue.
+ *
+ * Injected wherever the gate block would be (new sessions and resumes)
+ * whenever the issue's approval record carries `implementationDeferred`.
+ * Same intrinsic-over-enforced split as the gate itself: this block IS the
+ * mechanism; the machinery only does bookkeeping around it.
+ */
+export function buildImplementationParkedBlock(): string {
+	return `
+
+<implementation_parked>
+The scope for this issue is approved and the work is accepted into the queue. Implementation has not started and never starts in this conversation — it runs as a separate working session once our review team picks it up, and this thread receives the finished result when it is ready.
+
+In this conversation: answer the client in their own terms and keep replies short. Make no changes to the repository — no file edits, no commits, no branches, no PRs. Reading code to answer a question is fine. If the client asks when the work will be done, say it is queued and they will hear from us when there is something to review; never promise a date.
+
+If the message you are answering is the scope approval itself, reply with exactly one short confirmation that the work is accepted into their queue, then end your turn.
+</implementation_parked>`;
 }
 
 /**

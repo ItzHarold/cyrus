@@ -202,6 +202,7 @@ import {
 } from "./preview-deployment.js";
 import { ScopeApprovalStore } from "./ScopeApprovalStore.js";
 import {
+	buildImplementationParkedBlock,
 	buildScopeAskBody,
 	buildScopeConfirmGateBlock,
 	interpretCanonicalScopeAnswer,
@@ -5895,9 +5896,6 @@ ${taskSection}`;
 		issueId: string | undefined,
 		sessionId: string | undefined,
 	): string | undefined {
-		if (!this.scopeGatePendingForIssue(workspaceId, issueId)) {
-			return systemPrompt;
-		}
 		if (
 			sessionId &&
 			this.globalSessionRegistry.getParentSessionId(sessionId) != null
@@ -5913,7 +5911,19 @@ ${taskSection}`;
 		if (this.operatorSessions.isOperatorSession(sessionId)) {
 			return systemPrompt;
 		}
-		return (systemPrompt ?? "") + buildScopeConfirmGateBlock();
+		if (this.scopeGatePendingForIssue(workspaceId, issueId)) {
+			return (systemPrompt ?? "") + buildScopeConfirmGateBlock();
+		}
+		// PON-224: between approval and implementation start, every session
+		// on the client thread carries the parked block — the approval turn
+		// itself (which must confirm and stop) and any follow-up (which must
+		// converse without picking the work up). Same injection points as the
+		// gate: a resumed runner does not inherit the previous invocation's
+		// appended prompt, so a restart would otherwise remove the rule.
+		if (issueId && this.scopeApprovals.isImplementationDeferred(issueId)) {
+			return (systemPrompt ?? "") + buildImplementationParkedBlock();
+		}
+		return systemPrompt;
 	}
 
 	/**
@@ -5941,7 +5951,13 @@ ${taskSection}`;
 	 */
 	private async pruneEndedScopeConversations(): Promise<void> {
 		let removed = 0;
-		for (const entry of this.scopeApprovals.listPending()) {
+		// PON-224: parked approvals join the sweep. A deferred record whose
+		// client issue ended while we were down would otherwise park forever —
+		// same drift, same repair, still bounded by open work.
+		for (const entry of [
+			...this.scopeApprovals.listPending(),
+			...this.scopeApprovals.listDeferred(),
+		]) {
 			if (!entry.workspaceId) continue;
 			try {
 				const state = await this.cockpitMirror.clientIssueStateType(
@@ -6043,6 +6059,9 @@ ${taskSection}`;
 					approvedAt: record?.approvedAt,
 					proposedAt: record?.proposedAt,
 					revisions: record?.revisions ?? 0,
+					// PON-224: approval parks the work — the journal must be able
+					// to prove that no implementation followed this line.
+					implementationDeferred: record?.implementationDeferred === true,
 				});
 				await this.persistScopeApprovals("scope_confirmed");
 				// PON-219: this is now the mirror's BIRTH, not a transition on
@@ -6057,13 +6076,12 @@ ${taskSection}`;
 				// exists before this moment, so it has to be passed through
 				// here or PON-169's reading silently stops reaching the board.
 				const approvedIssue = webhook.agentSession.issue;
-				// PON-219: the mirror is born here, so its FIRST state has to
-				// be the truth. An approved issue whose session is still
-				// waiting for the lane has not started — under the old design
-				// the mirror already existed as `queued` and this write was
-				// only a transition, so "active" was harmless. As a BIRTH
-				// state it would put not-yet-started work in the Active
-				// column, which is the same lie this change removes.
+				// PON-224: the birth state is `queued` unconditionally.
+				// Approval no longer starts implementation — the work parks
+				// until the reviewer delegates the mirror — so a free lane no
+				// longer means "active"; nothing is running and nothing will
+				// run until that delegation. The lane position, when the
+				// scoping session itself is still queued, is kept as detail.
 				const queuedPosition = this.laneManager
 					.queuedEntriesOf(workspaceId)
 					.find((entry) => entry.issueId === issueId)?.position;
@@ -6083,11 +6101,16 @@ ${taskSection}`;
 							url: (approvedIssue as { url?: string } | undefined)?.url,
 						},
 						workspaceId,
-						queuedPosition === undefined ? "active" : "queued",
+						"queued",
 						{
 							...(queuedPosition !== undefined
 								? { position: queuedPosition }
 								: {}),
+							// PON-224: notify at birth. Queued work is claimable
+							// work now, and a reviewer who only hears about a
+							// mirror at in-verification would never learn there
+							// is something to start.
+							subscriberIds: this.subscribersForWorkspace(workspaceId),
 							...(record?.operatorNote !== undefined
 								? { operatorNote: record.operatorNote }
 								: {}),
@@ -6431,6 +6454,11 @@ ${taskSection}`;
 		if (this.mentionSessionIds.has(endingSessionId)) return false;
 		const gate = this.scopeApprovals.get(issueId);
 		if (gate && gate.state !== "approved") return false;
+		// PON-224: approved-but-parked work is not over — the session that
+		// just ended was the scoping conversation, and the queued mirror IS
+		// the ticket the reviewer starts the real work from. Closing it here
+		// would erase the work the client just approved.
+		if (gate?.implementationDeferred === true) return false;
 		if (this.laneManager.queuedSessionIdsForIssue(issueId).length > 0) {
 			return false;
 		}
@@ -6520,10 +6548,35 @@ ${taskSection}`;
 					},
 					tenantWorkspaceId: record.workspaceId,
 				}));
+			// PON-224: approved-but-parked work is live work — the queued
+			// mirror is the reviewer's ticket to start it, and a reconcile
+			// that cannot see it would close it as an orphan on every boot.
+			// An issue the lane already accounts for keeps its lane-derived
+			// entry (which carries the position); parked covers the rest.
+			const accountedFor = new Set([
+				...active.map((e) => e.issue.issueId),
+				...queued.map((e) => e.issue.issueId),
+				...inVerification.map((e) => e.issue.issueId),
+			]);
+			const parked = this.scopeApprovals
+				.listDeferred()
+				.filter(
+					(record) =>
+						record.workspaceId !== undefined &&
+						!accountedFor.has(record.issueId),
+				)
+				.map((record) => ({
+					issue: {
+						issueId: record.issueId,
+						issueIdentifier: record.issueIdentifier,
+					},
+					tenantWorkspaceId: record.workspaceId as string,
+				}));
 			await this.cockpitMirror.reconcile({
 				active,
 				queued,
 				inVerification,
+				parked,
 			});
 			// PON-219: prune scope records whose client issue is already over
 			// before rebuilding the list.
@@ -6664,6 +6717,20 @@ ${taskSection}`;
 		// Already delivered for this issue: a post-delivery follow-up result
 		// posts normally rather than vanishing.
 		if (this.verificationGate.get(issueId)?.state === "delivered") {
+			return false;
+		}
+		// PON-224: implementation is parked — this completion is the queue
+		// acceptance confirmation (or a follow-up answer), not a deliverable;
+		// holding it would strand the client's confirmation behind a review
+		// of work that does not exist. Deliberately NOT mirrored into
+		// `linksHeldForSession`, breaking the stay-in-step rule the two share:
+		// a parked session should mint no links, and if one leaks anyway the
+		// release event still comes at eventual delivery — held is safe,
+		// leaked work-in-progress is not. The exemption is scoped to the flag,
+		// which only ever exists between approval and implementation start,
+		// so a `reject:`-resumed regeneration (approved, flag long cleared)
+		// is still held exactly as before.
+		if (this.scopeApprovals.isImplementationDeferred(issueId)) {
 			return false;
 		}
 
@@ -7733,6 +7800,15 @@ ${taskSection}`;
 		};
 		const record = this.verificationGate.get(clientIssueId);
 		if (!record) {
+			// PON-224: parked work gets an honest orientation — approved,
+			// queued, waiting to be started. (Delegation-as-start is the next
+			// increment; this text is replaced when that path exists.)
+			if (this.scopeApprovals.isImplementationDeferred(clientIssueId)) {
+				await reply(
+					"**Queued — not started.** The client approved the scope and this work is waiting in the queue; implementation has not begun and nothing has gone to the client. Starting work directly from this mirror is not wired up yet — it ships in the next increment.",
+				);
+				return;
+			}
 			await reply(
 				"Nothing is held for review on this issue yet — there's nothing for me to pick up here.",
 			);
@@ -7972,6 +8048,18 @@ ${taskSection}`;
 			// empty in both cases; only the mirror's own state tells them
 			// apart.
 			const state = this.cockpitMirror.stateFor?.(clientIssueId) ?? "";
+			// PON-224: a parked issue is NOT underway — the client approved the
+			// scope and the work is waiting to be started. Claiming "my move"
+			// here would be false a beat after the parking change ships; the
+			// honest reply names what starting it takes today. (Delegation as
+			// the start trigger is the next increment; this text is its
+			// placeholder and is replaced when that path exists.)
+			if (this.scopeApprovals.isImplementationDeferred(clientIssueId)) {
+				await reply(
+					"**Queued — not started.** The client approved the scope and the work is waiting in the queue; implementation has not begun and nothing has gone to the client. Starting work directly from this mirror is not wired up yet — it ships in the next increment.",
+				);
+				return;
+			}
 			const underway = /^(active|queued|needs-info)/i.test(state);
 			await reply(
 				underway
@@ -9108,7 +9196,12 @@ ${taskSection}`;
 					url: (issue as { url?: string }).url,
 				},
 				linearWorkspaceId,
-				"active",
+				// PON-224: a runner on a parked issue is conversation (the
+				// approval confirmation, a follow-up question) — the work has
+				// not started, and the mirror stays in the Queued column.
+				this.scopeApprovals.isImplementationDeferred(issue.id)
+					? "queued"
+					: "active",
 			);
 		}
 
@@ -9550,7 +9643,10 @@ ${taskSection}`;
 					issueIdentifier ?? this.needsInfo.get(issueId)?.issueIdentifier,
 			},
 			workspaceId,
-			"active",
+			// PON-224: an answer on a parked issue does not start the work.
+			this.scopeApprovals.isImplementationDeferred(issueId)
+				? "queued"
+				: "active",
 		);
 	}
 

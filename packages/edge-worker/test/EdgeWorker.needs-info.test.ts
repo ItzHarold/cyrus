@@ -60,10 +60,13 @@ describe("EdgeWorker - needs-info mid-work (PON-172)", () => {
 			.fn()
 			.mockResolvedValue(undefined);
 		registerSession(worker);
-		// Mid-work = the scope gate is closed for this issue.
+		// Mid-work = the scope gate is closed AND implementation has begun.
+		// (PON-224: approval alone now parks the issue; a needs-info wait in
+		// the wild belongs to work that actually started.)
 		privates(worker).scopeApprovals.recordApproved(ISSUE_ID, {
 			workspaceId: GATED_WS,
 		});
+		privates(worker).scopeApprovals.markImplementationStarted(ISSUE_ID);
 		privates(worker).askUserQuestionHandler.handleAskUserQuestion = vi
 			.fn()
 			.mockResolvedValue({ behavior: "allow", updatedInput: {} });

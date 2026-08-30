@@ -170,9 +170,12 @@ describe("EdgeWorker - operator note delivery (PON-169)", () => {
 				url: undefined,
 			},
 			GATED_WS,
-			"active",
+			// PON-224: born queued — approval parks the work.
+			"queued",
 			{
 				operatorNote: "internal reading",
+				// No reviewers configured in this harness — empty, not absent.
+				subscriberIds: [],
 				brief: {
 					clientScope: "**Outcome** — export works.",
 					approvedAt: record?.approvedAt,

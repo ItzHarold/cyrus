@@ -362,6 +362,14 @@ export interface SerializedScopeApprovalRecord {
 	 * a replay matches and does not double-post.
 	 */
 	clientScopePosted?: string;
+	/**
+	 * Scope approved but implementation deliberately not started (v4.14,
+	 * PON-224): approved work parks as Queued in the cockpit until the
+	 * reviewer delegates the mirror. Set at approval, cleared when
+	 * implementation actually starts. Absent on records approved before
+	 * v4.14 = implementation already ran under the old auto-start flow.
+	 */
+	implementationDeferred?: boolean;
 }
 
 /**

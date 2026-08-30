@@ -77,6 +77,11 @@ export class ScopeApprovalStore {
 			state: "approved",
 			proposedAt: existing?.proposedAt ?? now,
 			approvedAt: now,
+			// PON-224: approval no longer starts implementation — the work
+			// parks until the reviewer delegates the cockpit mirror. Set only
+			// on the real transition: a replayed approve webhook returns above
+			// and cannot re-park an issue whose implementation has started.
+			implementationDeferred: true,
 			...(existing?.revisions !== undefined
 				? { revisions: existing.revisions }
 				: {}),
@@ -175,6 +180,28 @@ export class ScopeApprovalStore {
 		existing.clientScopePosted = text;
 	}
 
+	/**
+	 * Approved, parked, waiting for the reviewer to start it (PON-224).
+	 * False for legacy records approved under the auto-start flow.
+	 */
+	isImplementationDeferred(issueId: string): boolean {
+		const record = this.records.get(issueId);
+		return (
+			record?.state === "approved" && record.implementationDeferred === true
+		);
+	}
+
+	/**
+	 * Implementation is starting — the park is over (PON-224). Returns true
+	 * on the real transition only, so callers can log/persist exactly once.
+	 */
+	markImplementationStarted(issueId: string): boolean {
+		const record = this.records.get(issueId);
+		if (record?.implementationDeferred !== true) return false;
+		delete record.implementationDeferred;
+		return true;
+	}
+
 	/** The issue reached a terminal state — its gate record is done. */
 	remove(issueId: string): boolean {
 		return this.records.delete(issueId);
@@ -189,6 +216,19 @@ export class ScopeApprovalStore {
 		const out: Array<{ issueId: string } & ScopeApprovalRecord> = [];
 		for (const [issueId, record] of this.records) {
 			if (record.state !== "approved") out.push({ issueId, ...record });
+		}
+		return out;
+	}
+
+	/**
+	 * Approved work still waiting to be started (PON-224). Bounded the same
+	 * way `listPending` is: by open work, never by issue history.
+	 */
+	listDeferred(): Array<{ issueId: string } & ScopeApprovalRecord> {
+		const out: Array<{ issueId: string } & ScopeApprovalRecord> = [];
+		for (const [issueId, record] of this.records) {
+			if (record.state === "approved" && record.implementationDeferred === true)
+				out.push({ issueId, ...record });
 		}
 		return out;
 	}
