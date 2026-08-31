@@ -217,6 +217,20 @@ export class ScopeApprovalStore {
 		return true;
 	}
 
+	/**
+	 * The client asked for a change to work already delivered (PON-236).
+	 *
+	 * Puts the issue back where a first start finds it: deferred, so the
+	 * reviewer's delegate gesture picks it up through the same admission
+	 * point — no second start path beside the one that works.
+	 */
+	recordReworkRequested(issueId: string, note?: string): void {
+		const record = this.records.get(issueId);
+		if (!record) return;
+		record.implementationDeferred = true;
+		if (note !== undefined) record.clientReplyNote = note;
+	}
+
 	/** The issue reached a terminal state — its gate record is done. */
 	remove(issueId: string): boolean {
 		return this.records.delete(issueId);

@@ -248,3 +248,13 @@ The final message goes back to being what it naturally wants to be: the reviewer
 Guarded on `clientSummaryAt > link.startedAt`: the field persists across runs, and a previous run's client text is the same stale-artefact problem the hand-off note already hit once. No recorded summary falls back to today's behaviour.
 
 Also here: **we no longer post `Session stopped — <ID> was marked as Done or Canceled` on a thread we ourselves just closed out.** Observed live on the first merge-closes-the-loop run — the client got "Merged — this is now part of your project", then that. `selfCompletedIssues` suppresses it for the seconds between our own write and the webhook it causes.
+
+### A change request reopens the work (PON-236)
+
+Delivered work is never edited quietly. The delivered-thread block asks the client to confirm a restated delta using two canonical labels, and the machinery recognises the exact "yes" — the same shape the scope gate uses, because a client's agreement to more work is a decision to recognise exactly, not to infer from prose. Label-plus-note is read the way PON-230 taught the scope gate, since a client who picks an option and then explains is the normal case.
+
+On confirmation: mirror to `rework` (rank 2 — ahead of every fresh start, behind work already on the reviewer's desk), reviewers subscribed, and an inbox **comment**, because a finished item reopening is exactly what a reviewer would otherwise learn about by accident.
+
+Re-entry sets `implementationDeferred` back on the scope record, so it starts through the same admission point a first start uses — `mayStartParkedWork`, WIP gate included. No second start path beside the one that works, which is the PON-210 lesson about not building a second resume path next to `reject:`.
+
+Guarded on the record being **delivered**: before that the client has been given nothing, so those labels must move nothing.
