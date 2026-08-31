@@ -236,3 +236,15 @@ Delivery hands work to the client; it no longer finishes it. The mirror moves to
 - **Everything fails UNKNOWN.** A missing token, a 404, a rate-limit or a parse failure is never "not merged" and never "merged" — same posture as `summaryStaleness`. A PR **closed without merging** is not a completion: it is a client rejecting work, so it goes to the reviewer once and the item stays put.
 - **Close-out order is load-bearing**: client close-out → mirror comment → move their issue to completed. That last write fires the terminal path, which removes the record, closes the mirror and deletes the worktree.
 - **`releaseHeldLinks` cannot attach the client's links on a mirror-originated run** — they were published to the mirror session, so nothing is held under the client's id. `attachClientDeliveryLinks` writes them explicitly, or their Linear renders a delivery with no Diff and no merge button.
+
+### The client's summary is handed over, not scraped (PON-235)
+
+Twice a mirror run ended its final message with a line addressed to the REVIEWER — *"Done and verified. Here's the state"*, then *"Hand-off recorded. Two things flagged for you"* — and the client received it, because the final-response interceptor captures the whole message. Sharpening the instruction fixed the first shape; the next run found another.
+
+So the client's text stops being scraped from free-form output. `record_operator_note` gained a `client_summary` input, and the mirror-implementation block asks the run to hand the summary over there. `holdCompletionForVerification` prefers it over the final message. Exactly PON-196's move — the scope stopped being a comment the model posted and became something the machinery carried — for the same reason: a client-facing artefact should not depend on a model choosing the right words in the right place at the right moment.
+
+The final message goes back to being what it naturally wants to be: the reviewer's.
+
+Guarded on `clientSummaryAt > link.startedAt`: the field persists across runs, and a previous run's client text is the same stale-artefact problem the hand-off note already hit once. No recorded summary falls back to today's behaviour.
+
+Also here: **we no longer post `Session stopped — <ID> was marked as Done or Canceled` on a thread we ourselves just closed out.** Observed live on the first merge-closes-the-loop run — the client got "Merged — this is now part of your project", then that. `selfCompletedIssues` suppresses it for the seconds between our own write and the webhook it causes.

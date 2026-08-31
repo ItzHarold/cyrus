@@ -4190,10 +4190,18 @@ ${taskSection}`;
 		// Post a response activity to each stopped session's Linear thread,
 		// then remove the session so subsequent prompts don't find stale state.
 		for (const session of sessions) {
-			await this.agentSessionManager.createResponseActivity(
-				session.id,
-				`Session stopped — ${message.workItemIdentifier} was marked as Done or Canceled.`,
-			);
+			// PON-235: not when we closed it ourselves. A client who has just
+			// been told "Merged — this is now part of your project" does not
+			// then need "Session stopped — FRO-64 was marked as Done or
+			// Canceled": it is our vocabulary, on their thread, immediately
+			// after a polished close-out. Observed live on the first
+			// merge-closes-the-loop run.
+			if (!this.selfCompletedIssues.has(issueId)) {
+				await this.agentSessionManager.createResponseActivity(
+					session.id,
+					`Session stopped — ${message.workItemIdentifier} was marked as Done or Canceled.`,
+				);
+			}
 			this.agentSessionManager.removeSession(session.id);
 		}
 
@@ -6839,6 +6847,28 @@ ${taskSection}`;
 			return false;
 		}
 
+		// PON-235: prefer the summary the run HANDED OVER for the client over
+		// the one scraped from its final message. Twice a run has opened that
+		// message with a line addressed to the reviewer and the client
+		// received it, because the interceptor captures the whole thing.
+		// Only a summary recorded during THIS run counts — the field
+		// persists, and a previous run's text is exactly the stale-artefact
+		// problem the hand-off guard already fixed once.
+		const recorded = this.scopeApprovals.get(issueId);
+		const recordedAt = recorded?.clientSummaryAt;
+		const startedAt = operatorLink?.startedAt;
+		const handedOver =
+			recorded?.clientSummary &&
+			recordedAt &&
+			(!startedAt || recordedAt > startedAt)
+				? recorded.clientSummary
+				: undefined;
+		if (handedOver) {
+			this.logger.event("client_summary_from_handover", {
+				issueId,
+				issueIdentifier: session?.issueContext?.issueIdentifier,
+			});
+		}
 		this.verificationGate.recordPending(issueId, {
 			workspaceId: operatorLink?.clientWorkspaceId ?? (workspaceId as string),
 			issueIdentifier: session?.issueContext?.issueIdentifier,
@@ -6850,7 +6880,7 @@ ${taskSection}`;
 			// field — the origin ref for PR-readying, the branch in the
 			// checkout instructions — wants the client side too.
 			sessionId: operatorLink?.clientSessionId ?? sessionId,
-			summary: content,
+			summary: handedOver ?? content,
 			isError,
 		});
 		this.logger.event("verification_pending", {
@@ -8209,6 +8239,15 @@ ${taskSection}`;
 	private mergeCloseNotified = new Set<string>();
 
 	/**
+	 * Issues WE moved to Done after the client merged (PON-235).
+	 *
+	 * In memory only: it exists to suppress one line in the seconds between
+	 * our own write and the webhook it causes, and after a restart there is
+	 * no pending close-out for it to collide with.
+	 */
+	private selfCompletedIssues = new Set<string>();
+
+	/**
 	 * The client merged: end the cycle on both sides (PON-233).
 	 *
 	 * Order is load-bearing. The client's close-out and the merged mark go
@@ -8512,6 +8551,32 @@ ${taskSection}`;
 					: undefined,
 			};
 		}
+		// PON-234: one piece of work per company, across the whole lifecycle.
+		// Checked here because this is the single admission point in front of
+		// starting work, and because refusing at the gesture is legible — the
+		// reviewer learns what holds the slot instead of watching a second
+		// build appear for a client who bought one lane.
+		//
+		// Deliberately NOT the lane. A lane holds a SESSION and is released
+		// the moment a human becomes the blocker, so it cannot express a hold
+		// that spans start to merge. The lane stays underneath as the
+		// execution guard; this is strictly stricter and fires earlier.
+		const wip = this.cockpitMirror.clientWorkInFlight(clientIssueId);
+		if (wip.inFlight.length >= wip.limit) {
+			const held = wip.inFlight
+				.map((i) => `${i.issueIdentifier ?? "another issue"} (${i.state})`)
+				.join(", ");
+			this.logger.event("wip_limit_reached", {
+				clientIssueId,
+				limit: wip.limit,
+				inFlight: wip.inFlight.length,
+			});
+			return {
+				ok: false,
+				say: `This client already has work in flight — ${held} — and they have ${wip.limit === 1 ? "one lane" : `${wip.limit} lanes`}. Nothing has been started here; it stays queued until that reaches Done or is cancelled.`,
+			};
+		}
+
 		if (action.actorId && reviewers.includes(action.actorId))
 			return { ok: true };
 
@@ -11373,6 +11438,9 @@ ${taskSection}`;
 				);
 				return;
 			}
+			// Mark before the write: the entity webhook comes back fast, and
+			// the terminal handler must know this completion was ours.
+			this.selfCompletedIssues.add(issueId);
 			await tracker.updateIssue(issueId, { stateId: done.id });
 			this.logger.event("client_issue_completed", {
 				issueId,
@@ -11821,8 +11889,12 @@ ${taskSection}`;
 		// keeps off the client's thread lands on the scope record and the
 		// cockpit mirror instead.
 		options.operatorNotes = {
-			deliver: (cwd: string, note: string, clientScope?: string) =>
-				this.deliverOperatorNote(cwd, note, clientScope),
+			deliver: (
+				cwd: string,
+				note: string,
+				clientScope?: string,
+				clientSummary?: string,
+			) => this.deliverOperatorNote(cwd, note, clientScope, clientSummary),
 		};
 		return options;
 	}
@@ -11836,6 +11908,7 @@ ${taskSection}`;
 		cwd: string,
 		note: string,
 		clientScope?: string,
+		clientSummary?: string,
 	): Promise<{ ok: true } | { ok: false; error: string }> {
 		try {
 			const session = this.sessionForCwd(cwd);
@@ -11850,7 +11923,12 @@ ${taskSection}`;
 				return { ok: false, error: "the session has no issue to record on" };
 			}
 			const issueIdentifier = session.issueContext?.issueIdentifier;
-			this.scopeApprovals.recordOperatorNote(issueId, note, clientScope);
+			this.scopeApprovals.recordOperatorNote(
+				issueId,
+				note,
+				clientScope,
+				clientSummary,
+			);
 			await this.persistScopeApprovals("operator_note_recorded");
 			// The note itself never goes to the journal — length only. It is
 			// internal detail, and logs travel further than the cockpit.
@@ -11860,6 +11938,7 @@ ${taskSection}`;
 				sessionId: session.id,
 				noteLength: note.length,
 				hasClientScope: clientScope !== undefined,
+				hasClientSummary: clientSummary !== undefined,
 			});
 			const workspaceId =
 				this.resolveWorkspaceIdForSession(session.id) ??

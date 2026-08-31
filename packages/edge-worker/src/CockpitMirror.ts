@@ -1442,6 +1442,63 @@ export class CockpitMirror {
 		}
 	}
 
+	/**
+	 * How much of a client's work is in flight, and how much they bought
+	 * (PON-234).
+	 *
+	 * Work-in-progress is a property of the LIFECYCLE, not of a session. The
+	 * lane holds a session and is released the moment a human becomes the
+	 * blocker — correctly, so a client's other issues are not stuck behind
+	 * someone's inbox — which makes it structurally unable to express "one
+	 * piece of work at a time, from start to merge". This counts states
+	 * instead: it is derived, so a restart cannot lose it, and a stale
+	 * mirror is repaired by the same reconcile that repairs everything else.
+	 *
+	 * Bends the module's own "nothing reads a mirror to make a decision"
+	 * rule, and says so out loud rather than quietly, as `stateFor` and
+	 * `assigneeIdFor` already do.
+	 *
+	 * Keyed on the client, falling back to the workspace: `resolveClient`
+	 * returns the literal "unassigned" for every workspace with no registry
+	 * entry, so keying on the id alone would serialise every unconfigured
+	 * tenant against each other as though they were one company.
+	 */
+	clientWorkInFlight(clientIssueId: string): {
+		inFlight: Array<{ issueIdentifier?: string; state: string }>;
+		limit: number;
+	} {
+		const IN_FLIGHT = new Set([
+			"active",
+			"needs-info",
+			"in-verification",
+			"in-client-review",
+			"rework",
+		]);
+		const subject = this.mirrors.get(clientIssueId);
+		const keyOf = (record: SerializedCockpitMirror): string =>
+			!record.clientId || record.clientId === "unassigned"
+				? record.tenantWorkspaceId
+				: record.clientId;
+		if (!subject) return { inFlight: [], limit: 1 };
+		const subjectKey = keyOf(subject);
+
+		const inFlight: Array<{ issueIdentifier?: string; state: string }> = [];
+		for (const [issueId, record] of this.mirrors) {
+			if (issueId === clientIssueId) continue;
+			if (keyOf(record) !== subjectKey) continue;
+			const state = bareCockpitState(record.state);
+			if (IN_FLIGHT.has(state))
+				inFlight.push({ issueIdentifier: record.issueIdentifier, state });
+		}
+		// What they bought, not a hard 1: a client paying for two lanes must
+		// be allowed two in flight.
+		const client = this.deps.resolveClient(
+			subject.tenantWorkspaceId,
+			teamKeyOf(subject.issueIdentifier),
+		);
+		return { inFlight, limit: Math.max(1, client.lanes ?? 1) };
+	}
+
 	clientIssueIdFor(mirrorIssueId: string): string | undefined {
 		for (const [clientIssueId, record] of this.mirrors) {
 			if (record.mirrorIssueId === mirrorIssueId) return clientIssueId;

@@ -283,25 +283,23 @@ Facts they can read off the pull request — the commit, the file list, the
 counts — are added around your note automatically. Do not spend the note
 repeating them.
 
-Your LAST message is different, and this is the one thing in this block to
-get right. It is not a report to the reviewer. It is held, and on release it
-is posted to the CLIENT, word for word, as the whole of what they receive.
-Anything addressed to the reviewer in it reaches the wrong person — a
-"here's the state" opener, a heading like "for you", a commit hash, a branch
-name, a file path, a note about what you could not check: the client reads
-all of it, and none of it was written for them.
-
-So: say everything you have to say to the reviewer BEFORE you finish. Then
-write the last message to the client, and to nobody else:
-- Their language, not ours: what now works, and how they can see it working.
+Record the summary THE CLIENT will receive with the record_operator_note
+tool, in its client_summary input, before you finish. That is what they
+get, word for word, when the reviewer releases it — so write it to them:
+- Their language: what now works, and how they can see it working.
 - No file names, no paths, no commit hashes, no branch names, no mechanics,
   no mention of this thread or of any review.
 - Write the pull request URL and the preview URL out in full. They are read
-  back out of this text to build the client's links — a shortened or
-  paraphrased URL is a link they do not get.
+  back out of that text to build the client's links.
 - Describe what is actually true of the branch as it stands now.
-- Do not include a second version of it, a heading introducing it, or
-  anything after it. The message IS the summary.
+
+Recording it is what makes it theirs, and it is why your own last message
+does not have to be. Two runs before this one ended their final message
+with a line to the reviewer — "here's the state", "hand-off recorded, two
+things flagged for you" — and the client received it, because whatever a
+run says last is what gets held. Handing the summary over deliberately
+takes that trap away: say what you like to the reviewer in your closing
+message, and the client still gets only what you recorded.
 
 If you need something only the client can answer, say so to the reviewer and
 stop. Never contact the client yourself: the reviewer decides what reaches
