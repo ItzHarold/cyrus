@@ -201,6 +201,10 @@ import {
 	renderPreview,
 	withPreviewBypass,
 } from "./preview-deployment.js";
+import {
+	buildDeliveredRequestBlock,
+	buildReviewerRequestBlock,
+} from "./request-intent.js";
 import { ScopeApprovalStore } from "./ScopeApprovalStore.js";
 import {
 	buildImplementationParkedBlock,
@@ -5737,7 +5741,21 @@ ${taskSection}`;
 	 */
 	private sessionRuleBlocks(sessionId: string | undefined): string {
 		if (this.operatorSessions.isOperatorSession(sessionId)) return "";
-		return buildClientSurfaceRuleBlock() + buildNeedsInfoRuleBlock();
+		// PON-229: once work is delivered, the client's thread stays open and
+		// what arrives on it is either a question about what they got or a
+		// request to change it. Told neither, a session treats both as work —
+		// the same defect the reviewer's thread had, except here it changes
+		// delivered software in front of the person who owns it. The block
+		// only decides question-versus-change-request; the queue mechanics of
+		// a reopened piece of work are §8.8's own increment.
+		const issueId = sessionId ? this.sessionIssueId(sessionId) : undefined;
+		const delivered =
+			issueId && this.verificationGate.get(issueId)?.state === "delivered";
+		return (
+			buildClientSurfaceRuleBlock() +
+			buildNeedsInfoRuleBlock() +
+			(delivered ? buildDeliveredRequestBlock() : "")
+		);
 	}
 
 	/** Gate on for the workspace AND the issue's scope not yet approved. */
@@ -8612,6 +8630,13 @@ ${taskSection}`;
 
 		const prompt =
 			opts.instruction +
+			// PON-229: the reviewer's message reaches this path whatever it
+			// was — the catch-all intent is `iterate`, so a question arrives
+			// wrapped in "carry on working". Ask what it actually is first.
+			// Not on a handback: "back to you: <what I changed>" is already a
+			// directive by construction, and offering the model a way to read
+			// it as a question is how a handback stalls.
+			(opts.resumedAfterOperatorEdits ? "" : buildReviewerRequestBlock()) +
 			buildOperatorSessionBlock({
 				issueIdentifier: record.issueIdentifier,
 				branchName: clientSession.workspace?.path

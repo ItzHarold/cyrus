@@ -208,3 +208,18 @@ Three symptoms, one cause. The verification gate suppresses a mirror run's final
 - **The narration thread is pointed at the live one when work starts.** Otherwise the parked sign-off ("nothing is running here") stays standing and turns false the moment work begins — which is precisely how a run sixteen minutes deep was reported as stuck.
 
 Guard is `verificationSignedOff`, cleared on deliver and reject, so a second round of review signs off again.
+
+### A question must never mutate the branch (PON-229)
+
+Found live on CKP-22: the reviewer asked *"why did you make metric-definitions.ts its own file instead of keeping the notes inline?"* — a question about a decision — and the session edited files, committed, pushed a second commit onto the branch under review, and rewrote the pull-request description.
+
+Nothing in the chain was broken. `classifyMirrorIntent`'s catch-all is `iterate` (deliberately — refusing plain instructions was the defect PON-208 fixed), and `buildOperatorSessionBlock` told the session to "work exactly as you did before… commit and push as usual". A question arrived wrapped in *carry on working*.
+
+`request-intent.ts` is one mechanism for two surfaces, because it is one failure:
+
+- **Reviewer thread** (`buildReviewerRequestBlock`, added to every non-handback operator iteration): question → answer, change NOTHING; directive → implement; unclear → one short question. A handback is exempt — `back to you: <what I changed>` is a directive by construction, and offering a way to read it as a question is how a handback stalls.
+- **Delivered client thread** (`buildDeliveredRequestBlock`, added by `sessionRuleBlocks` once the gate says `delivered`): question → answer in their language from what was delivered; change request → restate as a deliverable and get confirmation, never act directly, because a change made straight onto delivered work is a change nobody reviewed.
+
+Intrinsic, not a classifier: free English is exactly the shape a code-side matcher fails on, and enforcement has already failed here three times. What the machinery guarantees is that the question is always **asked**, on every turn, on both surfaces.
+
+**The asymmetry is load-bearing.** Both blocks say which way to fall and why: answering something that wanted action costs one message, while acting on something that wanted an answer rewrites a branch someone was mid-review of — or changes delivered software in front of the client who owns it.

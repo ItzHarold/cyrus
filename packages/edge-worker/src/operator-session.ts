@@ -182,8 +182,10 @@ You are continuing your work on ${ident}, but this thread is NOT the client's
 issue — it is the internal review thread, and the person writing here is the
 reviewer at Ponte Digital. The client cannot see anything in this thread.
 
-Work exactly as you did before, in the same worktree and on the same branch,
-and commit and push your changes as usual${input.branchName ? ` (branch \`${input.branchName}\`)` : ""}.
+If you are being asked to change something, work exactly as you did before,
+in the same worktree and on the same branch, and commit and push as usual${input.branchName ? ` (branch \`${input.branchName}\`)` : ""}.
+If you are being asked a question, answer it and leave the branch alone — see
+the rule above about which this is.
 
 Rules for this thread:
 - Talk to the reviewer directly. They are technical: name files, show diffs,
