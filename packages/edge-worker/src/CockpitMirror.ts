@@ -28,6 +28,13 @@ export const COCKPIT_STATES = [
 	"active",
 	"needs-info",
 	"in-verification",
+	// PON-233: the client has it. Distinct from in-verification, which is
+	// the REVIEWER's hold — these look the same on a board and mean opposite
+	// things about whose move it is.
+	"in-client-review",
+	// A delivered piece of work the client asked to change. It re-enters at
+	// the head of the order rather than the back of the queue.
+	"rework",
 	"delivered",
 ] as const;
 export type CockpitState = (typeof COCKPIT_STATES)[number];
@@ -49,6 +56,8 @@ export const COCKPIT_STATUS_NAMES: Record<CockpitState, string> = {
 	active: "Active",
 	"needs-info": "Needs info",
 	"in-verification": "In verification",
+	"in-client-review": "In client review",
+	rework: "Rework",
 	delivered: "Delivered",
 };
 
@@ -182,7 +191,19 @@ const MIRROR_TITLE_PATTERN =
  * or the client. Only these queue — "active" is the agent's turn and
  * and an unapproved scope conversation is not a mirror at all (PON-219).
  */
-const WAITING_STATES = new Set(["in-verification", "needs-info"]);
+const WAITING_STATES = new Set([
+	"in-verification",
+	"needs-info",
+	// PON-233: queued belongs here now. Since PON-224 the reviewer is the one
+	// who STARTS a parked mirror, so approved work waiting to be picked up is
+	// waiting on them — and until this it never rendered "▶ Next up", which
+	// is the one line that says what to take.
+	"queued",
+	// A change the client asked for is waiting on the reviewer too.
+	"rework",
+	// Deliberately NOT "in-client-review": the client holds it, and offering
+	// it as next-up would point the reviewer at work that is not theirs.
+]);
 
 /**
  * Bumped whenever `renderDescription` changes what it produces (PON-211).
@@ -935,6 +956,22 @@ export class CockpitMirror {
 			issue: CockpitIssueRef;
 			tenantWorkspaceId: string;
 		}>;
+		/**
+		 * Delivered work the client is reviewing, and work they asked to
+		 * change (PON-233). The same trap as `parked` with a much longer
+		 * fuse: an item can sit in client review for days, and reconcile
+		 * closes anything it cannot see — into CANCELED, because
+		 * "reconciled" is a discard reason. Without these categories the
+		 * first restart after a delivery destroys the record of it.
+		 */
+		inClientReview?: Array<{
+			issue: CockpitIssueRef;
+			tenantWorkspaceId: string;
+		}>;
+		rework?: Array<{
+			issue: CockpitIssueRef;
+			tenantWorkspaceId: string;
+		}>;
 	}): Promise<void> {
 		try {
 			if (!this.deps.getConfig()) return;
@@ -949,6 +986,8 @@ export class CockpitMirror {
 				...live.queued.map((e) => e.issue),
 				...(live.inVerification ?? []).map((e) => e.issue),
 				...(live.parked ?? []).map((e) => e.issue),
+				...(live.inClientReview ?? []).map((e) => e.issue),
+				...(live.rework ?? []).map((e) => e.issue),
 			]);
 			// PON-209: "live" here means "our machinery still thinks this is
 			// open" — a scope record, a lane entry, a held delivery. None of
@@ -965,6 +1004,8 @@ export class CockpitMirror {
 				...live.active,
 				...(live.inVerification ?? []),
 				...(live.parked ?? []),
+				...(live.inClientReview ?? []),
+				...(live.rework ?? []),
 			]);
 			const liveIds = new Set<string>();
 			// PON-224: parked before queued — a lane-derived entry for the same
@@ -994,6 +1035,20 @@ export class CockpitMirror {
 					entry.tenantWorkspaceId,
 					"in-verification",
 				);
+			}
+			for (const entry of live.inClientReview ?? []) {
+				if (terminal.has(entry.issue.issueId)) continue;
+				liveIds.add(entry.issue.issueId);
+				await this.upsert(
+					entry.issue,
+					entry.tenantWorkspaceId,
+					"in-client-review",
+				);
+			}
+			for (const entry of live.rework ?? []) {
+				if (terminal.has(entry.issue.issueId)) continue;
+				liveIds.add(entry.issue.issueId);
+				await this.upsert(entry.issue, entry.tenantWorkspaceId, "rework");
 			}
 			for (const issueId of [...this.mirrors.keys()]) {
 				if (!liveIds.has(issueId)) {

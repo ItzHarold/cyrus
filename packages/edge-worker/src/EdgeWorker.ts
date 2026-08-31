@@ -6530,6 +6530,12 @@ ${taskSection}`;
 		// the ticket the reviewer starts the real work from. Closing it here
 		// would erase the work the client just approved.
 		if (gate?.implementationDeferred === true) return false;
+		// PON-233: delivered work the client is still reviewing is not over
+		// either. Any stray session ending on the issue — a follow-up
+		// question, say — would otherwise close the mirror out from under a
+		// cycle that ends at their merge.
+		const delivery = this.verificationGate.get(issueId);
+		if (delivery?.mergeWatch && !delivery.mergedAt) return false;
 		if (this.laneManager.queuedSessionIdsForIssue(issueId).length > 0) {
 			return false;
 		}
@@ -6643,11 +6649,32 @@ ${taskSection}`;
 					},
 					tenantWorkspaceId: record.workspaceId as string,
 				}));
+			// PON-233: delivered-but-unmerged work is LIVE. Reconcile closes
+			// anything it cannot see, into Canceled, and an item can sit in
+			// client review for days — so leaving this out would destroy the
+			// record of a delivery on the first restart after it.
+			const inClientReview = this.verificationGate
+				.awaitingMergeIssueIds()
+				.flatMap((clientIssueId) => {
+					const r = this.verificationGate.get(clientIssueId);
+					return r
+						? [
+								{
+									issue: {
+										issueId: clientIssueId,
+										issueIdentifier: r.issueIdentifier,
+									},
+									tenantWorkspaceId: r.workspaceId,
+								},
+							]
+						: [];
+				});
 			await this.cockpitMirror.reconcile({
 				active,
 				queued,
 				inVerification,
 				parked,
+				inClientReview,
 			});
 			// PON-219: prune scope records whose client issue is already over
 			// before rebuilding the list.
@@ -7361,6 +7388,12 @@ ${taskSection}`;
 				headSha: string;
 				files: Array<{ path: string; additions: number; deletions: number }>;
 				truncated: boolean;
+				// PON-233: the merge fact was always in this response and was
+				// always thrown away. Reading it is what makes merge detection
+				// free — the refresh clock already makes this exact request.
+				merged: boolean;
+				closed: boolean;
+				mergeCommitSha?: string;
 		  }
 		| undefined
 	> {
@@ -7375,9 +7408,13 @@ ${taskSection}`;
 			if (!response.ok) return undefined;
 			return (await response.json()) as T;
 		};
-		const detail = await api<{ head: { sha: string }; changed_files: number }>(
-			`/repos/${pr.owner}/${pr.repo}/pulls/${pr.number}`,
-		);
+		const detail = await api<{
+			head: { sha: string };
+			changed_files: number;
+			merged?: boolean;
+			state?: string;
+			merge_commit_sha?: string;
+		}>(`/repos/${pr.owner}/${pr.repo}/pulls/${pr.number}`);
 		if (!detail?.head?.sha) return undefined;
 		const files =
 			(await api<
@@ -7386,6 +7423,11 @@ ${taskSection}`;
 				`/repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/files?per_page=100`,
 			)) ?? [];
 		return {
+			merged: detail.merged === true,
+			closed: detail.state === "closed",
+			...(detail.merge_commit_sha
+				? { mergeCommitSha: detail.merge_commit_sha }
+				: {}),
 			headSha: detail.head.sha,
 			files: files.map((f) => ({
 				path: f.filename,
@@ -7690,6 +7732,9 @@ ${taskSection}`;
 		if (record.state === "delivered") {
 			return `Already delivered at ${record.deliveredAt}.`;
 		}
+		// PON-233: the mirror session that did the work, when there is one.
+		// It decides where the sign-off goes and who signed the delivery.
+		const link = this.operatorSessions.forClientIssue(issueId);
 
 		// PON-171: the operator's notes land on a CLIENT surface — the R2
 		// policy applies to them like any other outbound text, and here the
@@ -7803,14 +7848,25 @@ ${taskSection}`;
 				this.extractPreviewUrl(record.summary) ?? "",
 				this.previewBypassTokenFor(record.workspaceId),
 			) || undefined;
+		// PON-233: who did this, and who checked it. Derived from the mirror's
+		// assignee — the reviewer's own claim, which the mirror never writes —
+		// so it scales to more reviewers without another source of truth.
+		const signature = await this.deliverySignature(issueId, link);
 		const footer = CLIENT_MESSAGES.deliveryFooter(
 			previewUrl,
 			mergeablePrUrls.join(" · ") || undefined,
 			notes || undefined,
+			signature,
 		);
-		const clientSummary = footer
-			? `${record.summary}\n\n${footer}`
-			: record.summary;
+		// PON-233: the cycle ends at THEIR merge, not at our delivery, so the
+		// message has to say whose move it is. Without this a delivered pull
+		// request sits open because nobody told them the last step was theirs.
+		const whatNext = CLIENT_MESSAGES.reviewAndMerge(
+			this.testAccountsLine(record.workspaceId),
+		);
+		const clientSummary = [record.summary, whatNext, footer]
+			.filter(Boolean)
+			.join("\n\n");
 
 		// Post the summary to the client's session thread — STRICTLY:
 		// the lenient posting paths swallow failures, and a swallowed failure
@@ -7825,6 +7881,12 @@ ${taskSection}`;
 			// PON-221: the work is released, so the links may follow it. Held
 			// since implementation; attached now, with the delivery.
 			await this.agentSessionManager.releaseHeldLinks?.(record.sessionId);
+			// PON-233: on a mirror-originated run that release is a no-op —
+			// the links were published to the MIRROR session, so the client's
+			// side has nothing held to release. Attach them explicitly, or
+			// their Linear renders a delivery with no Diff and no merge
+			// button, which is the whole surface they are asked to act on.
+			await this.attachClientDeliveryLinks(record, mergeablePrUrls, previewUrl);
 		} catch (error) {
 			// Delivery of the summary is the point — if it failed, do NOT
 			// mark delivered; the operator retries.
@@ -7843,16 +7905,142 @@ ${taskSection}`;
 			deliveredAt: this.verificationGate.get(issueId)?.deliveredAt,
 		});
 		void this.persistScopeApprovals("verification_delivered");
+		// PON-233: the client has it now, and that is a different thing from
+		// done. `delivered` is kept as the RECORD state (four behaviours key
+		// on that literal) while the board says what is actually true.
 		void this.cockpitMirror.upsert(
 			{ issueId, issueIdentifier: record.issueIdentifier },
 			record.workspaceId,
-			"delivered",
+			"in-client-review",
 		);
-		this.endNarrationTurn(
-			issueId,
-			"**Released to the client — nobody's move.** The summary is on their thread and the pull request is theirs to merge. Nothing further is needed here.",
-		);
+		// Name the pull request whose merge ends the cycle, from the own-repo
+		// selection rather than the summary's free text, so the poller cannot
+		// drift onto a PR the client was never handed.
+		const watch = await this.ownRepoPullRequestFor(record);
+		if (watch) {
+			this.verificationGate.setMergeWatch(issueId, watch);
+			void this.persistScopeApprovals("merge_watch_set");
+			report.push(
+				`👀 Watching ${watch.owner}/${watch.repo}#${watch.number} for their merge.`,
+			);
+		} else {
+			report.push(
+				"⚠️ No own-repo pull request to watch — this will not close itself on merge.",
+			);
+		}
+		this.signOffIntoClientReview(issueId, link);
 		return report.join("\n");
+	}
+
+	/**
+	 * "Implemented by … · Reviewed by …" (PON-233).
+	 *
+	 * The reviewer comes from the mirror's ASSIGNEE — their own claim, which
+	 * the mirror never writes — so it scales to more reviewers without a
+	 * second source of truth. Resolved against the cockpit workspace, where
+	 * those user ids live; looking them up in the client's workspace finds
+	 * nothing. Any failure omits the line: a signature is worth having and
+	 * never worth a raw uuid on a client's thread.
+	 */
+	private async deliverySignature(
+		issueId: string,
+		link?: OperatorSessionLink,
+	): Promise<string | undefined> {
+		const cockpitWs = this.config.cockpit?.linearWorkspaceId;
+		if (!cockpitWs) return undefined;
+		try {
+			const reviewerId =
+				(await this.cockpitMirror.assigneeIdFor(issueId)) ??
+				link?.reviewerId ??
+				this.subscribersForWorkspace(link?.clientWorkspaceId)[0];
+			if (!reviewerId) return undefined;
+			const user = await this.issueTrackers
+				.get(cockpitWs)
+				?.fetchUser?.(reviewerId);
+			const name = user?.displayName || user?.name;
+			if (!name) return undefined;
+			return `Implemented by Ponte Digital · Reviewed by ${name}`;
+		} catch (error) {
+			this.logger.debug(`No delivery signature: ${String(error)}`);
+			return undefined;
+		}
+	}
+
+	/** The tenant's role logins, rendered for a client surface (PON-233). */
+	private testAccountsLine(
+		workspaceId: string | undefined,
+	): string | undefined {
+		const accounts = workspaceId
+			? this.config.linearWorkspaces?.[workspaceId]?.previewTestAccounts
+			: undefined;
+		if (!accounts?.length) return undefined;
+		return accounts
+			.map(
+				(a) =>
+					`${a.label} \`${a.username}\`${a.password ? ` / \`${a.password}\`` : ""}`,
+			)
+			.join(" · ");
+	}
+
+	/**
+	 * Put the pull request and preview on the CLIENT's session (PON-233).
+	 *
+	 * `releaseHeldLinks` cannot do this for mirror-originated work: the links
+	 * were published to the mirror session, so there is nothing held under
+	 * the client's id to release. Without this their Linear renders a
+	 * delivery with no Diff and no merge button — the whole surface they are
+	 * being asked to act on. Best-effort: a missing button must never
+	 * un-deliver work that has already been posted.
+	 */
+	private async attachClientDeliveryLinks(
+		record: { sessionId: string; workspaceId: string },
+		prUrls: string[],
+		previewUrl?: string,
+	): Promise<void> {
+		const urls = [
+			...prUrls.map((url) => ({ url, label: "Pull request" })),
+			...(previewUrl ? [{ url: previewUrl, label: "Preview" }] : []),
+		];
+		if (!urls.length) return;
+		try {
+			await this.issueTrackers
+				.get(record.workspaceId)
+				?.updateAgentSession?.(record.sessionId, { addedExternalUrls: urls });
+			this.logger.event("client_delivery_links_attached", {
+				sessionId: record.sessionId,
+				count: urls.length,
+			});
+		} catch (error) {
+			this.logger.error("Could not attach the client's delivery links:", error);
+		}
+	}
+
+	/**
+	 * Close the reviewer's turn when the work goes out (PON-233).
+	 *
+	 * On the thread the reviewer typed `approve:` in, for the same reason
+	 * PON-228 moved the verification sign-off there: the narration thread is
+	 * beside the one they are standing in.
+	 */
+	private signOffIntoClientReview(
+		issueId: string,
+		link?: OperatorSessionLink,
+	): void {
+		const body =
+			"**Released — the client's move.** The summary, the pull request and the preview are on their thread. It stays in client review until they squash-merge, and I'll close it out here when they do. If they come back with a change, it reopens as rework at the head of your queue.";
+		if (link?.ownsDelivery) {
+			const tracker = this.issueTrackers.get(link.cockpitWorkspaceId);
+			void tracker
+				?.createAgentActivity?.({
+					agentSessionId: link.mirrorSessionId,
+					content: { type: "response", body },
+				})
+				.catch((error: unknown) => {
+					this.logger.debug(`Could not sign off delivery: ${String(error)}`);
+				});
+			return;
+		}
+		this.endNarrationTurn(issueId, body);
 	}
 
 	/**
@@ -7941,6 +8129,18 @@ ${taskSection}`;
 				for (const issueId of this.verificationGate.pendingIssueIds()) {
 					this.mirrorInVerification(issueId);
 				}
+				// PON-233: the same clock asks whether the client has merged.
+				// The merge fact rides in a response this tick already makes
+				// for work in review, so watching for it costs one extra call
+				// per item in client review and nothing at all otherwise.
+				// A poll rather than a webhook deliberately: the GitHub App
+				// subscribes to no events and has no webhook URL, and turning
+				// one on would start delivering comment events for every pull
+				// request in every client repository — a live request-path
+				// change bought for one boolean.
+				for (const issueId of this.verificationGate.awaitingMergeIssueIds()) {
+					void this.checkForClientMerge(issueId);
+				}
 			} catch (error) {
 				this.logger.error("Mirror refresh tick failed:", error);
 			}
@@ -7949,6 +8149,99 @@ ${taskSection}`;
 	}
 
 	private mirrorRefreshTimer?: ReturnType<typeof setInterval>;
+
+	/**
+	 * Has the client merged? (PON-233)
+	 *
+	 * Only a merge — or a cancel — ends the cycle. Everything here fails
+	 * UNKNOWN and retries on the next tick: a missing token, a 404, a
+	 * rate-limit or a parse failure is never read as "not merged" and never
+	 * as "merged". The same posture the staleness check takes, for the same
+	 * reason — a wrong answer here closes a client's work.
+	 *
+	 * A pull request closed WITHOUT merging is not a completion. That is a
+	 * client rejecting work, and it needs a human, so it goes to the
+	 * reviewer as a comment and the item stays where it is.
+	 */
+	private async checkForClientMerge(issueId: string): Promise<void> {
+		const record = this.verificationGate.get(issueId);
+		const pr = record?.mergeWatch;
+		if (!record || !pr || record.mergedAt) return;
+		try {
+			const token = await this.mintGitHubTokenForRepo(pr.owner, pr.repo);
+			if (!token) return;
+			const facts = await this.fetchPullRequestFacts(token, pr);
+			if (!facts) return;
+
+			if (!facts.merged) {
+				if (facts.closed && !this.mergeCloseNotified.has(issueId)) {
+					this.mergeCloseNotified.add(issueId);
+					this.logger.event("client_closed_pr_unmerged", {
+						issueId,
+						issueIdentifier: record.issueIdentifier,
+					});
+					void this.cockpitMirror.commentOnMirror(
+						issueId,
+						`**The client closed the pull request without merging.** That is not a completion — it usually means they do not want this as it stands. Nothing has been changed on their behalf; it is waiting on you.`,
+					);
+				}
+				return;
+			}
+
+			if (!this.verificationGate.markMerged(issueId, facts.mergeCommitSha))
+				return;
+			this.logger.event("client_merged", {
+				issueId,
+				issueIdentifier: record.issueIdentifier,
+				workspaceId: record.workspaceId,
+				pr: `${pr.owner}/${pr.repo}#${pr.number}`,
+				mergeCommitSha: facts.mergeCommitSha,
+			});
+			await this.persistScopeApprovals("client_merged");
+			await this.closeOutMergedWork(issueId, record);
+		} catch (error) {
+			// Unknown, not "no". The next tick asks again.
+			this.logger.debug(`Merge check failed for ${issueId}: ${String(error)}`);
+		}
+	}
+
+	/** Reported once per issue, not once per tick. */
+	private mergeCloseNotified = new Set<string>();
+
+	/**
+	 * The client merged: end the cycle on both sides (PON-233).
+	 *
+	 * Order is load-bearing. The client's close-out and the merged mark go
+	 * FIRST, because moving their issue to a completed state fires the
+	 * terminal-state path, which removes the verification record, closes the
+	 * mirror and deletes the worktree. Do it the other way round and the
+	 * close-out is posted into a session that has just been torn down, or
+	 * lost entirely.
+	 */
+	private async closeOutMergedWork(
+		issueId: string,
+		record: {
+			sessionId: string;
+			workspaceId: string;
+			issueIdentifier?: string;
+		},
+	): Promise<void> {
+		try {
+			await this.agentSessionManager.postResponseActivityStrict(
+				record.sessionId,
+				CLIENT_MESSAGES.mergedCloseOut(),
+			);
+		} catch (error) {
+			this.logger.error("Could not post the merge close-out:", error);
+		}
+		void this.cockpitMirror.commentOnMirror(
+			issueId,
+			`**Merged by the client** — ${record.issueIdentifier ?? "this work"} is done and closing out.`,
+		);
+		// The mirror closes honestly against the client issue's own state
+		// (PON-209), so move the client issue first and let that path do it.
+		await this.moveIssueToCompletedState(issueId, record.workspaceId);
+	}
 
 	/**
 	 * Someone picked this mirror up with no instruction (PON-211).
@@ -11048,6 +11341,51 @@ ${taskSection}`;
 	 * @param issue Full Linear issue object from Linear SDK
 	 * @param linearWorkspaceId Workspace ID for issue tracker lookup
 	 */
+
+	/**
+	 * The client merged, so their issue is finished (PON-233).
+	 *
+	 * Deliberately the LAST step of the close-out: this write fires the
+	 * terminal-state path, which removes the verification record, closes the
+	 * mirror and deletes the worktree. Everything that needs those must have
+	 * happened already.
+	 */
+	private async moveIssueToCompletedState(
+		issueId: string,
+		linearWorkspaceId: string,
+	): Promise<void> {
+		try {
+			const tracker = this.issueTrackers.get(linearWorkspaceId);
+			if (!tracker) return;
+			const issue = await tracker.fetchIssue(issueId);
+			if (!issue) return;
+			const current = await issue.state;
+			if (current?.type === "completed" || current?.type === "canceled") return;
+			const team = await issue.team;
+			if (!team) return;
+			const states = await tracker.fetchWorkflowStates(team.id);
+			const done = states.nodes
+				.filter((state) => state.type === "completed")
+				.sort((a, b) => (a.position ?? 0) - (b.position ?? 0))[0];
+			if (!done) {
+				this.logger.warn(
+					`No completed state on team ${team.id} — leaving ${issue.identifier} open after merge`,
+				);
+				return;
+			}
+			await tracker.updateIssue(issueId, { stateId: done.id });
+			this.logger.event("client_issue_completed", {
+				issueId,
+				issueIdentifier: issue.identifier,
+				state: done.name,
+			});
+		} catch (error) {
+			this.logger.error(
+				"Could not complete the client's issue after merge:",
+				error,
+			);
+		}
+	}
 
 	private async moveIssueToStartedState(
 		issue: Issue,

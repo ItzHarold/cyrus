@@ -209,6 +209,19 @@ export interface SerializedVerificationRecord {
 	 */
 	capturedHeadResolved?: boolean;
 	/**
+	 * The pull request whose merge closes this cycle (v4.17, PON-233).
+	 *
+	 * Resolved ONCE at delivery, from the same own-repo selection PON-210's
+	 * capture uses, and stored — so the poller never re-derives it from
+	 * model-written summary text and cannot drift onto a PR the client was
+	 * never given.
+	 */
+	mergeWatch?: { owner: string; repo: string; number: number };
+	/** When the client's own squash-merge was observed. Write-once. */
+	mergedAt?: string;
+	/** The commit their merge produced, for the close-out. */
+	mergeCommitSha?: string;
+	/**
 	 * The head the reviewer was last warned was stale (v4.13, PON-210).
 	 *
 	 * The escape hatch. A first `approve:` on a moved head refuses and asks

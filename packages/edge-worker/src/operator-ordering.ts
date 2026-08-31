@@ -41,10 +41,13 @@ export function stateRankOf(state: string): number {
 			return 0;
 		case "needs-info":
 			return 1;
-		// PON-219: "awaiting-scope-confirm" had rank 2. Unreachable now —
-		// unapproved work never becomes a mirror, so it never enters the
-		// ordering. The gap is left rather than renumbering, because the
-		// ranks are only ever compared, never displayed.
+		// PON-233: rework takes the gap PON-219 left at 2 — ahead of active
+		// and everything queued, behind in-verification and needs-info, which
+		// are finished work already blocked on a human. A client waiting on a
+		// correction to something we already delivered outranks a fresh
+		// start; it does not outrank work sitting on the reviewer's desk.
+		case "rework":
+			return 2;
 		case "active":
 			return 3;
 		case "queued": {
@@ -52,6 +55,10 @@ export function stateRankOf(state: string): number {
 			const position = / \(#(\d+)\)$/.exec(state)?.[1];
 			return 4 + (position ? Number(position) / 1000 : 0);
 		}
+		// The client holds it: not the reviewer's turn, but not finished
+		// either, so it sorts below anything actionable and above delivered.
+		case "in-client-review":
+			return 5;
 		case "delivered":
 			return 6;
 		default:

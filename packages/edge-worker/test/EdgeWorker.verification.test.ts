@@ -287,10 +287,13 @@ describe("EdgeWorker - verify-before-client-sees (PON-152)", () => {
 			expect(privates(worker).verificationGate.get(ISSUE_ID)?.state).toBe(
 				"delivered",
 			);
+			// PON-233: the RECORD stays "delivered" (four behaviours key on
+			// that literal), but the board says what is actually true — the
+			// client has it, and the cycle ends at their merge.
 			expect(mirror.upsert).toHaveBeenCalledWith(
 				expect.objectContaining({ issueId: ISSUE_ID }),
 				GATED_WS,
-				"delivered",
+				"in-client-review",
 			);
 		});
 

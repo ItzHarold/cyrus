@@ -90,6 +90,7 @@ export const CLIENT_MESSAGES = {
 		previewUrl?: string,
 		mergeUrls?: string,
 		reviewNotes?: string,
+		signature?: string,
 	) => {
 		// The preview link can carry a bypass value so it opens without an
 		// account on the hosting provider. That value is yours and you can
@@ -107,7 +108,40 @@ export const CLIENT_MESSAGES = {
 				: "",
 			mergeUrls ? `**To take it:** merge ${mergeUrls}` : "",
 			reviewNotes ? `**Notes from our review:** ${reviewNotes}` : "",
+			signature ? `**${signature}**` : "",
 		].filter(Boolean);
 		return lines.length ? `---\n${lines.join("\n")}` : "";
 	},
+
+	/**
+	 * What to do with what you have just been given (PON-233).
+	 *
+	 * The cycle no longer ends at delivery — it ends when the client merges.
+	 * That has to be said, or a delivered pull request sits open because
+	 * nobody told them the last move was theirs. Deliberately plain about
+	 * who does what: they review, they merge, and the work is theirs from
+	 * that moment.
+	 */
+	reviewAndMerge: (testAccounts?: string) =>
+		[
+			`Have a look and try it. When you're happy, squash-merge the pull ` +
+				`request above and it's live in your project — that merge is yours ` +
+				`to make, and nothing lands in your main branch until you make it.`,
+			testAccounts ? `**Sign in with:** ${testAccounts}` : "",
+			`If something isn't right, or you want it to do something else, just ` +
+				`reply here and tell us.`,
+		]
+			.filter(Boolean)
+			.join("\n\n"),
+
+	/**
+	 * The close-out, posted when their merge is observed (PON-233).
+	 *
+	 * Short on purpose: the work is done, they did the last step, and the
+	 * thread should end rather than trail off.
+	 */
+	mergedCloseOut: (what?: string) =>
+		`Merged — ${what ?? "this"} is now part of your project. Thanks for ` +
+		`the review. If anything about it needs changing later, open a new ` +
+		`request and we'll pick it up.`,
 } as const;

@@ -128,6 +128,51 @@ export class VerificationGate {
 	}
 
 	/**
+	 * Name the pull request whose merge ends this cycle (PON-233).
+	 *
+	 * Set once, at delivery, from the own-repo selection rather than from
+	 * the summary's free text. Write-once for the same reason the captured
+	 * head is: a later re-derivation could point the watch at a different
+	 * PR than the one the client was handed.
+	 */
+	setMergeWatch(
+		issueId: string,
+		pr: { owner: string; repo: string; number: number },
+	): void {
+		const record = this.records.get(issueId);
+		if (!record || record.mergeWatch) return;
+		record.mergeWatch = pr;
+	}
+
+	/**
+	 * The client merged. Write-once — the poller runs every few minutes and
+	 * must not re-close a cycle it already closed.
+	 */
+	markMerged(issueId: string, mergeCommitSha?: string): boolean {
+		const record = this.records.get(issueId);
+		if (!record || record.mergedAt) return false;
+		record.mergedAt = new Date().toISOString();
+		if (mergeCommitSha) record.mergeCommitSha = mergeCommitSha;
+		return true;
+	}
+
+	/**
+	 * Delivered work whose pull request is still open (PON-233).
+	 *
+	 * The client-review phase. Deliberately keyed on `delivered` plus an
+	 * unset `mergedAt` rather than on a new record state: four behaviours
+	 * key on the literal "delivered" — the delivered-thread request block,
+	 * the link-hold release, follow-up posting, and the double-delivery
+	 * guard — and none of them should change because a cycle now ends at a
+	 * merge rather than at delivery.
+	 */
+	awaitingMergeIssueIds(): string[] {
+		return [...this.records.entries()]
+			.filter(([, r]) => r.state === "delivered" && r.mergeWatch && !r.mergedAt)
+			.map(([issueId]) => issueId);
+	}
+
+	/**
 	 * The operator rejected — the work goes back to the agent. The record is
 	 * removed entirely: the next completion creates a fresh one (fresh
 	 * ladder clock included).
