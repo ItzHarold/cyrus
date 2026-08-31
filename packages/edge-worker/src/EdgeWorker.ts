@@ -6101,11 +6101,16 @@ ${taskSection}`;
 		if (!pendingQuestion && !this.scopeApprovals.get(issueId as string)) {
 			return;
 		}
-		const verdict = pendingQuestion
+		const reply = pendingQuestion
 			? isScopeConfirmQuestion(pendingQuestion)
 				? interpretScopeConfirmAnswer(pendingQuestion, response)
-				: "other"
+				: { verdict: "other" as const }
 			: interpretCanonicalScopeAnswer(response);
+		const verdict = reply.verdict;
+		// PON-230: what they typed alongside the option. On a revision it is
+		// the revision itself; on an approval it is a caveat the operator
+		// brief should carry rather than lose.
+		const replyNote = reply.note;
 
 		if (verdict === "approved") {
 			const identifier = webhook.agentSession.issue?.identifier;
@@ -6113,6 +6118,7 @@ ${taskSection}`;
 				this.scopeApprovals.recordApproved(issueId as string, {
 					workspaceId,
 					issueIdentifier: identifier,
+					...(replyNote !== undefined ? { replyNote } : {}),
 				})
 			) {
 				const record = this.scopeApprovals.get(issueId as string);
@@ -6126,6 +6132,7 @@ ${taskSection}`;
 					// PON-224: approval parks the work — the journal must be able
 					// to prove that no implementation followed this line.
 					implementationDeferred: record?.implementationDeferred === true,
+					hasClientNote: replyNote !== undefined,
 				});
 				await this.persistScopeApprovals("scope_confirmed");
 				// PON-219: this is now the mirror's BIRTH, not a transition on

@@ -375,6 +375,16 @@ export interface SerializedScopeApprovalRecord {
 	 */
 	clientScopePosted?: string;
 	/**
+	 * What the client typed alongside their choice (v4.16, PON-230).
+	 *
+	 * Linear sends the option label and their own words as one body. Read as
+	 * a whole string it matched no label at all, so the words were lost and
+	 * the choice went uncounted. Kept because an approval carrying "and keep
+	 * it simple" is an approval WITH a condition, and the operator brief is
+	 * where that has to survive.
+	 */
+	clientReplyNote?: string;
+	/**
 	 * Scope approved but implementation deliberately not started (v4.14,
 	 * PON-224): approved work parks as Queued in the cockpit until the
 	 * reviewer delegates the mirror. Set at approval, cleared when

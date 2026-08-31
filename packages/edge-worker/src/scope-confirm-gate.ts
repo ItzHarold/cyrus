@@ -140,6 +140,12 @@ export function isScopeConfirmQuestion(question: AskUserQuestion): boolean {
 
 export type ScopeConfirmAnswer = "approved" | "revision" | "canceled" | "other";
 
+/** The verdict, plus whatever the client typed alongside their choice. */
+export interface ScopeConfirmReply {
+	verdict: ScopeConfirmAnswer;
+	note?: string;
+}
+
 /**
  * Resolve the client's reply against the posted options (never by fallback).
  * Only a reply matching the exact canonical Approve option approves;
@@ -151,14 +157,14 @@ export type ScopeConfirmAnswer = "approved" | "revision" | "canceled" | "other";
 export function interpretScopeConfirmAnswer(
 	question: AskUserQuestion,
 	response: string,
-): ScopeConfirmAnswer {
-	const normalized = normalize(response);
+): ScopeConfirmReply {
+	const { head, note } = splitLabelAndNote(response);
 	for (const opt of question.options ?? []) {
 		const label = normalize(opt.label);
-		if (label !== normalized) continue;
-		return canonicalVerdict(label);
+		if (label !== head) continue;
+		return { verdict: canonicalVerdict(label), note };
 	}
-	return "other";
+	return { verdict: "other" };
 }
 
 /**
@@ -169,8 +175,34 @@ export function interpretScopeConfirmAnswer(
  */
 export function interpretCanonicalScopeAnswer(
 	response: string,
-): ScopeConfirmAnswer {
-	return canonicalVerdict(normalize(response));
+): ScopeConfirmReply {
+	const { head, note } = splitLabelAndNote(response);
+	return { verdict: canonicalVerdict(head), note };
+}
+
+/**
+ * Linear sends the option label and the person's own words as one body:
+ * the label alone on the first line, then what they typed. Read as a whole
+ * string it equals no label, so it fell through to "other" — a revision that
+ * was never counted, and, on the approve option, an approval that never
+ * happened: no `approvedAt`, no mirror, no queue, and a client waiting on
+ * silence after doing exactly what they were asked (found live, 2026-08-31).
+ *
+ * The first line is the answer and the rest is theirs. Kept deliberately
+ * narrow: the label must stand ALONE on line one, so free text never
+ * approves however it begins, and a reply to a DIFFERENT elicitation still
+ * cannot match — the labels are compared against the options that were
+ * actually posted (PON-142's rule), and the gate itself is only recognised
+ * by an exact "Approve scope" option in the first place.
+ */
+function splitLabelAndNote(response: string): { head: string; note?: string } {
+	const newline = response.indexOf("\n");
+	if (newline === -1) return { head: normalize(response) };
+	const note = response.slice(newline + 1).trim();
+	return {
+		head: normalize(response.slice(0, newline)),
+		...(note ? { note } : {}),
+	};
 }
 
 function canonicalVerdict(normalized: string): ScopeConfirmAnswer {
