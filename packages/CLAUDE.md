@@ -197,3 +197,14 @@ Two defects of one class, both found live during the acceptance run: a surface s
 - **A dead session grew a second thread.** `recoverMissingSessionForAssignment` (PON-200) guarded on *live* sessions, and a session that DIED also leaves none live — so after a billing-error death it opened a second agent thread on the client's issue, as doomed as the first. It now also checks `agentSessionSeenAt`: a thread Linear opened within three grace windows belongs to THIS delegation whatever became of it. The case PON-200 exists for — a re-delegation notification with no session at all — has no recent thread by definition.
 
 The rule worth carrying: **liveness is not existence.** Any recovery that asks "is something running?" to decide "did anything happen?" will fire on every failure path it was never meant to cover.
+
+### The reviewer gets a finished turn (PON-228)
+
+Three symptoms, one cause. The verification gate suppresses a mirror run's final response — correctly, it is the client's and it is held — but **a Linear turn is closed only BY a response**. So the implementation session ran forever: no finished moment, the reviewer's own messages queued behind a turn that never ended (making in-session iteration impossible), and nothing announced that work was ready. The work was done and the surface could not say so.
+
+- **`signOffIntoVerification` is thread-aware.** On an `ownsDelivery` link it hands off on the session that did the work; otherwise it keeps signing off on the narration thread as before. The two are different threads on one mirror, and the reviewer is standing in the first.
+- **The hand-off is a different register from the client summary, deliberately.** Commit, PRs, the review block, checkout instructions, the action legend — plus the run's own `record_operator_note`, which the mirror-implementation block now asks for before the final message: what changed and why per file, how to check it on the preview with which test login, and what the reviewer might decide differently. Facts readable off the PR are added around it, so the note does not spend itself repeating them. The held client summary is untouched.
+- **A comment carries the notification.** An agent activity does not reach an inbox; a comment on an issue the reviewer is assigned to does. `commentOnMirror` already existed for exactly this reason on the escalation path.
+- **The narration thread is pointed at the live one when work starts.** Otherwise the parked sign-off ("nothing is running here") stays standing and turns false the moment work begins — which is precisely how a run sixteen minutes deep was reported as stuck.
+
+Guard is `verificationSignedOff`, cleared on deliver and reject, so a second round of review signs off again.

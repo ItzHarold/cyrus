@@ -471,6 +471,115 @@ describe("PON-225 — a delivery-owning session feeds the verification gate", ()
 	});
 });
 
+describe("PON-228 — the reviewer gets a finished turn, on the right thread", () => {
+	beforeEach(() => {
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+	});
+
+	async function held() {
+		const ctx = setup();
+		await ctx.p.handleMirrorAction(action(""), CLIENT_ISSUE);
+		ctx.p.agentSessionManager.sessions.set(MIRROR_SESSION, {
+			id: MIRROR_SESSION,
+			issueId: CLIENT_ISSUE,
+			issue: { id: CLIENT_ISSUE, identifier: "ACM-13" },
+			issueContext: { issueIdentifier: "ACM-13", trackerId: "linear" },
+			workspace: { path: "/tmp/acme-ws/ws-acme/ACM-13", isGitWorktree: true },
+		});
+		ctx.p.agentSessionManager.entries.set(MIRROR_SESSION, []);
+		ctx.p.holdCompletionForVerification(
+			MIRROR_SESSION,
+			"Done. https://github.com/Ponte-Digital/Acme-Metrics/pull/9",
+			false,
+		);
+		// The composition helpers reach GitHub; the turn-closing is what is
+		// under test, so they answer with nothing rather than being mocked
+		// into telling a story.
+		ctx.p.buildStartHereBlock = vi.fn().mockResolvedValue("");
+		ctx.p.describePullRequests = vi.fn().mockResolvedValue("");
+		ctx.p.buildCheckoutInstructions = vi.fn().mockResolvedValue("");
+		ctx.p.cockpitMirror.commentOnMirror = vi.fn().mockResolvedValue(undefined);
+		return ctx;
+	}
+
+	it("closes the turn on the IMPLEMENTATION thread, not the narration one", async () => {
+		// The defect: the gate suppresses the final response — correctly, it
+		// is the client's — but a Linear turn is closed only BY a response.
+		// The session ran forever, the reviewer's messages queued behind it,
+		// and nothing said the work was ready.
+		const { p, cockpitPosts } = await held();
+		const endNarrationTurn = vi.fn();
+		p.endNarrationTurn = endNarrationTurn;
+
+		await p.signOffIntoVerification(CLIENT_ISSUE);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const closing = cockpitPosts.at(-1);
+		expect(closing.agentSessionId).toBe(MIRROR_SESSION);
+		expect(closing.content.type).toBe("response");
+		expect(closing.content.body).toContain("Finished — over to you");
+		// The narration thread is NOT where a mirror-started run signs off.
+		expect(endNarrationTurn).not.toHaveBeenCalled();
+	});
+
+	it("carries the run's own hand-off, and the facts around it", async () => {
+		const { p, cockpitPosts } = await held();
+		p.scopeApprovals.recordOperatorNote(
+			CLIENT_ISSUE,
+			"Split the query because the join was the slow half.",
+		);
+		p.verificationGate.recordCapturedHead(CLIENT_ISSUE, "abc1234");
+
+		await p.signOffIntoVerification(CLIENT_ISSUE);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const body = cockpitPosts.at(-1).content.body;
+		expect(body).toContain(
+			"Split the query because the join was the slow half.",
+		);
+		expect(body).toContain("abc1234");
+		expect(body).toContain("approve:");
+	});
+
+	it("notifies the reviewer with a comment — an activity does not reach an inbox", async () => {
+		const { p } = await held();
+
+		await p.signOffIntoVerification(CLIENT_ISSUE);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(p.cockpitMirror.commentOnMirror).toHaveBeenCalledWith(
+			CLIENT_ISSUE,
+			expect.stringContaining("Ready for review"),
+		);
+	});
+
+	it("signs off once, however many times the mirror recomposes", async () => {
+		const { p, cockpitPosts } = await held();
+		const before = cockpitPosts.length;
+
+		await p.signOffIntoVerification(CLIENT_ISSUE);
+		await p.signOffIntoVerification(CLIENT_ISSUE);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(cockpitPosts.length).toBe(before + 1);
+	});
+
+	it("points the narration thread at the live thread when work starts", async () => {
+		const { p } = setup();
+		const endNarrationTurn = vi.fn();
+		p.endNarrationTurn = endNarrationTurn;
+
+		await p.handleMirrorAction(action(""), CLIENT_ISSUE);
+
+		expect(endNarrationTurn).toHaveBeenCalledWith(
+			CLIENT_ISSUE,
+			expect.stringContaining("Work has started"),
+		);
+	});
+});
+
 describe("PON-225 — the Anthropic credential follows the cockpit", () => {
 	beforeEach(() => {
 		vi.spyOn(console, "log").mockImplementation(() => {});

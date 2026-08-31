@@ -6989,9 +6989,87 @@ ${taskSection}`;
 	private signOffIntoVerification(issueId: string): void {
 		if (this.verificationSignedOff.has(issueId)) return;
 		this.verificationSignedOff.add(issueId);
+		// PON-228: work started from the mirror ran on its OWN thread, and
+		// that is the thread the reviewer is standing in — so the sign-off
+		// belongs there, not on the narration thread beside it.
+		const link = this.operatorSessions.forClientIssue(issueId);
+		if (link?.ownsDelivery) {
+			void this.handOffToReviewer(issueId, link);
+			return;
+		}
 		this.endNarrationTurn(
 			issueId,
 			"**Finished this turn — over to you.** The work is complete and held; nothing has gone to the client. Read the summary and links above, then `approve:` to release it, `reject: <feedback>` to send it back, or just say what you want changed.",
+		);
+	}
+
+	/**
+	 * Close the implementation turn with a report written for the reviewer
+	 * (PON-228).
+	 *
+	 * Three failures shared one cause. The verification gate suppresses the
+	 * final response — correctly, it is the client's and it is held — but a
+	 * Linear turn is closed only BY a response, so the mirror session was
+	 * left running forever: no finished moment, the reviewer's own messages
+	 * queueing behind a turn that never ended, and no notification that
+	 * anything was ready. The work was done and the surface could not say so.
+	 *
+	 * So the machinery posts the reviewer's half. Deliberately a different
+	 * register from the held client summary, which is untouched: this one
+	 * names commits, files and blockers, because its reader is technical and
+	 * about to review a diff. The two audiences finally get one message each.
+	 */
+	private async handOffToReviewer(
+		issueId: string,
+		link: OperatorSessionLink,
+	): Promise<void> {
+		const record = this.verificationGate.get(issueId);
+		if (!record) return;
+		const tracker = this.issueTrackers.get(link.cockpitWorkspaceId);
+		try {
+			const [startHere, prs, checkout] = await Promise.all([
+				this.buildStartHereBlock(record.prUrls, record.workspaceId),
+				this.describePullRequests(record.prUrls),
+				this.buildCheckoutInstructions(issueId),
+			]);
+			// The session's own hand-off, if it left one. Everything else here
+			// is fact; this is the part only the run can know — why it made
+			// the calls it made, and what it wants a human to decide.
+			const handOff = this.scopeApprovals.get(issueId)?.operatorNote;
+			const body = [
+				`**Finished — over to you.** The work is complete and held; nothing has gone to the client.${
+					record.isError ? " **The session ended with an error.**" : ""
+				}`,
+				record.capturedHeadSha ? `Commit \`${record.capturedHeadSha}\`` : "",
+				prs,
+				startHere,
+				handOff ? `\n**From the run:**\n\n${handOff}` : "",
+				checkout ? `\n**Work on it yourself**\n\n${checkout}` : "",
+				"\n`approve: <notes>` delivers it · `reject: <feedback>` sends it back · `mine` hands me the branch · `ask client: <question>` is the only thing that reaches them. Plain instructions are fine — say what you want changed and I'll do it on this same branch.",
+			]
+				.filter(Boolean)
+				.join("\n");
+			await tracker?.createAgentActivity?.({
+				agentSessionId: link.mirrorSessionId,
+				content: { type: "response", body },
+			});
+			this.logger.event("reviewer_handoff_posted", {
+				clientIssueId: issueId,
+				issueIdentifier: record.issueIdentifier,
+				mirrorSessionId: link.mirrorSessionId,
+				hasRunHandOff: Boolean(handOff),
+			});
+		} catch (error) {
+			this.logger.error("Could not hand off to the reviewer:", error);
+		}
+		// The inbox half. An agent activity does not notify; a comment on an
+		// issue they are assigned to does, and that is the whole point of
+		// saying it twice.
+		void this.cockpitMirror.commentOnMirror(
+			issueId,
+			`**Ready for review** — ${record.issueIdentifier ?? "this work"} is complete and held. Nothing has gone to the client.${
+				record.prUrls.length ? `\n\n${record.prUrls.join("\n")}` : ""
+			}`,
 		);
 	}
 
@@ -8281,6 +8359,18 @@ ${taskSection}`;
 				},
 				clientWorkspaceId,
 				"active",
+			);
+
+			// PON-228: the narration thread and the implementation thread are
+			// two threads on one mirror, and the reviewer cannot tell which is
+			// live. Worse, the parked sign-off ("nothing is running here")
+			// stays standing on the narration thread and becomes false the
+			// moment this starts — Harold read exactly that and reported the
+			// run as stuck while it was sixteen minutes into working. Point it
+			// at the live one rather than leaving it insisting otherwise.
+			this.endNarrationTurn(
+				clientIssueId,
+				"**Work has started.** It runs in its own thread on this issue — follow it there; this thread stays as the record of the client's own conversation.",
 			);
 
 			this.logger.event("mirror_work_started", {
