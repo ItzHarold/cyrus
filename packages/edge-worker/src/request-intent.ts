@@ -29,6 +29,50 @@
  * costs work nobody asked for on a branch someone was mid-review of.
  */
 
+/**
+ * Canonical labels for the change-request confirmation (PON-236).
+ *
+ * The same shape the scope gate uses, for the same reason: a client's
+ * agreement to more work is a decision the machinery has to recognise
+ * exactly, not infer from prose. Recognised by the exact "yes" label, so an
+ * unrelated elicitation cannot reopen a delivered piece of work.
+ */
+export const REWORK_YES_LABEL = "Yes, make this change";
+export const REWORK_NO_LABEL = "No, leave it as it is";
+
+/** Does this ask look like the change-request confirmation? */
+export function isReworkConfirmQuestion(question: {
+	options?: Array<{ label: string }>;
+}): boolean {
+	return (question.options ?? []).some(
+		(o) => o.label.trim().toLowerCase() === REWORK_YES_LABEL.toLowerCase(),
+	);
+}
+
+/**
+ * Did the client confirm the change? Label alone on the first line, with
+ * whatever they added kept — the same reading PON-230 taught the scope gate,
+ * because a client who picks an option and then explains is the normal case,
+ * not the edge one.
+ */
+export function interpretReworkAnswer(response: string): {
+	confirmed: boolean;
+	note?: string;
+} {
+	const newline = response.indexOf("\n");
+	const head = (newline === -1 ? response : response.slice(0, newline))
+		.trim()
+		.toLowerCase();
+	const note =
+		newline === -1
+			? undefined
+			: response.slice(newline + 1).trim() || undefined;
+	return {
+		confirmed: head === REWORK_YES_LABEL.toLowerCase(),
+		...(note ? { note } : {}),
+	};
+}
+
 /** The reviewer's thread on a cockpit mirror. Technical register. */
 export function buildReviewerRequestBlock(): string {
 	return `
@@ -80,9 +124,12 @@ their software.
 
 **A change request** — something is wrong, missing, or they want more. Do NOT
 start working on it, however small it looks. Say back what you understand
-they want, as the outcome they would get, and ask them to confirm it. It goes
-through the same review their first delivery did, and a change made straight
-onto delivered work is a change nobody reviewed.
+they want, as the outcome they would get, and ask them to confirm it with the
+AskUserQuestion tool, using exactly these two options in this order:
+"${REWORK_YES_LABEL}", "${REWORK_NO_LABEL}". Those exact labels are what
+puts the work back in our queue — anything else and their confirmation
+reaches nobody. It goes through the same review their first delivery did, and
+a change made straight onto delivered work is a change nobody reviewed.
 
 **If you cannot tell**, ask them one short question.
 

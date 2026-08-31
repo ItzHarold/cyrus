@@ -204,6 +204,8 @@ import {
 import {
 	buildDeliveredRequestBlock,
 	buildReviewerRequestBlock,
+	interpretReworkAnswer,
+	isReworkConfirmQuestion,
 } from "./request-intent.js";
 import { ScopeApprovalStore } from "./ScopeApprovalStore.js";
 import {
@@ -6242,6 +6244,59 @@ ${taskSection}`;
 	}
 
 	/**
+	 * The client confirmed a change to work they already have (PON-236).
+	 *
+	 * Delivered work does not get changed quietly. The client's confirmation
+	 * puts it back in the queue as REWORK — at the head of the order, because
+	 * a correction to something already delivered outranks a fresh start —
+	 * and the reviewer is told, in their inbox, that a finished item has
+	 * reopened. It re-enters through exactly the path a first start uses:
+	 * `implementationDeferred` back on the scope record, so the reviewer's
+	 * delegate gesture starts it and the WIP gate still applies.
+	 */
+	private async interpretReworkReply(
+		webhook: AgentSessionPromptedWebhook,
+	): Promise<void> {
+		const sessionId = webhook.agentSession.id;
+		const issueId =
+			webhook.agentSession.issue?.id ?? this.sessionIssueId(sessionId);
+		if (!issueId) return;
+		// Only for work that has actually been delivered — otherwise these
+		// labels mean nothing and must not move anything.
+		const record = this.verificationGate.get(issueId);
+		if (!record || record.state !== "delivered") return;
+		const pending = this.askUserQuestionHandler.getPendingQuestion(sessionId);
+		if (!pending || !isReworkConfirmQuestion(pending)) return;
+
+		const response = webhook.agentActivity?.content?.body ?? "";
+		const { confirmed, note } = interpretReworkAnswer(response);
+		if (!confirmed) return;
+
+		// Back into the queue by the same door a first start uses.
+		this.scopeApprovals.recordReworkRequested(issueId, note);
+		await this.persistScopeApprovals("rework_requested");
+		this.logger.event("client_requested_rework", {
+			issueId,
+			issueIdentifier: record.issueIdentifier,
+			workspaceId: record.workspaceId,
+			hasNote: note !== undefined,
+		});
+		void this.cockpitMirror.upsert(
+			{ issueId, issueIdentifier: record.issueIdentifier },
+			record.workspaceId,
+			"rework",
+			{ subscriberIds: this.subscribersForWorkspace(record.workspaceId) },
+		);
+		// The inbox half — an activity does not reach one, a comment does.
+		void this.cockpitMirror.commentOnMirror(
+			issueId,
+			`**Reopened — the client asked for a change.** ${
+				note ? `They said: "${note}"\n\n` : ""
+			}It is back at the head of your queue as rework. Delegate this mirror to me and I'll pick it up on the same branch.`,
+		);
+	}
+
+	/**
 	 * Re-admit a session whose question has just been answered (PON-113).
 	 *
 	 * Returns true when the session may resume immediately. Returns false when
@@ -10850,6 +10905,10 @@ ${taskSection}`;
 			// lane admission, so approvedAt — the SLA clock start — is the
 			// answer's arrival, not whenever a queued resume replays.
 			await this.interpretScopeConfirmReply(webhook);
+			// PON-236: and a client confirming a change to work they have
+			// already been given, which reopens it rather than starting
+			// anything new.
+			await this.interpretReworkReply(webhook);
 			// PON-113: the session gave up its lane when it asked, so another
 			// issue may be running now. Re-enter the lane before resuming;
 			// when it is busy this enqueues and replays on dequeue, so two
