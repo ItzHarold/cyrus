@@ -471,6 +471,74 @@ describe("PON-225 — a delivery-owning session feeds the verification gate", ()
 	});
 });
 
+describe("PON-229 — a reviewer message is classified before it is acted on", () => {
+	beforeEach(() => {
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+	});
+
+	async function iterating(body: string) {
+		const ctx = setup({ parked: false });
+		ctx.p.verificationGate.recordPending(CLIENT_ISSUE, {
+			workspaceId: CLIENT_WS,
+			issueIdentifier: "ACM-13",
+			sessionId: CLIENT_SESSION,
+			summary: "Done. https://github.com/Ponte-Digital/Acme-Metrics/pull/1",
+			isError: false,
+		});
+		await ctx.p.handleMirrorAction(action(body), CLIENT_ISSUE);
+		return ctx;
+	}
+
+	it("asks what the message is before working on it", async () => {
+		// The live defect: "why did you make metric-definitions.ts its own
+		// file?" reached the session as a work directive, and it rewrote the
+		// branch the reviewer was mid-review of.
+		const { resumed } = await iterating(
+			"Why did you make metric-definitions.ts its own file instead of keeping the notes inline?",
+		);
+
+		expect(resumed).toHaveLength(1);
+		const prompt: string = resumed[0][4];
+		expect(prompt).toContain("<what_is_being_asked>");
+		expect(prompt).toContain("Answer it and change NOTHING");
+		// The reviewer's own words still reach the session — the block is
+		// added to the instruction, it does not replace it.
+		expect(prompt).toContain("metric-definitions.ts");
+	});
+
+	it("asks it of a plain directive too — the model classifies, not a regex", async () => {
+		const { resumed } = await iterating(
+			"make the glossary link open in a new tab",
+		);
+
+		expect(resumed[0][4]).toContain("<what_is_being_asked>");
+	});
+
+	it("does NOT second-guess a handback, which is a directive by construction", async () => {
+		const ctx = setup({ parked: false });
+		ctx.p.verificationGate.recordPending(CLIENT_ISSUE, {
+			workspaceId: CLIENT_WS,
+			issueIdentifier: "ACM-13",
+			sessionId: CLIENT_SESSION,
+			summary: "Done.",
+			isError: false,
+		});
+		ctx.p.cockpitMirror.mirrorIssueIdFor = vi
+			.fn()
+			.mockReturnValue(MIRROR_ISSUE);
+
+		await ctx.p.handleMirrorAction(
+			action("back to you: rebased on my fix"),
+			CLIENT_ISSUE,
+		);
+
+		expect(ctx.resumed).toHaveLength(1);
+		expect(ctx.resumed[0][4]).not.toContain("<what_is_being_asked>");
+	});
+});
+
 describe("PON-228 — the reviewer gets a finished turn, on the right thread", () => {
 	beforeEach(() => {
 		vi.spyOn(console, "log").mockImplementation(() => {});
