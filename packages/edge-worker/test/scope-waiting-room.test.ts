@@ -163,6 +163,81 @@ describe("the room itself", () => {
 		return { room, calls };
 	}
 
+	it("reuses a CLOSED room instead of minting another (PON-231)", async () => {
+		// The room closes when nothing is waiting and reopens when something
+		// is. Searching only open issues meant every cycle created a fresh
+		// one — four closed copies of the same room piled up on the board in
+		// a single day.
+		const { room, calls } = makeRoom([
+			{
+				team: {
+					issues: {
+						nodes: [
+							{
+								id: "room-old",
+								title: WAITING_ROOM_TITLE,
+								state: { type: "completed" },
+							},
+						],
+					},
+				},
+			},
+			{
+				team: { states: { nodes: [{ id: "state-todo", type: "unstarted" }] } },
+			},
+			{ issueUpdate: { success: true } },
+			{ issueUpdate: { success: true } },
+		]);
+
+		await room.sync([
+			{ issueId: "i", issueIdentifier: "ACM-7", proposedAt: hoursAgo(1) },
+		]);
+
+		expect(calls.find((c) => c.query.includes("issueCreate"))).toBeUndefined();
+		// And it is put back into a working state, or the board would say
+		// "nothing is waiting" while listing conversations that are.
+		const reopen = calls.find(
+			(c) => c.query.includes("issueUpdate") && c.variables.s === "state-todo",
+		);
+		expect(reopen).toBeDefined();
+		expect(reopen?.variables.id).toBe("room-old");
+	});
+
+	it("still prefers an OPEN room when both exist", async () => {
+		const { room, calls } = makeRoom([
+			{
+				team: {
+					issues: {
+						nodes: [
+							{
+								id: "room-closed",
+								title: WAITING_ROOM_TITLE,
+								state: { type: "canceled" },
+							},
+							{
+								id: "room-open",
+								title: WAITING_ROOM_TITLE,
+								state: { type: "unstarted" },
+							},
+						],
+					},
+				},
+			},
+			{
+				team: { states: { nodes: [{ id: "state-todo", type: "unstarted" }] } },
+			},
+			{ issueUpdate: { success: true } },
+			{ issueUpdate: { success: true } },
+		]);
+
+		await room.sync([
+			{ issueId: "i", issueIdentifier: "ACM-7", proposedAt: hoursAgo(1) },
+		]);
+
+		const writes = calls.filter((c) => c.query.includes("issueUpdate"));
+		expect(writes.every((w) => w.variables.id === "room-open")).toBe(true);
+	});
+
 	it("creates the room OUTSIDE the project, so it is never in the work queue", async () => {
 		// This is the whole design decision in one assertion: the operator's
 		// board is the project board.

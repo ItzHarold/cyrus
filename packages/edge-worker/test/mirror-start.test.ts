@@ -594,6 +594,11 @@ describe("PON-228 — the reviewer gets a finished turn, on the right thread", (
 
 	it("carries the run's own hand-off, and the facts around it", async () => {
 		const { p, cockpitPosts } = await held();
+		// Recorded after the work started, so it is an account of the run.
+		p.operatorSessions.register({
+			...p.operatorSessions.get(MIRROR_SESSION),
+			startedAt: new Date(Date.now() - 60_000).toISOString(),
+		});
 		p.scopeApprovals.recordOperatorNote(
 			CLIENT_ISSUE,
 			"Split the query because the join was the slow half.",
@@ -609,6 +614,29 @@ describe("PON-228 — the reviewer gets a finished turn, on the right thread", (
 		);
 		expect(body).toContain("abc1234");
 		expect(body).toContain("approve:");
+	});
+
+	it("will not pass off the pre-approval reading as an account of the run", async () => {
+		// Seen on CKP-22: the scoping-time internal reading appeared under
+		// "From the run" — a note about what the work was going to be,
+		// presented as what it turned out to be.
+		const { p, cockpitPosts } = await held();
+		p.scopeApprovals.recordOperatorNote(
+			CLIENT_ISSUE,
+			"Reading of the issue before any work started.",
+		);
+		// The run started AFTER that note was written.
+		p.operatorSessions.register({
+			...p.operatorSessions.get(MIRROR_SESSION),
+			startedAt: new Date(Date.now() + 60_000).toISOString(),
+		});
+
+		await p.signOffIntoVerification(CLIENT_ISSUE);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const body = cockpitPosts.at(-1).content.body;
+		expect(body).not.toContain("Reading of the issue before any work");
+		expect(body).not.toContain("From the run");
 	});
 
 	it("notifies the reviewer with a comment — an activity does not reach an inbox", async () => {

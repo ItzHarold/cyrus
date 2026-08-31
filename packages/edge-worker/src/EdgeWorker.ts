@@ -7060,7 +7060,18 @@ ${taskSection}`;
 			// The session's own hand-off, if it left one. Everything else here
 			// is fact; this is the part only the run can know — why it made
 			// the calls it made, and what it wants a human to decide.
-			const handOff = this.scopeApprovals.get(issueId)?.operatorNote;
+			//
+			// It must be from THIS run. The same field holds the pre-approval
+			// internal reading, and on CKP-22 that scoping-time note appeared
+			// under "From the run" — a note about what the work was going to
+			// be, presented as an account of what it turned out to be. Only a
+			// note recorded after the work started qualifies.
+			const scopeRecord = this.scopeApprovals.get(issueId);
+			const noteAt = scopeRecord?.operatorNoteAt;
+			const handOff =
+				noteAt && noteAt > link.startedAt
+					? scopeRecord?.operatorNote
+					: undefined;
 			const body = [
 				`**Finished — over to you.** The work is complete and held; nothing has gone to the client.${
 					record.isError ? " **The session ended with an error.**" : ""
