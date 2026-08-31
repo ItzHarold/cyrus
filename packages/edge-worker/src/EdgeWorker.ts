@@ -399,6 +399,14 @@ export class EdgeWorker extends EventEmitter {
 	private assignmentRecoveryDelayMs = Number(
 		process.env.CYRUS_ASSIGNMENT_RECOVERY_MS ?? 15_000,
 	);
+	/**
+	 * When Linear last opened an agent-session thread on an issue (PON-226).
+	 *
+	 * In memory and unbounded only by live issues: it is read once, inside the
+	 * re-delegation recovery's grace window, and a stale entry is harmless
+	 * because the check is a recency comparison rather than a presence one.
+	 */
+	private agentSessionSeenAt = new Map<string, number>();
 	private configManager: ConfigManager;
 	private promptBuilder: PromptBuilder;
 	private defaultSkillsDeployer: DefaultSkillsDeployer;
@@ -4306,6 +4314,30 @@ ${taskSection}`;
 			.filter((session) => session.status !== AgentSessionStatus.Complete);
 		if (live.length > 0) return;
 
+		// PON-226: "no live session" is not the same as "Linear never made
+		// one". A session that DIED also leaves none live — and this recovery,
+		// reading only liveness, then opened a second thread on the client's
+		// issue. Seen on ACM-20: a session died four seconds in on a billing
+		// error, and fifteen seconds later the client had two agent threads
+		// for one request, the second as doomed as the first.
+		//
+		// A thread opened moments ago belongs to THIS delegation whatever
+		// became of it, so there is nothing to recover. The window is generous
+		// against webhook reordering; the case this exists for — a
+		// re-delegation whose notification arrives with no session at all —
+		// has no recent thread by definition.
+		const seenAt = this.agentSessionSeenAt.get(issueId);
+		if (seenAt && Date.now() - seenAt < this.assignmentRecoveryDelayMs * 3) {
+			this.logger.event("assignment_recovery_skipped", {
+				issueId,
+				issueIdentifier,
+				workspaceId,
+				reason: "session_already_opened_for_this_delegation",
+				ageMs: Date.now() - seenAt,
+			});
+			return;
+		}
+
 		const issueTracker = this.issueTrackers.get(workspaceId);
 		if (!issueTracker?.createAgentSessionOnIssue) return;
 
@@ -5182,6 +5214,11 @@ ${taskSection}`;
 		const issueId = webhook.agentSession?.issue?.id;
 		const sessionId = webhook.agentSession.id;
 		const workspaceId = webhook.organizationId;
+
+		// PON-226: remember that Linear made a thread for this issue, whatever
+		// becomes of it. The re-delegation recovery below reads this to tell
+		// "Linear never created one" from "one was created and it died".
+		if (issueId) this.agentSessionSeenAt.set(issueId, receivedAt);
 
 		// PON-152: an @mention on a COCKPIT MIRROR issue is an operator
 		// action (approve / reject), not a work request — intercept before
@@ -9099,6 +9136,33 @@ ${taskSection}`;
 				this.releaseLaneAndContinue(opWorkspaceId, sessionId, reason);
 			}
 			return;
+		}
+		// PON-226: a parked mirror must never look like it is working.
+		//
+		// The mirror's narration thread is a real Linear agent session, and
+		// client-session narration is shadowed onto it (PON-212). Between
+		// approval and the reviewer starting the work, that leaves a thread
+		// carrying the client conversation's thoughts and — because a turn is
+		// only closed by a `response` — sitting in Linear's `active` state
+		// with a running timer. Found live on CKP-22: the cockpit showed an
+		// agent apparently mid-task on work nobody had claimed, quoting a
+		// stale plan item from the client's scoping session. Nothing was
+		// running; the surface said otherwise, which on a board whose whole
+		// job is to report state is the same as being wrong.
+		//
+		// The client session ending is the honest moment to close it: the
+		// shadow has finished writing, and the true state is "queued, nobody
+		// has picked this up". It self-corrects — a later client turn reopens
+		// the thread and its own end closes it again.
+		if (
+			endedIssueId &&
+			!operatorLink &&
+			this.scopeApprovals.isImplementationDeferred(endedIssueId)
+		) {
+			this.endNarrationTurn(
+				endedIssueId,
+				"**Queued — your move.** Nothing is running here: the client approved the scope and this is waiting to be picked up. Anything above is narration from their own conversation, not work on this issue. Assign yourself and delegate this to me and I'll start it.",
+			);
 		}
 		if (endedIssueId && this.verificationGate.isPending(endedIssueId)) {
 			// PON-152: completed work awaiting approval — the mirror shows

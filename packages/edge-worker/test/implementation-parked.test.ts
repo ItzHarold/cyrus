@@ -173,6 +173,40 @@ describe("EdgeWorker - approval parks the work (PON-224)", () => {
 		);
 	});
 
+	it("closes the mirror's narration turn when the scoping session ends (PON-226)", () => {
+		// Found live on CKP-22: the narration thread is a real agent session,
+		// client narration is shadowed onto it, and a turn is only closed by a
+		// `response` — so a parked mirror sat in Linear's `active` state with
+		// a running timer, quoting a stale plan item, on work nobody had
+		// claimed. Nothing was running; the board said otherwise.
+		registerSession(worker);
+		approve();
+		const endNarrationTurn = vi.fn();
+		privates(worker).endNarrationTurn = endNarrationTurn;
+
+		privates(worker).handleLaneSessionEnded(SESSION_ID, "result");
+
+		expect(endNarrationTurn).toHaveBeenCalledWith(
+			ISSUE_ID,
+			expect.stringContaining("Queued — your move"),
+		);
+		// It says the truth about what is above it, so the stale narration is
+		// not read as this mirror working.
+		expect(endNarrationTurn.mock.calls[0][1]).toContain("Nothing is running");
+	});
+
+	it("does not sign off a mirror whose work has actually started", () => {
+		registerSession(worker);
+		approve();
+		privates(worker).scopeApprovals.markImplementationStarted(ISSUE_ID);
+		const endNarrationTurn = vi.fn();
+		privates(worker).endNarrationTurn = endNarrationTurn;
+
+		privates(worker).handleLaneSessionEnded(SESSION_ID, "result");
+
+		expect(endNarrationTurn).not.toHaveBeenCalled();
+	});
+
 	it("the scoping session ending does not close a parked mirror", () => {
 		registerSession(worker);
 		approve();

@@ -139,4 +139,37 @@ describe("EdgeWorker - re-delegation recovery (PON-200)", () => {
 
 		expect(createAgentSessionOnIssue).not.toHaveBeenCalled();
 	});
+
+	it("does NOT open a second thread when Linear's session died (PON-226)", async () => {
+		// Found live on ACM-20: a session died four seconds in on a billing
+		// error, and this recovery — which read only liveness — opened a
+		// second agent thread on the client's issue fifteen seconds later.
+		// The client had two threads for one request, the second as doomed as
+		// the first. A thread opened moments ago belongs to THIS delegation
+		// whatever became of it.
+		const { p, createAgentSessionOnIssue } = setup([
+			{ id: "dead-session", status: AgentSessionStatus.Complete },
+		]);
+		p.agentSessionSeenAt.set(ISSUE_ID, Date.now());
+
+		await p.handleIssueAssignedWebhook(assignedWebhook);
+		await settle();
+
+		expect(createAgentSessionOnIssue).not.toHaveBeenCalled();
+	});
+
+	it("still recovers a genuine re-delegation, whose last thread is old", async () => {
+		const { p, createAgentSessionOnIssue } = setup([
+			{ id: "old-session", status: AgentSessionStatus.Complete },
+		]);
+		// Hours ago, not this delegation episode.
+		p.agentSessionSeenAt.set(ISSUE_ID, Date.now() - 3_600_000);
+
+		await p.handleIssueAssignedWebhook(assignedWebhook);
+		await settle();
+
+		expect(createAgentSessionOnIssue).toHaveBeenCalledWith({
+			issueId: ISSUE_ID,
+		});
+	});
 });
