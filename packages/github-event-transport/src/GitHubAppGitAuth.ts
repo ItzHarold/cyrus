@@ -315,8 +315,16 @@ export async function appBotIdentity(
 	if (!slug) throw new Error("GitHub App response carried no slug");
 
 	const login = `${slug}[bot]`;
+	// Deliberately WITHOUT the App JWT. A JWT authenticates the app itself and
+	// is only accepted on the /app family of endpoints; sending it to
+	// /users/:login is a 401, which is what this call had been getting — so
+	// every session fell back to an unattributed committer. The endpoint is
+	// public, so no credential is the right credential.
 	const userRes = await fetch(`${base}/users/${encodeURIComponent(login)}`, {
-		headers,
+		headers: {
+			Accept: "application/vnd.github+json",
+			"User-Agent": "cyrus-github-app",
+		},
 	});
 	if (!userRes.ok) {
 		throw new Error(`Could not read the App bot user: HTTP ${userRes.status}`);

@@ -194,6 +194,10 @@ export class ScopeWaitingRoom {
 			// help, because the fix was to ADOPT what Linear already had
 			// rather than to trust our own map.
 			this.issueId = await this.findExistingRoom(config);
+			// PON-231: an adopted room may be a closed one from a previous
+			// cycle. Put it back into a working state before writing the list
+			// into it.
+			if (this.issueId) await this.reopenRoom(config);
 		}
 
 		if (!this.issueId) {
@@ -220,7 +224,15 @@ export class ScopeWaitingRoom {
 		teamId: string;
 	}): Promise<string | undefined> {
 		const data = await this.gql<{
-			team: { issues: { nodes: Array<{ id: string; title: string }> } };
+			team: {
+				issues: {
+					nodes: Array<{
+						id: string;
+						title: string;
+						state?: { type: string };
+					}>;
+				};
+			};
 		}>(
 			config.linearWorkspaceId,
 			// Filtered by TITLE server-side, not scanned client-side. A
@@ -228,12 +240,56 @@ export class ScopeWaitingRoom {
 			// happened to fall outside the first page would be re-created —
 			// duplicate rooms, each with a divergent list, only one of which
 			// ever updates or closes.
-			`query($id:String!,$title:String!){ team(id:$id){ issues(first:10, filter:{ title:{ eq:$title }, state:{ type:{ nin:["completed","canceled"] } } }){ nodes{ id title } } } }`,
+			// PON-231: closed rooms are included. The room is closed whenever
+			// nothing is waiting and reopened when something is, and searching
+			// only open issues meant every cycle minted a new one — four
+			// closed copies of the same room accumulated on the board in a
+			// day. An open one still wins if both somehow exist.
+			`query($id:String!,$title:String!){ team(id:$id){ issues(first:20, filter:{ title:{ eq:$title } }, orderBy: updatedAt){ nodes{ id title state{ type } } } } }`,
 			{ id: config.teamId, title: WAITING_ROOM_TITLE },
 		);
-		return data?.team?.issues?.nodes?.find(
+		const rooms = (data?.team?.issues?.nodes ?? []).filter(
 			(i) => i.title === WAITING_ROOM_TITLE,
-		)?.id;
+		);
+		const open = rooms.find(
+			(i) => i.state?.type !== "completed" && i.state?.type !== "canceled",
+		);
+		return (open ?? rooms[0])?.id;
+	}
+
+	/**
+	 * Put a reopened room back into a working state (PON-231).
+	 *
+	 * Reusing a closed issue means it arrives `completed`, which on the board
+	 * reads as "nothing is waiting" while listing conversations that are.
+	 * Best-effort: a room that cannot be reopened still gets its description,
+	 * which is the part that carries the information.
+	 */
+	private async reopenRoom(config: {
+		linearWorkspaceId: string;
+		teamId: string;
+	}): Promise<void> {
+		try {
+			const states = await this.gql<{
+				team: { states: { nodes: Array<{ id: string; type: string }> } };
+			}>(
+				config.linearWorkspaceId,
+				`query($id:String!){ team(id:$id){ states(first:30){ nodes{ id type } } } }`,
+				{ id: config.teamId },
+			);
+			const nodes = states?.team?.states?.nodes ?? [];
+			const target =
+				nodes.find((s) => s.type === "unstarted") ??
+				nodes.find((s) => s.type === "backlog");
+			if (!target) return;
+			await this.gql(
+				config.linearWorkspaceId,
+				`mutation($id:String!,$s:String!){ issueUpdate(id:$id, input:{stateId:$s}){ success } }`,
+				{ id: this.issueId, s: target.id },
+			);
+		} catch (error) {
+			this.logger.debug(`Could not reopen the waiting room: ${String(error)}`);
+		}
 	}
 
 	private async createRoom(
