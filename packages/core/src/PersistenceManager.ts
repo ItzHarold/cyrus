@@ -388,6 +388,24 @@ export interface SerializedScopeApprovalRecord {
 	 */
 	clientScopePosted?: string;
 	/**
+	 * The summary the client will receive, recorded by the run itself
+	 * (v4.18, PON-235).
+	 *
+	 * Twice now a run has ended its final message with a preamble to the
+	 * REVIEWER — "here's the state", "hand-off recorded, two items flagged
+	 * for you" — and the interceptor captures the whole message, so the
+	 * client got both. Sharpening the instruction fixed one shape and the
+	 * next run found another.
+	 *
+	 * So the client's text stops being scraped from free-form output and
+	 * becomes a thing the run hands over deliberately, exactly as PON-196
+	 * moved the scope into the elicitation. The final message goes back to
+	 * being what it naturally wants to be: the reviewer's.
+	 */
+	clientSummary?: string;
+	/** When it was recorded — it must belong to THIS run, not a past one. */
+	clientSummaryAt?: string;
+	/**
 	 * What the client typed alongside their choice (v4.16, PON-230).
 	 *
 	 * Linear sends the option label and their own words as one body. Read as

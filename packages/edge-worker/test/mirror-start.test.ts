@@ -313,24 +313,23 @@ describe("PON-225 — delegating a queued mirror starts the work", () => {
 		expect(resumed[0][4]).not.toContain("The reviewer added:");
 	});
 
-	it("tells the run that its LAST message is the client's, not the reviewer's", async () => {
-		// The defect this pins, found on the first live run: the model wrote a
-		// reviewer report and appended a client summary to it, the interceptor
-		// captured the whole message, and the client was delivered "Here's the
-		// state", a commit hash, a branch name and a "four things for you"
-		// section. The block has to make the audience of the last message
-		// unmistakable, because the whole of it is what the client receives.
+	it("has the run HAND OVER the client's summary rather than trailing it (PON-235)", async () => {
+		// Two runs ended their final message with a line to the reviewer —
+		// "here's the state", "hand-off recorded, two things flagged for
+		// you" — and the client received it, because whatever a run says
+		// last is what gets held. Sharpening the instruction fixed one shape
+		// and the next run found another, so the client's text stops being
+		// scraped from free-form output: it is recorded deliberately, the
+		// way PON-196 moved the scope into the elicitation.
 		const { p, resumed } = setup();
-
 		await p.handleMirrorAction(action(""), CLIENT_ISSUE);
-		const prompt: string = resumed[0][4];
 
-		expect(prompt).toContain("Your LAST message is different");
-		expect(prompt).toContain("posted to the CLIENT, word for word");
-		expect(prompt).toContain(
-			"say everything you have to say to the reviewer BEFORE you finish",
-		);
-		expect(prompt).toContain("The message IS the summary.");
+		const prompt: string = resumed[0][4];
+		expect(prompt).toContain("record_operator_note");
+		expect(prompt).toContain("client_summary");
+		expect(prompt).toContain("word for word");
+		// And it says why the final message is no longer a trap.
+		expect(prompt).toContain("does not have to be");
 	});
 
 	it("refuses honestly when nothing binds the issue to a repository", async () => {

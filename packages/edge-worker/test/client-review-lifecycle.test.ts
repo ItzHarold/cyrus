@@ -224,3 +224,231 @@ describe("detecting the merge", () => {
 		expect(p.verificationGate.awaitingMergeIssueIds()).not.toContain(ISSUE);
 	});
 });
+
+describe("one piece of work per company, across the lifecycle (PON-234)", () => {
+	let worker: EdgeWorker;
+	beforeEach(() => {
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		worker = createTestWorker([]);
+	});
+
+	/** Two mirrors for one client, the first in the given state. */
+	function board(firstState: string, opts: { lanes?: number } = {}) {
+		const p = privates(worker);
+		const mirrors = new Map<string, any>([
+			[
+				"issue-a",
+				{
+					mirrorIssueId: "CKP-1",
+					state: firstState,
+					issueIdentifier: "ACM-1",
+					clientId: "acme",
+					tenantWorkspaceId: WS,
+				},
+			],
+			[
+				ISSUE,
+				{
+					mirrorIssueId: "CKP-2",
+					state: "queued",
+					issueIdentifier: "ACM-21",
+					clientId: "acme",
+					tenantWorkspaceId: WS,
+				},
+			],
+		]);
+		p.cockpitMirror.mirrors = mirrors;
+		p.cockpitMirror.deps = {
+			...p.cockpitMirror.deps,
+			resolveClient: () => ({ id: "acme", lanes: opts.lanes ?? 1 }),
+		};
+		return p;
+	}
+
+	it.each([
+		"active",
+		"needs-info",
+		"in-verification",
+		"in-client-review",
+		"rework",
+	])("counts %s as in flight — the hold spans the whole lifecycle, not the session", (state) => {
+		const p = board(state);
+		const wip = p.cockpitMirror.clientWorkInFlight(ISSUE);
+		expect(wip.inFlight).toHaveLength(1);
+		expect(wip.limit).toBe(1);
+	});
+
+	it("does not count work that is finished or not yet started", () => {
+		for (const state of ["delivered", "queued"]) {
+			const p = board(state);
+			expect(p.cockpitMirror.clientWorkInFlight(ISSUE).inFlight).toHaveLength(
+				0,
+			);
+		}
+	});
+
+	it("refuses a start while the client's slot is taken, naming what holds it", async () => {
+		const p = board("in-client-review");
+		p.config.cockpit = { linearWorkspaceId: "cockpit", reviewers: ["u1"] };
+		p.cockpitMirror.assigneeIdFor = vi.fn().mockResolvedValue("u1");
+
+		const verdict = await p.mayStartParkedWork({ actorId: "u1" }, ISSUE);
+
+		expect(verdict.ok).toBe(false);
+		expect(verdict.say).toContain("ACM-1");
+		expect(verdict.say).toContain("in-client-review");
+		expect(verdict.say).toContain("one lane");
+	});
+
+	it("a client who bought two lanes gets two", async () => {
+		const p = board("active", { lanes: 2 });
+		p.config.cockpit = { linearWorkspaceId: "cockpit", reviewers: ["u1"] };
+		p.cockpitMirror.assigneeIdFor = vi.fn().mockResolvedValue("u1");
+
+		const verdict = await p.mayStartParkedWork({ actorId: "u1" }, ISSUE);
+
+		expect(verdict.ok).toBe(true);
+	});
+
+	it("unconfigured tenants are not serialised against each other", () => {
+		// resolveClient returns the literal "unassigned" for every workspace
+		// with no registry entry, so keying on the id alone would make every
+		// unconfigured tenant one company.
+		const p = privates(worker);
+		p.cockpitMirror.mirrors = new Map<string, any>([
+			[
+				"other-tenant",
+				{
+					mirrorIssueId: "CKP-9",
+					state: "active",
+					issueIdentifier: "XYZ-1",
+					clientId: "unassigned",
+					tenantWorkspaceId: "ws-somebody-else",
+				},
+			],
+			[
+				ISSUE,
+				{
+					mirrorIssueId: "CKP-2",
+					state: "queued",
+					issueIdentifier: "ACM-21",
+					clientId: "unassigned",
+					tenantWorkspaceId: WS,
+				},
+			],
+		]);
+		p.cockpitMirror.deps = {
+			...p.cockpitMirror.deps,
+			resolveClient: () => ({ id: "unassigned", lanes: 1 }),
+		};
+
+		expect(p.cockpitMirror.clientWorkInFlight(ISSUE).inFlight).toHaveLength(0);
+	});
+});
+
+describe("the client's summary is handed over, not scraped (PON-235)", () => {
+	let worker: EdgeWorker;
+	beforeEach(() => {
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		worker = createTestWorker([]);
+	});
+
+	function mirrorRun(worker: EdgeWorker, startedAt: string) {
+		const p = privates(worker);
+		p.config.cockpit = {
+			linearWorkspaceId: "cockpit",
+			workspaceName: "Cockpit",
+			teamId: "t",
+			assigneeId: "u1",
+		};
+		p.config.linearWorkspaces = { [WS]: { linearToken: "t" } };
+		p.agentSessionManager.createCyrusAgentSession(
+			"sess-mirror",
+			ISSUE,
+			{
+				id: ISSUE,
+				identifier: "ACM-21",
+				title: "t",
+				description: "d",
+				branchName: "b",
+			},
+			{ path: "/tmp/w", isGitWorktree: false },
+		);
+		p.sessionRepositories.set("sess-mirror", "repo-1");
+		p.repositories.set("repo-1", { id: "repo-1", linearWorkspaceId: WS });
+		p.operatorSessions.register({
+			mirrorSessionId: "sess-mirror",
+			mirrorIssueId: "CKP-1",
+			clientSessionId: SESSION,
+			clientIssueId: ISSUE,
+			clientWorkspaceId: WS,
+			cockpitWorkspaceId: "cockpit",
+			repositoryId: "repo-1",
+			startedAt,
+			ownsDelivery: true,
+		});
+		return p;
+	}
+
+	it("holds what the run recorded for the client, not its closing words", () => {
+		const p = mirrorRun(worker, new Date(Date.now() - 60_000).toISOString());
+		p.scopeApprovals.recordOperatorNote(
+			ISSUE,
+			"internal reading",
+			undefined,
+			"Your dashboard now explains itself. See it: https://x/pull/9",
+		);
+
+		const held = p.holdCompletionForVerification(
+			"sess-mirror",
+			"Hand-off recorded. Two things flagged for you.\n\n---\n\nYour dashboard…",
+			false,
+		);
+
+		expect(held).toBe(true);
+		const summary = p.verificationGate.get(ISSUE)?.summary;
+		expect(summary).toBe(
+			"Your dashboard now explains itself. See it: https://x/pull/9",
+		);
+		// The reviewer-addressed preamble never becomes the client's text.
+		expect(summary).not.toContain("flagged for you");
+	});
+
+	it("falls back to the final message when the run recorded nothing", () => {
+		const p = mirrorRun(worker, new Date(Date.now() - 60_000).toISOString());
+
+		p.holdCompletionForVerification(
+			"sess-mirror",
+			"All done. https://x/pull/9",
+			false,
+		);
+
+		expect(p.verificationGate.get(ISSUE)?.summary).toBe(
+			"All done. https://x/pull/9",
+		);
+	});
+
+	it("ignores a summary recorded before this run started", () => {
+		// The field persists across runs; a previous run's client text is
+		// the same stale-artefact problem the hand-off guard already fixed.
+		const p = mirrorRun(worker, new Date(Date.now() + 60_000).toISOString());
+		p.scopeApprovals.recordOperatorNote(
+			ISSUE,
+			"reading",
+			undefined,
+			"A summary from a previous run.",
+		);
+
+		p.holdCompletionForVerification(
+			"sess-mirror",
+			"This run's message.",
+			false,
+		);
+
+		expect(p.verificationGate.get(ISSUE)?.summary).toBe("This run's message.");
+	});
+});

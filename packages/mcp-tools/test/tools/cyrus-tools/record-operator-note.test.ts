@@ -46,6 +46,7 @@ describe("record_operator_note tool", () => {
 			"/work/DVV-12",
 			"## Approach\nRefactor the export module; touch api/export.ts.",
 			undefined,
+			undefined,
 		);
 		const payload = JSON.parse(result.content[0].text);
 		// Bare success only: no ids or internal handles the model could quote
@@ -64,6 +65,7 @@ describe("record_operator_note tool", () => {
 			"/work/DVV-12",
 			"internal reading",
 			"**Outcome** — the export works.",
+			undefined,
 		);
 	});
 
@@ -91,5 +93,35 @@ describe("record_operator_note tool", () => {
 		const withoutHook = createCyrusToolsServer(linearClient, {});
 		expect(hasTool(withHook, "record_operator_note")).toBe(true);
 		expect(hasTool(withoutHook, "record_operator_note")).toBe(false);
+	});
+});
+
+describe("the client summary hand-over (PON-235)", () => {
+	it("passes the recorded client summary through to the harness", async () => {
+		// The client's text stops being scraped from a free-form final
+		// message — twice a run trailed one with a line to the reviewer and
+		// the client received it. Handing it over deliberately removes the
+		// trap, the way PON-196 moved the scope into the elicitation.
+		const delivery: OperatorNoteDelivery = {
+			deliver: vi.fn(async () => ({ ok: true as const })),
+		};
+		const server = new McpServer({ name: "test", version: "0.0.0" });
+		registerRecordOperatorNoteTool(server, delivery);
+
+		await getHandler(
+			server,
+			"record_operator_note",
+		)({
+			cwd: "/work/DVV-12",
+			note: "internal reading",
+			client_summary: "Your export now includes the order date.",
+		});
+
+		expect(delivery.deliver).toHaveBeenCalledWith(
+			"/work/DVV-12",
+			"internal reading",
+			undefined,
+			"Your export now includes the order date.",
+		);
 	});
 });

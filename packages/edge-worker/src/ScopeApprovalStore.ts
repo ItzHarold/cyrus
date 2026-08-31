@@ -154,6 +154,7 @@ export class ScopeApprovalStore {
 		issueId: string,
 		note: string,
 		clientScope?: string,
+		clientSummary?: string,
 	): void {
 		const existing = this.records.get(issueId);
 		const now = new Date().toISOString();
@@ -161,6 +162,10 @@ export class ScopeApprovalStore {
 			existing.operatorNote = note;
 			existing.operatorNoteAt = now;
 			if (clientScope !== undefined) existing.clientScope = clientScope;
+			if (clientSummary !== undefined) {
+				existing.clientSummary = clientSummary;
+				existing.clientSummaryAt = now;
+			}
 			return;
 		}
 		this.records.set(issueId, {
@@ -169,6 +174,9 @@ export class ScopeApprovalStore {
 			operatorNote: note,
 			operatorNoteAt: now,
 			...(clientScope !== undefined ? { clientScope } : {}),
+			...(clientSummary !== undefined
+				? { clientSummary, clientSummaryAt: now }
+				: {}),
 		});
 	}
 
