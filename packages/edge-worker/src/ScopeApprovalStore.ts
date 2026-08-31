@@ -18,6 +18,8 @@ export type ScopeApprovalRecord = SerializedScopeApprovalRecord;
 export interface ScopeProposalContext {
 	workspaceId?: string;
 	issueIdentifier?: string;
+	/** What the client typed alongside their choice (PON-230). */
+	replyNote?: string;
 }
 
 export class ScopeApprovalStore {
@@ -103,6 +105,11 @@ export class ScopeApprovalStore {
 				: {}),
 			workspaceId: context?.workspaceId ?? existing?.workspaceId,
 			issueIdentifier: context?.issueIdentifier ?? existing?.issueIdentifier,
+			...(context?.replyNote !== undefined
+				? { clientReplyNote: context.replyNote }
+				: existing?.clientReplyNote !== undefined
+					? { clientReplyNote: existing.clientReplyNote }
+					: {}),
 		});
 		return true;
 	}

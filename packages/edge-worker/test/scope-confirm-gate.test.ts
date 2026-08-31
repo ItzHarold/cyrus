@@ -125,25 +125,29 @@ describe("scope-confirm-gate (PON-150)", () => {
 	describe("interpretScopeConfirmAnswer", () => {
 		it("approves only on the Approve-labelled option", () => {
 			expect(
-				interpretScopeConfirmAnswer(confirmQuestion, SCOPE_APPROVE_LABEL),
+				interpretScopeConfirmAnswer(confirmQuestion, SCOPE_APPROVE_LABEL)
+					.verdict,
 			).toBe("approved");
 		});
 
 		it("matches case-insensitively and ignores surrounding whitespace", () => {
 			expect(
-				interpretScopeConfirmAnswer(confirmQuestion, "  approve scope "),
+				interpretScopeConfirmAnswer(confirmQuestion, "  approve scope ")
+					.verdict,
 			).toBe("approved");
 		});
 
 		it("returns revision for the Revise-labelled option", () => {
 			expect(
-				interpretScopeConfirmAnswer(confirmQuestion, SCOPE_REVISE_LABEL),
+				interpretScopeConfirmAnswer(confirmQuestion, SCOPE_REVISE_LABEL)
+					.verdict,
 			).toBe("revision");
 		});
 
 		it("Cancel closes the gate — a distinct verdict, never an approval", () => {
 			expect(
-				interpretScopeConfirmAnswer(confirmQuestion, SCOPE_CANCEL_LABEL),
+				interpretScopeConfirmAnswer(confirmQuestion, SCOPE_CANCEL_LABEL)
+					.verdict,
 			).toBe("canceled");
 		});
 
@@ -157,9 +161,9 @@ describe("scope-confirm-gate (PON-150)", () => {
 				],
 				multiSelect: false,
 			};
-			expect(interpretScopeConfirmAnswer(question, "Approve partially")).toBe(
-				"other",
-			);
+			expect(
+				interpretScopeConfirmAnswer(question, "Approve partially").verdict,
+			).toBe("other");
 		});
 
 		it("free text is never an approval — resolve by the answer, not by fallback", () => {
@@ -167,37 +171,114 @@ describe("scope-confirm-gate (PON-150)", () => {
 				interpretScopeConfirmAnswer(
 					confirmQuestion,
 					"sounds good but what about X",
-				),
+				).verdict,
 			).toBe("other");
 		});
 
-		it("a partial approve prefix that matches no option is not an approval", () => {
-			expect(interpretScopeConfirmAnswer(confirmQuestion, "Approve")).toBe(
-				"other",
+		it("the label plus the client's own words still counts, and keeps them (PON-230)", () => {
+			// Linear sends the option and what they typed as one body. Read as
+			// a whole string it matched no label — so a revision went
+			// uncounted and, on approve, an approval never happened at all:
+			// no SLA clock, no mirror, no queue, and a client waiting on
+			// silence after doing exactly what they were asked.
+			const approved = interpretScopeConfirmAnswer(
+				confirmQuestion,
+				"Approve scope\n\nand keep it simple",
 			);
+			expect(approved.verdict).toBe("approved");
+			expect(approved.note).toBe("and keep it simple");
+
+			const revised = interpretScopeConfirmAnswer(
+				confirmQuestion,
+				"Revise scope\n\nlead with the numbers that matter",
+			);
+			expect(revised.verdict).toBe("revision");
+			expect(revised.note).toBe("lead with the numbers that matter");
+		});
+
+		it("the label must stand ALONE on the first line", () => {
+			// Otherwise "Approve scope?" or "Approve scope, but first…" would
+			// approve, and neither is a choice.
+			expect(
+				interpretScopeConfirmAnswer(
+					confirmQuestion,
+					"Approve scope — and keep it simple",
+				).verdict,
+			).toBe("other");
+			expect(
+				interpretScopeConfirmAnswer(confirmQuestion, "Approve scope?").verdict,
+			).toBe("other");
+		});
+
+		it("free text alone still never approves, however it begins", () => {
+			expect(
+				interpretScopeConfirmAnswer(
+					confirmQuestion,
+					"Approving this\n\nlooks right to me",
+				).verdict,
+			).toBe("other");
+		});
+
+		it("a note cannot smuggle in a verdict from a DIFFERENT elicitation", () => {
+			// The adversarial case: an unrelated question offering a
+			// similar-looking option must not stamp the SLA clock. Resolution
+			// is against the options actually posted (PON-142).
+			const deletion: AskUserQuestion = {
+				question: "Delete the old export?",
+				header: "Cleanup",
+				options: [
+					{ label: "Approve deletion", description: "delete" },
+					{ label: "Keep it", description: "keep" },
+				],
+				multiSelect: false,
+			};
+			expect(
+				interpretScopeConfirmAnswer(
+					deletion,
+					"Approve deletion\n\nyes remove it",
+				).verdict,
+			).toBe("other");
+			// And that question is not even recognised as the gate.
+			expect(isScopeConfirmQuestion(deletion)).toBe(false);
+		});
+
+		it("a partial approve prefix that matches no option is not an approval", () => {
+			expect(
+				interpretScopeConfirmAnswer(confirmQuestion, "Approve").verdict,
+			).toBe("other");
 		});
 	});
 
 	describe("interpretCanonicalScopeAnswer (restart fallback)", () => {
 		it("approves on the exact canonical label only", () => {
-			expect(interpretCanonicalScopeAnswer("Approve scope")).toBe("approved");
-			expect(interpretCanonicalScopeAnswer("approve scope")).toBe("approved");
-			expect(interpretCanonicalScopeAnswer(" Approve scope ")).toBe("approved");
+			expect(interpretCanonicalScopeAnswer("Approve scope").verdict).toBe(
+				"approved",
+			);
+			expect(interpretCanonicalScopeAnswer("approve scope").verdict).toBe(
+				"approved",
+			);
+			expect(interpretCanonicalScopeAnswer(" Approve scope ").verdict).toBe(
+				"approved",
+			);
 		});
 
 		it("recognises the canonical revise label", () => {
-			expect(interpretCanonicalScopeAnswer("Revise scope")).toBe("revision");
+			expect(interpretCanonicalScopeAnswer("Revise scope").verdict).toBe(
+				"revision",
+			);
 		});
 
 		it("recognises the canonical cancel label", () => {
-			expect(interpretCanonicalScopeAnswer("Cancel")).toBe("canceled");
+			expect(interpretCanonicalScopeAnswer("Cancel").verdict).toBe("canceled");
 		});
 
 		it("free text and near-misses never approve", () => {
-			expect(interpretCanonicalScopeAnswer("Approve")).toBe("other");
-			expect(interpretCanonicalScopeAnswer("Approved, go ahead")).toBe("other");
-			expect(interpretCanonicalScopeAnswer("yes")).toBe("other");
-			expect(interpretCanonicalScopeAnswer("")).toBe("other");
+			expect(interpretCanonicalScopeAnswer("Approve").verdict).toBe("other");
+			expect(interpretCanonicalScopeAnswer("Approved, go ahead").verdict).toBe(
+				"other",
+			);
+			expect(interpretCanonicalScopeAnswer("yes").verdict).toBe("other");
+			expect(interpretCanonicalScopeAnswer("").verdict).toBe("other");
 		});
 	});
 });
