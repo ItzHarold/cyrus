@@ -268,6 +268,7 @@ export type {
 	SerializedLaneState,
 	SerializedNeedsInfoRecord,
 	SerializedOperatorSession,
+	SerializedPreviewLink,
 	SerializedScopeApprovalRecord,
 	SerializedVerificationRecord,
 	V3SerializableEdgeWorkerState,
