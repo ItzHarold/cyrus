@@ -367,6 +367,13 @@ export interface SerializedNeedsInfoRecord {
 	sessionId?: string;
 	workspaceId?: string;
 	issueIdentifier?: string;
+	/**
+	 * v3.1: the question was asked FROM the cockpit mirror on the reviewer's
+	 * trigger. The client's answer is relayed verbatim into this session on
+	 * the cockpit workspace instead of resuming the client's own thread.
+	 */
+	relaySessionId?: string;
+	relayWorkspaceId?: string;
 }
 
 export interface SerializedScopeApprovalRecord {

@@ -321,7 +321,18 @@ describe("EdgeWorker - scope-confirm gate (PON-150)", () => {
 			expect(privates(worker).savePersistedStateStrict).toHaveBeenCalled();
 		});
 
-		it("does not record an ambiguity elicitation as the gate's proposal", async () => {
+		it("registers an ambiguity elicitation WITHOUT making it the proposal", async () => {
+			// Changed deliberately after FRO-65 (see packages/CLAUDE.md): this
+			// used to record nothing at all, which left a session waiting at
+			// `awaitingInput` on no operator register — the exact failure the
+			// waiting room exists to prevent.
+			//
+			// The guarantee this test was written for is unchanged and still
+			// asserted below: a non-canonical question must never be treated as
+			// the gate's PROPOSAL. It does not stamp the SLA clock, does not
+			// approve, and does not mark a client scope as posted — only the
+			// canonical `Approve scope` option can do those. What it now does is
+			// make the conversation visible.
 			registerSession(worker);
 			const callback = privates(worker).createAskUserQuestionCallback(
 				SESSION_ID,
@@ -345,7 +356,12 @@ describe("EdgeWorker - scope-confirm gate (PON-150)", () => {
 				new AbortController().signal,
 			);
 
-			expect(privates(worker).scopeApprovals.get(ISSUE_ID)).toBeUndefined();
+			const record = privates(worker).scopeApprovals.get(ISSUE_ID);
+			expect(record?.state).toBe("awaiting");
+			// The protections this test was originally written for.
+			expect(record?.approvedAt).toBeUndefined();
+			expect(privates(worker).scopeApprovals.isApproved(ISSUE_ID)).toBe(false);
+			expect(record?.clientScopePosted).toBeUndefined();
 		});
 	});
 

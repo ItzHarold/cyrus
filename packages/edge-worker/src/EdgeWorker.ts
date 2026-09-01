@@ -6070,15 +6070,24 @@ ${taskSection}`;
 	 */
 	private syncScopeWaitingRoom(): void {
 		try {
-			void this.scopeWaitingRoom?.sync(
-				this.scopeApprovals.listPending().map((entry) => ({
+			void this.scopeWaitingRoom?.sync([
+				...this.scopeApprovals.listPending().map((entry) => ({
 					issueId: entry.issueId,
 					issueIdentifier: entry.issueIdentifier,
 					workspaceId: entry.workspaceId,
 					proposedAt: entry.proposedAt,
 					state: entry.state,
 				})),
-			);
+				// v3.1 P2: a mid-work question to the client is a wait too, and
+				// the one register built to be read at a glance must show it.
+				...this.needsInfo.listAwaiting().map((entry) => ({
+					issueId: entry.issueId,
+					issueIdentifier: entry.issueIdentifier,
+					workspaceId: entry.workspaceId,
+					proposedAt: entry.askedAt,
+					state: "needs-info",
+				})),
+			]);
 		} catch (error) {
 			this.logger.debug(`Waiting room sync skipped: ${String(error)}`);
 		}
@@ -8887,21 +8896,40 @@ ${taskSection}`;
 		clientIssueId: string,
 		question: string,
 	): Promise<string> {
+		// The client's thread is reachable two ways: through a held record
+		// (finished work awaiting review) or through the operator link (work
+		// in progress on the mirror). Before v3.1 only the first counted, so
+		// a reviewer could not reach the client until the run had ended —
+		// the opposite of when a question is usually needed.
 		const record = this.verificationGate.get(clientIssueId);
-		if (!record) {
-			return "Nothing is awaiting review on this issue — nothing to ask about.";
+		const link = this.operatorSessions.forClientIssue(clientIssueId);
+		const target = record
+			? {
+					workspaceId: record.workspaceId,
+					sessionId: record.sessionId,
+					issueIdentifier: record.issueIdentifier,
+				}
+			: link
+				? {
+						workspaceId: link.clientWorkspaceId,
+						sessionId: link.clientSessionId,
+						issueIdentifier: link.clientIssueIdentifier,
+					}
+				: undefined;
+		if (!target) {
+			return "Nothing is in progress or awaiting review on this issue — nothing to ask about.";
 		}
 		const violations = findClientContentViolations(question);
 		if (violations.length > 0) {
 			return `That question would put internal wording on the client's thread (${violations.join(", ")}). Rephrase it and send it again.`;
 		}
-		const tracker = this.issueTrackers.get(record.workspaceId);
+		const tracker = this.issueTrackers.get(target.workspaceId);
 		if (!tracker) {
 			return "The client's workspace is not reachable right now — nothing was sent.";
 		}
 		try {
 			await tracker.createAgentActivity({
-				agentSessionId: record.sessionId,
+				agentSessionId: target.sessionId,
 				content: {
 					type: "elicitation",
 					body: `${NEEDS_INFO_HEADER}\n\n${question}`,
@@ -8912,14 +8940,21 @@ ${taskSection}`;
 			return "The question could not be posted to the client's thread — nothing was sent.";
 		}
 		this.needsInfo.recordAsked(clientIssueId, {
-			workspaceId: record.workspaceId,
-			issueIdentifier: record.issueIdentifier,
-			sessionId: record.sessionId,
+			workspaceId: target.workspaceId,
+			issueIdentifier: target.issueIdentifier,
+			sessionId: target.sessionId,
 			question,
+			// The answer comes back to the mirror, not to the client thread.
+			...(link
+				? {
+						relaySessionId: link.mirrorSessionId,
+						relayWorkspaceId: link.cockpitWorkspaceId,
+					}
+				: {}),
 		});
 		void this.cockpitMirror.upsert(
-			{ issueId: clientIssueId, issueIdentifier: record.issueIdentifier },
-			record.workspaceId,
+			{ issueId: clientIssueId, issueIdentifier: target.issueIdentifier },
+			target.workspaceId,
 			"needs-info",
 		);
 		this.endNarrationTurn(
@@ -8928,10 +8963,321 @@ ${taskSection}`;
 		);
 		this.logger.event("operator_asked_client", {
 			clientIssueId,
-			issueIdentifier: record.issueIdentifier,
+			issueIdentifier: target.issueIdentifier,
 		});
 		void this.savePersistedState();
 		return "Asked the client on their thread. Their answer comes back into this work; the delivery is still held.";
+	}
+
+	/**
+	 * Reviewer-triggered needs-info, mirror side (v3.1 P2).
+	 *
+	 * The mirror session asks with the canonical header; the question is
+	 * posted on the CLIENT's own thread as an elicitation, the promise is
+	 * parked under the MIRROR session so the runner waits where it is, and
+	 * the client's answer comes back verbatim through
+	 * relayClientAnswerToMirror. The trigger is the canonical form, never
+	 * prose — PON-228 is the record of what a classifier costs on a surface
+	 * where a wrong read is a message to a client.
+	 */
+	private async relayQuestionToClient(
+		link: OperatorSessionLink,
+		mirrorSessionId: string,
+		input: Parameters<NonNullable<AgentRunnerConfig["onAskUserQuestion"]>>[0],
+		signal: AbortSignal,
+	): Promise<
+		Awaited<ReturnType<NonNullable<AgentRunnerConfig["onAskUserQuestion"]>>>
+	> {
+		const question = input.questions?.[0];
+		const clientFacing = [
+			question?.question ?? "",
+			...(question?.options ?? []).map(
+				(opt) => `${opt.label} ${opt.description ?? ""}`,
+			),
+		].join("\n");
+		const violations = findClientContentViolations(clientFacing);
+		if (violations.length > 0) {
+			this.logger.event("needs_info_relay_refused", {
+				clientIssueId: link.clientIssueId,
+				issueIdentifier: link.clientIssueIdentifier,
+				violations: violations.map((v) => String(v)).join(", "),
+			});
+			return {
+				answered: false,
+				message: `Not asked: that question would put internal wording on the client's thread (${violations.join(", ")}). Rephrase it for the client — what you need and what it is needed for, no file names or mechanics — and ask again.`,
+			};
+		}
+		const issueIdentifier =
+			link.clientIssueIdentifier ??
+			this.scopeApprovals.get(link.clientIssueId)?.issueIdentifier;
+		this.needsInfo.recordAsked(link.clientIssueId, {
+			question: question?.question ?? "",
+			sessionId: link.clientSessionId,
+			workspaceId: link.clientWorkspaceId,
+			issueIdentifier,
+			relaySessionId: mirrorSessionId,
+			relayWorkspaceId: link.cockpitWorkspaceId,
+		});
+		this.logger.event("needs_info_relayed_to_client", {
+			clientIssueId: link.clientIssueId,
+			issueIdentifier,
+			mirrorSessionId,
+		});
+		await this.persistScopeApprovals("needs_info_relayed_to_client");
+		void this.cockpitMirror.upsert(
+			{ issueId: link.clientIssueId, issueIdentifier },
+			link.clientWorkspaceId,
+			"needs-info",
+		);
+		const result = await this.askUserQuestionHandler.handleAskUserQuestion(
+			input,
+			mirrorSessionId,
+			link.clientWorkspaceId,
+			signal,
+			{
+				sessionId: link.clientSessionId,
+				organizationId: link.clientWorkspaceId,
+			},
+		);
+		// A failed post must not leave a phantom wait; an aborted runner must
+		// (the answer is relayed after the restart through the same door a
+		// re-delegation uses).
+		if (!result.answered && !signal.aborted) {
+			const wait = this.needsInfo.get(link.clientIssueId);
+			if (
+				wait?.state === "awaiting" &&
+				wait.relaySessionId === mirrorSessionId
+			) {
+				this.needsInfo.remove(link.clientIssueId);
+				await this.persistScopeApprovals("needs_info_relay_failed");
+				void this.cockpitMirror.upsert(
+					{ issueId: link.clientIssueId, issueIdentifier },
+					link.clientWorkspaceId,
+					"active",
+				);
+			}
+		}
+		return result;
+	}
+
+	/**
+	 * A client message on their own thread while the mirror owns the run
+	 * (v3.1 finding G). Nothing runs on the client's thread: they get one
+	 * acknowledgement in their language, and their words go to the reviewer
+	 * unchanged — on the mirror thread and in the inbox. Whether and how to
+	 * answer is the reviewer's call (`ask client:`, or the delivery).
+	 */
+	private async relayClientMessageToMirror(
+		webhook: AgentSessionPromptedWebhook,
+		clientIssueId: string,
+		link: OperatorSessionLink,
+	): Promise<void> {
+		const clientSessionId = webhook.agentSession.id;
+		const clientWorkspaceId = webhook.organizationId;
+		const issueIdentifier =
+			webhook.agentSession.issue?.identifier ?? link.clientIssueIdentifier;
+		const body = webhook.agentActivity?.content?.body?.trim() ?? "";
+		const author = resolveMirrorActor(webhook).name;
+		this.logger.event("client_message_relayed_to_mirror", {
+			clientIssueId,
+			issueIdentifier,
+			mirrorSessionId: link.mirrorSessionId,
+			length: body.length,
+		});
+		try {
+			await this.issueTrackers
+				.get(link.cockpitWorkspaceId)
+				?.createAgentActivity({
+					agentSessionId: link.mirrorSessionId,
+					content: {
+						type: "thought",
+						body: `**The client wrote on their thread${author ? ` (${author})` : ""}.** Their words, unchanged:\n\n${body || "(no text)"}\n\nNothing went back to them beyond an acknowledgement. If they need an answer before delivery, \`ask client:\` here or say so.`,
+					},
+				});
+		} catch (error) {
+			this.logger.debug(
+				`Could not relay the client's message to the mirror thread: ${String(error)}`,
+			);
+		}
+		void this.cockpitMirror.commentOnMirror(
+			clientIssueId,
+			`**The client wrote mid-work** on ${issueIdentifier ?? "their issue"} — their words are in the session thread. They have been told we are on it and nothing else.`,
+		);
+		try {
+			await this.issueTrackers.get(clientWorkspaceId)?.createAgentActivity({
+				agentSessionId: clientSessionId,
+				content: {
+					type: "response",
+					body: this.agentSessionManager.sanitizeClientSurfaceText(
+						clientSessionId,
+						"response",
+						"Thanks — noted. We're working on this now and will come back to you here as soon as it's ready to look at.",
+					),
+				},
+			});
+		} catch (error) {
+			this.logger.warn(
+				`Could not acknowledge the client's mid-work message: ${String(error)}`,
+			);
+		}
+	}
+
+	/**
+	 * Reviewer-triggered needs-info, client side (v3.1 P2).
+	 *
+	 * The client's words go to the mirror session unchanged — into the parked
+	 * question if the runner is still waiting, else through the same door a
+	 * re-delegation uses — with any files they attached, and the reviewer
+	 * sees them on the thread and in their inbox. The client gets one plain
+	 * acknowledgement and nothing else; their own thread never runs work.
+	 */
+	private async relayClientAnswerToMirror(
+		webhook: AgentSessionPromptedWebhook,
+		clientIssueId: string,
+		wait: {
+			relaySessionId?: string;
+			relayWorkspaceId?: string;
+			issueIdentifier?: string;
+		},
+	): Promise<void> {
+		const clientSessionId = webhook.agentSession.id;
+		const clientWorkspaceId = webhook.organizationId;
+		const issueIdentifier =
+			webhook.agentSession.issue?.identifier ?? wait.issueIdentifier;
+		const body = webhook.agentActivity?.content?.body?.trim() ?? "";
+		const mirrorSessionId = wait.relaySessionId as string;
+		const cockpitWorkspaceId =
+			wait.relayWorkspaceId ?? this.config.cockpit?.linearWorkspaceId;
+
+		// Attachments travel with the words: same download path as a normal
+		// prompt, into the issue's attachments directory, which the mirror
+		// session's worktree shares.
+		let manifest = "";
+		let author: string | undefined;
+		try {
+			const commentId = webhook.agentActivity?.sourceCommentId;
+			const tracker = this.issueTrackers.get(clientWorkspaceId);
+			const comment =
+				commentId && tracker ? await tracker.fetchComment(commentId) : null;
+			if (comment) {
+				const user = await comment.user;
+				author = user?.displayName || user?.name || undefined;
+				const workspacePath =
+					this.agentSessionManager.getSession(mirrorSessionId)?.workspace
+						.path ??
+					this.agentSessionManager.getSession(clientSessionId)?.workspace.path;
+				if (workspacePath) {
+					const dir = getAttachmentsDir(
+						this.cyrusHome,
+						basename(workspacePath),
+						clientWorkspaceId,
+					);
+					await mkdir(dir, { recursive: true });
+					const existing = (await readdir(dir).catch(() => [])).filter(
+						(file) =>
+							file.startsWith("attachment_") || file.startsWith("image_"),
+					).length;
+					const downloaded = await this.downloadCommentAttachments(
+						comment.body,
+						dir,
+						this.getLinearTokenForWorkspace(clientWorkspaceId),
+						existing,
+					);
+					if (downloaded.totalNewAttachments > 0) {
+						manifest = this.generateNewAttachmentManifest(downloaded);
+					}
+				}
+			}
+		} catch (error) {
+			this.logger.warn(
+				`Could not fetch the client's attachments for the relay: ${String(error)}`,
+			);
+		}
+
+		const verbatim = body || "(no text)";
+		const answerForRun = manifest ? `${verbatim}\n\n${manifest}` : verbatim;
+		this.logger.event("needs_info_answer_relayed", {
+			clientIssueId,
+			issueIdentifier,
+			mirrorSessionId,
+			hasAttachments: manifest.length > 0,
+			length: body.length,
+		});
+		this.markNeedsInfoAnswered(
+			clientIssueId,
+			clientWorkspaceId,
+			issueIdentifier,
+		);
+
+		// Reviewer register, on the mirror: the answer word for word, on the
+		// thread and in the inbox.
+		const cockpitTracker = cockpitWorkspaceId
+			? this.issueTrackers.get(cockpitWorkspaceId)
+			: undefined;
+		try {
+			await cockpitTracker?.createAgentActivity({
+				agentSessionId: mirrorSessionId,
+				content: {
+					type: "thought",
+					body: `**The client answered${author ? ` (${author})` : ""}.** Their words, unchanged:\n\n${answerForRun}`,
+				},
+			});
+		} catch (error) {
+			this.logger.debug(
+				`Could not post the relayed answer on the mirror thread: ${String(error)}`,
+			);
+		}
+		void this.cockpitMirror.commentOnMirror(
+			clientIssueId,
+			`**The client answered** — ${issueIdentifier ?? "this issue"} is back in progress. Their answer is in the session thread, word for word.`,
+		);
+
+		// The client's turn closes with one plain acknowledgement, in their
+		// language. Nothing else reaches them until delivery.
+		try {
+			await this.issueTrackers.get(clientWorkspaceId)?.createAgentActivity({
+				agentSessionId: clientSessionId,
+				content: {
+					type: "response",
+					body: this.agentSessionManager.sanitizeClientSurfaceText(
+						clientSessionId,
+						"response",
+						"Thanks — that's what we needed. We're back on it and will let you know when it's ready.",
+					),
+				},
+			});
+		} catch (error) {
+			this.logger.warn(
+				`Could not acknowledge the client's answer: ${String(error)}`,
+			);
+		}
+
+		// Resume where the work stopped.
+		const resolved = this.askUserQuestionHandler.handleUserResponse(
+			mirrorSessionId,
+			answerForRun,
+		);
+		if (resolved) return;
+		if (!cockpitWorkspaceId) {
+			this.logger.warn(
+				"Cannot resume the mirror session with the client's answer: no cockpit workspace",
+			);
+			return;
+		}
+		const instruction = [
+			`The client answered the question you asked them${author ? ` (${author})` : ""}. Their words, unchanged:`,
+			"",
+			answerForRun,
+		].join("\n");
+		const action = { organizationId: cockpitWorkspaceId, mirrorSessionId };
+		if (this.verificationGate.get(clientIssueId)) {
+			await this.runOperatorIteration(action, clientIssueId, {
+				instruction,
+				resumedAfterOperatorEdits: false,
+			});
+		} else {
+			await this.startWorkFromMirror(action, clientIssueId, { instruction });
+		}
 	}
 
 	/**
@@ -11377,6 +11723,25 @@ ${taskSection}`;
 			return;
 		}
 
+		// v3.1 P2: the client's answer to a question the MIRROR asked. The
+		// question is parked under the mirror session, so this thread has no
+		// pending question of its own — and the old fallthrough resumed the
+		// CLIENT session with the answer: a second runner on the same branch,
+		// talking on the one thread that must stay quiet until delivery.
+		const relayIssueId = webhook.agentSession?.issue?.id;
+		const relayWait = relayIssueId
+			? this.needsInfo.get(relayIssueId)
+			: undefined;
+		if (
+			relayIssueId &&
+			relayWait?.state === "awaiting" &&
+			relayWait.relaySessionId &&
+			!this.askUserQuestionHandler.hasPendingQuestion(agentSessionId)
+		) {
+			await this.relayClientAnswerToMirror(webhook, relayIssueId, relayWait);
+			return;
+		}
+
 		// Branch 2.5: Handle AskUserQuestion response
 		// This handles responses to questions posed via the AskUserQuestion tool.
 		// The response is passed to the pending promise resolver.
@@ -11423,6 +11788,24 @@ ${taskSection}`;
 				`No issue ID found in prompted webhook ${agentSessionId}`,
 			);
 			return;
+		}
+
+		// v3.1 finding G: while the MIRROR owns the run, the client's own
+		// thread runs nothing. Before this, "any news?" on the client's thread
+		// resumed the client's scoping session as an implementing session in
+		// the same worktree — a second runner on the same branch, talking on
+		// the one thread that must stay quiet, with no rule telling it the
+		// work was happening elsewhere. The words go to the reviewer instead.
+		const owningLink = this.operatorSessions.forClientIssue(issueId);
+		if (
+			owningLink?.ownsDelivery &&
+			agentSessionId !== owningLink.mirrorSessionId
+		) {
+			const held = this.verificationGate.get(issueId);
+			if (!held || held.state !== "delivered") {
+				await this.relayClientMessageToMirror(webhook, issueId, owningLink);
+				return;
+			}
 		}
 
 		// PON-112: lane admission for resumes. "At most one active session per
@@ -13386,6 +13769,20 @@ ${input.userComment}
 			// scope_confirm_posted → lane_released.
 			const gateIssueId = this.sessionIssueId(linearAgentSessionId);
 			const gateQuestion = input.questions?.[0];
+			// v3.1 P2: a canonical needs-info ask from a MIRROR session is
+			// relayed to the client's own thread and parked here. Before this,
+			// the elicitation went through the client's tracker addressed to
+			// the cockpit session id — a foreign session — and failed; the
+			// prompt told the run never to contact the client at all.
+			const operatorLink = this.operatorSessions.get(linearAgentSessionId);
+			if (operatorLink && gateQuestion && isNeedsInfoQuestion(gateQuestion)) {
+				return this.relayQuestionToClient(
+					operatorLink,
+					linearAgentSessionId,
+					input,
+					signal,
+				);
+			}
 			if (
 				gateQuestion &&
 				this.scopeGatePendingForIssue(organizationId, gateIssueId) &&
@@ -13448,6 +13845,50 @@ ${input.userComment}
 				// not been asked to do yet. persistScopeApprovals refreshes the
 				// waiting room, which is where a stalled conversation surfaces.
 				await this.persistScopeApprovals("scope_confirm_posted");
+			} else if (
+				gateQuestion &&
+				gateIssueId &&
+				this.scopeGatePendingForIssue(organizationId, gateIssueId)
+			) {
+				// An item the operator cannot see is the precise failure the
+				// waiting room exists to prevent (FRO-65, live).
+				//
+				// Both registers recognise by EXACT canonical form — the scope
+				// record needs the `Approve scope` option, needs-info needs the
+				// `Missing info` header — and needs-info is additionally scoped
+				// to gate-closed issues. So a pre-approval question in neither
+				// form lands in neither register: the session sits at
+				// `awaitingInput`, the lane correctly releases, nothing is
+				// blocked, and the conversation is simply invisible.
+				//
+				// That is not a rare shape. FRO-65 asked a good question —
+				// the repository had no tests at all, so it asked what the
+				// client actually wanted rather than proposing scope for a
+				// false premise. Exactness is right for DECISIONS (an approval
+				// must never be inferred from prose); it is wrong as the only
+				// route onto a list whose whole job is "somebody is waiting".
+				//
+				// `recordProposed` is deliberately the mechanism rather than a
+				// new store: it already keeps the earliest `proposedAt`, it is
+				// idempotent, and the SLA clock is `approvedAt`, which this
+				// does not touch. A later real scope proposal on the same
+				// issue refines this record rather than replacing it.
+				const session =
+					this.agentSessionManager.getSession(linearAgentSessionId);
+				const already = this.scopeApprovals.get(gateIssueId);
+				this.scopeApprovals.recordProposed(gateIssueId, {
+					workspaceId: organizationId,
+					issueIdentifier: session?.issueContext?.issueIdentifier,
+				});
+				if (!already) {
+					this.logger.event("scope_conversation_registered", {
+						issueId: gateIssueId,
+						issueIdentifier: session?.issueContext?.issueIdentifier,
+						workspaceId: organizationId,
+						sessionId: linearAgentSessionId,
+					});
+				}
+				await this.persistScopeApprovals("scope_conversation_registered");
 			}
 			// PON-172: a needs-info ask gets its own bookkeeping — a distinct
 			// release reason, a cockpit state, and a persisted record so the

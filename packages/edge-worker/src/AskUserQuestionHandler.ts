@@ -105,7 +105,16 @@ export class AskUserQuestionHandler {
 		linearAgentSessionId: string,
 		organizationId: string,
 		signal: AbortSignal,
+		/**
+		 * v3.1 P2: post the elicitation on THIS session, in THIS workspace,
+		 * while parking the promise under `linearAgentSessionId`. A mirror
+		 * session asks the client on the client's own thread and waits where
+		 * it is; the answer is relayed back by the worker.
+		 */
+		target?: { sessionId: string; organizationId: string },
 	): Promise<AskUserQuestionResult> {
+		const postSessionId = target?.sessionId ?? linearAgentSessionId;
+		const postOrganizationId = target?.organizationId ?? organizationId;
 		// Validate: only 1 question at a time
 		if (!input.questions || input.questions.length !== 1) {
 			this.logger.error(
@@ -132,10 +141,10 @@ export class AskUserQuestionHandler {
 		}
 
 		// Get issue tracker
-		const issueTracker = this.deps.getIssueTracker(organizationId);
+		const issueTracker = this.deps.getIssueTracker(postOrganizationId);
 		if (!issueTracker) {
 			this.logger.error(
-				`No issue tracker found for organization ${organizationId}`,
+				`No issue tracker found for organization ${postOrganizationId}`,
 			);
 			return {
 				answered: false,
@@ -165,7 +174,7 @@ export class AskUserQuestionHandler {
 		// would silently turn a click into an unrecognised answer.
 		for (const opt of question.options) {
 			const sanitizedLabel = this.deps.sanitizeClientText?.(
-				linearAgentSessionId,
+				postSessionId,
 				opt.label,
 			);
 			if (sanitizedLabel !== undefined && sanitizedLabel !== opt.label) {
@@ -190,15 +199,13 @@ export class AskUserQuestionHandler {
 		const rawElicitationBody = `${question.question}\n\n${optionsText}`;
 		// PON-179: the elicitation lands on the client surface — sanitize.
 		const elicitationBody =
-			this.deps.sanitizeClientText?.(
-				linearAgentSessionId,
-				rawElicitationBody,
-			) ?? rawElicitationBody;
+			this.deps.sanitizeClientText?.(postSessionId, rawElicitationBody) ??
+			rawElicitationBody;
 
 		// Post elicitation to Linear
 		try {
 			await issueTracker.createAgentActivity({
-				agentSessionId: linearAgentSessionId,
+				agentSessionId: postSessionId,
 				content: {
 					type: "elicitation",
 					body: elicitationBody,
