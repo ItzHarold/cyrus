@@ -5,7 +5,7 @@ This changelog documents internal development changes, refactors, tooling update
 ## [Unreleased]
 
 ### Fixed
-- **The preview-discovery tests carry their own fixture.** They read a sample repository from a session scratchpad under `/tmp`, which systemd-tmpfiles removes after ten days and which no other checkout has; the fixture now lives under `packages/edge-worker/test/fixtures/`.
+- **The preview-discovery tests carry their own fixture.** They read a sample repository from a session scratchpad under `/tmp`, which systemd-tmpfiles removes after ten days and which no other checkout has; the fixture now lives under `packages/edge-worker/test/fixtures/`. ([#106](https://github.com/ItzHarold/cyrus/pull/106))
 - **The package test matrix no longer stops at the first failing package.** `pnpm --filter` bails on the first failure by default, so with `packages/claude-runner`'s three standing failures every `test:packages:run` since they appeared skipped `edge-worker` and every package after it, while still reporting the packages before it green. The root test scripts now pass `--no-bail`; a run reports every package. ([#102](https://github.com/ItzHarold/cyrus/pull/102))
 
 ### Added
