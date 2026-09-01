@@ -224,6 +224,24 @@ export class ScopeApprovalStore {
 	 * reviewer's delegate gesture picks it up through the same admission
 	 * point — no second start path beside the one that works.
 	 */
+	/**
+	 * A started run ended without handing anything over — stopped by the
+	 * reviewer, crashed, or killed with the process (v3.1). Park the work
+	 * again so the same door a re-delegation uses picks it up on the same
+	 * worktree. Returns true on the real transition only.
+	 */
+	markImplementationInterrupted(issueId: string): boolean {
+		const record = this.records.get(issueId);
+		if (
+			!record ||
+			record.state !== "approved" ||
+			record.implementationDeferred === true
+		)
+			return false;
+		record.implementationDeferred = true;
+		return true;
+	}
+
 	recordReworkRequested(issueId: string, note?: string): void {
 		const record = this.records.get(issueId);
 		if (!record) return;
