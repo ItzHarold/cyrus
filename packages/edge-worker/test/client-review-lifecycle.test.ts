@@ -169,7 +169,8 @@ describe("detecting the merge", () => {
 			merged: true,
 			closed: true,
 		}));
-		const closeOut = vi.fn(async () => {});
+		// The close-out reports success; a falsy return means "retry".
+		const closeOut = vi.fn(async () => true);
 		p.closeOutMergedWork = closeOut;
 
 		await p.checkForClientMerge(ISSUE);
@@ -450,5 +451,88 @@ describe("the client's summary is handed over, not scraped (PON-235)", () => {
 		);
 
 		expect(p.verificationGate.get(ISSUE)?.summary).toBe("This run's message.");
+	});
+});
+
+describe("restart and merge hygiene (v3.1)", () => {
+	let worker: EdgeWorker;
+	beforeEach(() => {
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		worker = createTestWorker([]);
+	});
+	const mergedFacts = async () => ({
+		headSha: "x",
+		files: [],
+		truncated: false,
+		merged: true,
+		closed: true,
+		mergeCommitSha: "m1",
+	});
+
+	it("a close-out that fails to post is retried, and the client's issue is not completed in silence", async () => {
+		const p = delivered(worker);
+		p.savePersistedStateStrict = vi.fn().mockResolvedValue(undefined);
+		p.mintGitHubTokenForRepo = vi.fn(async () => "tok");
+		p.fetchPullRequestFacts = vi.fn(mergedFacts);
+		const post = vi
+			.fn()
+			.mockRejectedValueOnce(new Error("502"))
+			.mockResolvedValue("a1");
+		p.agentSessionManager.postResponseActivityStrict = post;
+		const comment = vi.fn(async () => {});
+		p.cockpitMirror.commentOnMirror = comment;
+		const complete = vi.fn(async () => {});
+		p.moveIssueToCompletedState = complete;
+
+		await p.checkForClientMerge(ISSUE);
+		expect(complete).not.toHaveBeenCalled();
+		expect(p.verificationGate.get(ISSUE)?.mergedAt).toBeUndefined();
+		expect(
+			comment.mock.calls.some((c) => String(c[1]).includes("did not post")),
+		).toBe(true);
+
+		await p.checkForClientMerge(ISSUE);
+		expect(post).toHaveBeenCalledTimes(2);
+		expect(complete).toHaveBeenCalledTimes(1);
+		expect(p.verificationGate.get(ISSUE)?.mergedAt).toBeTruthy();
+	});
+
+	it("the closed-without-merging notice survives a restart", async () => {
+		const p = delivered(worker);
+		p.savePersistedStateStrict = vi.fn().mockResolvedValue(undefined);
+		p.mintGitHubTokenForRepo = vi.fn(async () => "tok");
+		p.fetchPullRequestFacts = vi.fn(async () => ({
+			headSha: "x",
+			files: [],
+			truncated: false,
+			merged: false,
+			closed: true,
+		}));
+		const comment = vi.fn(async () => {});
+		p.cockpitMirror.commentOnMirror = comment;
+
+		await p.checkForClientMerge(ISSUE);
+		// A restart: the in-memory guards are gone, the record is restored.
+		p.verificationGate.restore(p.verificationGate.serialize());
+		await p.checkForClientMerge(ISSUE);
+
+		expect(comment).toHaveBeenCalledTimes(1);
+	});
+
+	it("an unreadable poll is journaled once, not silent and not per tick", async () => {
+		const p = delivered(worker);
+		p.mintGitHubTokenForRepo = vi.fn(async () => undefined);
+		const event = vi.spyOn(p.logger, "event");
+
+		await p.checkForClientMerge(ISSUE);
+		await p.checkForClientMerge(ISSUE);
+
+		const lines = event.mock.calls.filter(
+			(c) => c[0] === "merge_poll_unreadable",
+		);
+		expect(lines).toHaveLength(1);
+		expect(lines[0][1]).toMatchObject({ reason: "no_github_token" });
 	});
 });

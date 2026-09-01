@@ -650,6 +650,21 @@ describe("PON-228 — the reviewer gets a finished turn, on the right thread", (
 		);
 	});
 
+	it("signs off once across a restart — the set is gone, the record remembers", async () => {
+		const { p, cockpitPosts } = await held();
+		p.savePersistedStateStrict = vi.fn().mockResolvedValue(undefined);
+		const before = cockpitPosts.length;
+		await p.signOffIntoVerification(CLIENT_ISSUE);
+		await new Promise((r) => setTimeout(r, 10));
+		// A restart: the in-memory guard is empty and the record is restored.
+		p.verificationSignedOff.clear();
+		p.verificationGate.restore(p.verificationGate.serialize());
+		await p.signOffIntoVerification(CLIENT_ISSUE);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(cockpitPosts.length).toBe(before + 1);
+		expect(p.cockpitMirror.commentOnMirror).toHaveBeenCalledTimes(1);
+	});
+
 	it("signs off once, however many times the mirror recomposes", async () => {
 		const { p, cockpitPosts } = await held();
 		const before = cockpitPosts.length;

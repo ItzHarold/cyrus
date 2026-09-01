@@ -64,6 +64,9 @@ describe("CockpitMirror", () => {
 			};
 		}
 		if (call.query.includes("issue(id: $id) { state { type } }")) {
+			// "deleted" models an issue that is gone: Linear answers null.
+			if (stateTypeByIssue.get(call.variables.id as string) === "deleted")
+				return { issue: null };
 			return {
 				issue: {
 					state: {
@@ -293,6 +296,17 @@ describe("CockpitMirror", () => {
 			stateTypeByIssue.set(issue.issueId, "started"); // still open
 			await mirror.close(issue.issueId, "reconciled");
 
+			expect(closeStateOf()).toBe("state-canceled");
+		});
+
+		it("does not claim delivery for a client issue that is gone", async () => {
+			makeMirror(
+				{ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID },
+				{ [COCKPIT_WS]: "cockpit-token", [TENANT_WS]: "tenant-token" },
+			);
+			await mirror.upsert(issue, TENANT_WS, "active");
+			stateTypeByIssue.set(issue.issueId, "deleted");
+			await mirror.close(issue.issueId, "issue_terminal");
 			expect(closeStateOf()).toBe("state-canceled");
 		});
 
