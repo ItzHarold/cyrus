@@ -22,12 +22,12 @@ export class SessionPlanTracker {
 	/** Record a task the session created. Ignores duplicates and blanks. */
 	addTask(id: string, subject: string): void {
 		if (!id || !subject?.trim() || this.steps.has(id)) return;
-		this.steps.set(id, { label: subject.trim(), status: "pending" });
+		this.steps.set(id, { content: subject.trim(), status: "pending" });
 	}
 
 	/**
 	 * Move a task to a new status. Unknown ids are ignored rather than
-	 * invented — a step whose label we never saw would render as a blank row.
+	 * invented — a step whose content we never saw would render as a blank row.
 	 */
 	updateTask(id: string, status: string): void {
 		const step = this.steps.get(id);
