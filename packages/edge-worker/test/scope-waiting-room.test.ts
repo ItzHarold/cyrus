@@ -339,6 +339,7 @@ describe("the room itself", () => {
 		const { room, calls } = makeRoom([
 			{ team: { issues: { nodes: [] } } },
 			{ issueCreate: { issue: { id: "room-1" } } },
+			{ issueUpdate: { success: true } },
 			{
 				team: { states: { nodes: [{ id: "state-done", type: "completed" }] } },
 			},
@@ -353,6 +354,44 @@ describe("the room itself", () => {
 			.filter((c) => c.query.includes("issueUpdate"))
 			.find((c) => (c.variables as { s?: string }).s === "state-done");
 		expect(close).toBeDefined();
+	});
+
+	it("empties its list before it closes, so a closed room never shows a stale row", async () => {
+		// Live: CKP-21 was Delivered (closed) for a day while its description
+		// still read "FRO-64 · awaiting reply · 0h". The state said nothing
+		// was waiting; the body said something was. The reset comes before
+		// the state change, so a failed close still leaves an honest body.
+		const { room, calls } = makeRoom([
+			{ team: { issues: { nodes: [] } } },
+			{ issueCreate: { issue: { id: "room-1" } } },
+			{ issueUpdate: { success: true } },
+			{
+				team: { states: { nodes: [{ id: "state-done", type: "completed" }] } },
+			},
+			{ issueUpdate: { success: true } },
+		]);
+		await room.sync([
+			{ issueId: "i", issueIdentifier: "FRO-64", proposedAt: hoursAgo(0) },
+		]);
+		await room.sync([]);
+
+		const updates = calls.filter((c) => c.query.includes("issueUpdate"));
+		const reset = updates.findIndex((c) =>
+			String(
+				(c.variables as { input?: { description?: string } }).input
+					?.description ?? "",
+			).startsWith("Nothing waiting"),
+		);
+		const close = updates.findIndex(
+			(c) => (c.variables as { s?: string }).s === "state-done",
+		);
+		expect(reset).toBeGreaterThanOrEqual(0);
+		expect(close).toBeGreaterThanOrEqual(0);
+		expect(reset).toBeLessThan(close);
+		expect(
+			(updates[reset].variables as { input: { description: string } }).input
+				.description,
+		).not.toContain("FRO-64");
 	});
 
 	it("does not open a room when nothing is waiting in the first place", async () => {

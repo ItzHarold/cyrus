@@ -343,6 +343,18 @@ export class ScopeWaitingRoom {
 		linearWorkspaceId: string;
 		teamId: string;
 	}): Promise<void> {
+		// The body must say what the state says. Closing used to change only
+		// the status, so CKP-21 sat closed for a day with "FRO-64 · awaiting
+		// reply · 0h" in its description — a row that outlived the reason it
+		// was written, on the one surface built to be read at a glance. The
+		// reset goes FIRST: if the state write then fails, the room is at
+		// least honest about its contents.
+		const empty = renderWaitingRoom([], {
+			now: this.deps.now(),
+			stallAfterHours: this.deps.stallAfterHours(),
+			clientName: (ws) => this.deps.getClientName(ws),
+		});
+		if (this.lastBody !== empty) await this.updateRoom(config, empty);
 		const states = await this.gql<{
 			team: { states: { nodes: Array<{ id: string; type: string }> } };
 		}>(
