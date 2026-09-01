@@ -64,6 +64,9 @@ export class VerificationGate {
 				extractPullRequestUrls(entry.summary).length > 0
 					? extractPullRequestUrls(entry.summary)
 					: (existing?.prUrls ?? this.carriedPrUrls.get(issueId) ?? []),
+			// A rework run's hold keeps the merge watch: the pull request the
+			// client was told about is still theirs to merge, at any moment.
+			...(existing?.mergeWatch ? { mergeWatch: existing.mergeWatch } : {}),
 			...(existing?.escalatedAt ? { escalatedAt: existing.escalatedAt } : {}),
 			...(existing?.delayNotedAt
 				? { delayNotedAt: existing.delayNotedAt }
@@ -138,6 +141,31 @@ export class VerificationGate {
 	}
 
 	/**
+	 * The client confirmed a change to delivered work (v3.1). The record
+	 * stays — the pull request, the merge watch, the history — but it is no
+	 * longer "delivered": the next completion of the rework run is held for
+	 * verification exactly like a first pass, and `approve:` refuses until
+	 * it is. Before this the record stayed delivered, the rework run's
+	 * completion hit the delivered early-return and was never held, and
+	 * `approve:` answered "Already delivered".
+	 */
+	reopenForRework(issueId: string): boolean {
+		const record = this.records.get(issueId);
+		if (!record || record.state !== "delivered") return false;
+		record.state = "rework";
+		record.reworkRequestedAt = new Date().toISOString();
+		return true;
+	}
+
+	listRework(): Array<{ issueId: string } & VerificationRecord> {
+		const out: Array<{ issueId: string } & VerificationRecord> = [];
+		for (const [issueId, record] of this.records) {
+			if (record.state === "rework") out.push({ issueId, ...record });
+		}
+		return out;
+	}
+
+	/**
 	 * Name the pull request whose merge ends this cycle (PON-233).
 	 *
 	 * Set once, at delivery, from the own-repo selection rather than from
@@ -177,8 +205,10 @@ export class VerificationGate {
 	 * merge rather than at delivery.
 	 */
 	awaitingMergeIssueIds(): string[] {
+		// Any state: a pull request the client has been told about is theirs
+		// to merge at any moment, rework or re-verification included.
 		return [...this.records.entries()]
-			.filter(([, r]) => r.state === "delivered" && r.mergeWatch && !r.mergedAt)
+			.filter(([, r]) => r.mergeWatch && !r.mergedAt)
 			.map(([issueId]) => issueId);
 	}
 

@@ -167,7 +167,14 @@ export interface SerializedOperatorSession {
  * One completed-but-unapproved piece of work (PON-152).
  */
 export interface SerializedVerificationRecord {
-	state: "in-verification" | "delivered";
+	/**
+	 * `rework` (v3.1): the client confirmed a change to delivered work. The
+	 * record keeps the pull request and the merge watch, but the next
+	 * completion of the rework run is held like a first pass.
+	 */
+	state: "in-verification" | "delivered" | "rework";
+	/** When the client confirmed a change to delivered work (v3.1). */
+	reworkRequestedAt?: string;
 	/** When the work FIRST completed — the escalation ladder clock. */
 	completedAt: string;
 	workspaceId: string;
@@ -352,13 +359,6 @@ export interface SerializedNeedsInfoRecord {
 	sessionId?: string;
 	workspaceId?: string;
 	issueIdentifier?: string;
-	/**
-	 * v3.1: the question was asked FROM the cockpit mirror on the reviewer's
-	 * trigger. The client's answer is relayed verbatim into this session on
-	 * the cockpit workspace instead of resuming the client's own thread.
-	 */
-	relaySessionId?: string;
-	relayWorkspaceId?: string;
 }
 
 export interface SerializedScopeApprovalRecord {

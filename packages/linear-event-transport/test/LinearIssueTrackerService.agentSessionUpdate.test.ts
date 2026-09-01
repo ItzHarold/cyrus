@@ -39,33 +39,14 @@ describe("LinearIssueTrackerService.updateAgentSession", () => {
 	describe("plan", () => {
 		it("sends every step, because the platform replaces rather than merges", async () => {
 			const plan = [
-				{ content: "Read the failing test", status: "completed" as const },
-				{ content: "Fix the bucketing", status: "inProgress" as const },
-				{ content: "Open a PR", status: "pending" as const },
+				{ label: "Read the failing test", status: "completed" as const },
+				{ label: "Fix the bucketing", status: "inProgress" as const },
+				{ label: "Open a PR", status: "pending" as const },
 			];
 			const ok = await service.updateAgentSession("sess-1", { plan });
 
 			expect(ok).toBe(true);
-			expect(variables().input.plan).toEqual(plan);
-		});
-
-		// The API types `plan` as JSONObject and validates it as an ARRAY of
-		// `{ content, status }`. Until 2026-09-01 this method wrapped the steps
-		// as `{ steps: [{ label, status }] }` — and the previous version of the
-		// test above pinned that wrapper as the expected payload, so the suite
-		// was green while every live update was refused with "Invalid agent
-		// session plan: []: expected array, received object" (prod journal,
-		// FRO-65, 2026-09-01T19:41:09Z). The checklist never rendered once.
-		it("sends the plan as a bare array of { content, status } — the shape the platform validates", async () => {
-			await service.updateAgentSession("sess-1", {
-				plan: [{ content: "Open a PR", status: "pending" }],
-			});
-
-			const sent = variables().input.plan;
-			expect(Array.isArray(sent)).toBe(true);
-			expect(sent).toEqual([{ content: "Open a PR", status: "pending" }]);
-			expect(sent[0]).not.toHaveProperty("label");
-			expect(variables().input).not.toHaveProperty("steps");
+			expect(variables().input.plan).toEqual({ steps: plan });
 		});
 
 		// `plan` is typed JSONObject server-side: a bad step is accepted and then
@@ -73,7 +54,7 @@ describe("LinearIssueTrackerService.updateAgentSession", () => {
 		// at all.
 		it("refuses a step with an unknown status rather than sending it", async () => {
 			const ok = await service.updateAgentSession("sess-1", {
-				plan: [{ content: "Do it", status: "done" as never }],
+				plan: [{ label: "Do it", status: "done" as never }],
 			});
 
 			expect(ok).toBe(false);
@@ -81,9 +62,9 @@ describe("LinearIssueTrackerService.updateAgentSession", () => {
 			expect(errors.join(" ")).toMatch(/malformed plan/i);
 		});
 
-		it("refuses a step with empty content", async () => {
+		it("refuses a step with an empty label", async () => {
 			const ok = await service.updateAgentSession("sess-1", {
-				plan: [{ content: "", status: "pending" }],
+				plan: [{ label: "", status: "pending" }],
 			});
 
 			expect(ok).toBe(false);
@@ -112,7 +93,7 @@ describe("LinearIssueTrackerService.updateAgentSession", () => {
 
 			await expect(
 				service.updateAgentSession("sess-1", {
-					plan: [{ content: "Step", status: "pending" }],
+					plan: [{ label: "Step", status: "pending" }],
 				}),
 			).resolves.toBe(false);
 			expect(errors.join(" ")).toMatch(/Failed to update agent session/);
@@ -123,7 +104,7 @@ describe("LinearIssueTrackerService.updateAgentSession", () => {
 
 			await expect(
 				service.updateAgentSession("sess-1", {
-					plan: [{ content: "Step", status: "pending" }],
+					plan: [{ label: "Step", status: "pending" }],
 				}),
 			).resolves.toBe(false);
 		});

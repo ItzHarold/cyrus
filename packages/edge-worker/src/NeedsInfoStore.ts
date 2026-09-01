@@ -36,9 +36,6 @@ export class NeedsInfoStore {
 			sessionId?: string;
 			workspaceId?: string;
 			issueIdentifier?: string;
-			/** Mirror session to relay the answer into (v3.1 P2). */
-			relaySessionId?: string;
-			relayWorkspaceId?: string;
 		},
 	): void {
 		const existing = this.records.get(issueId);
@@ -53,12 +50,6 @@ export class NeedsInfoStore {
 			...(context.workspaceId ? { workspaceId: context.workspaceId } : {}),
 			...(context.issueIdentifier
 				? { issueIdentifier: context.issueIdentifier }
-				: {}),
-			...(context.relaySessionId
-				? { relaySessionId: context.relaySessionId }
-				: {}),
-			...(context.relayWorkspaceId
-				? { relayWorkspaceId: context.relayWorkspaceId }
 				: {}),
 		});
 	}
