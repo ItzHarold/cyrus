@@ -29,7 +29,7 @@ describe("SessionPlanTracker", () => {
 			expect(t.isDisabled).toBe(true);
 		});
 
-		// A step whose label was never seen would render as a blank row.
+		// A step whose content was never seen would render as a blank row.
 		it("ignores updates for tasks it never saw", () => {
 			const t = new SessionPlanTracker();
 			t.updateTask("99", "completed");
@@ -44,9 +44,9 @@ describe("SessionPlanTracker", () => {
 			t.addTask("2", "Fix the bucketing");
 			t.addTask("3", "Open a PR");
 			expect(t.snapshot()).toEqual([
-				{ label: "Read the failing test", status: "pending" },
-				{ label: "Fix the bucketing", status: "pending" },
-				{ label: "Open a PR", status: "pending" },
+				{ content: "Read the failing test", status: "pending" },
+				{ content: "Fix the bucketing", status: "pending" },
+				{ content: "Open a PR", status: "pending" },
 			]);
 		});
 
@@ -74,7 +74,7 @@ describe("SessionPlanTracker", () => {
 			t.addTask("1", "first");
 			t.addTask("1", "second");
 			expect(t.snapshot()).toHaveLength(1);
-			expect(t.snapshot()?.[0].label).toBe("first");
+			expect(t.snapshot()?.[0].content).toBe("first");
 		});
 
 		// The platform replaces rather than merges, so a snapshot is always the
