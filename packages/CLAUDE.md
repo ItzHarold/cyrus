@@ -327,3 +327,17 @@ This is the one control that matters most on that surface. An operator session w
 The stop is now ordered above the intercept — deliberately there rather than inside `handleMirrorAction`, because a stop is not an operator action on the work, it is a control on the runner. `handleStopSignal` already resolves mirror sessions (they live in the same session manager), already handles the queued case, and already closes the turn with a confirmation, so the fix is ordering, not new machinery. The confirmation now names the actor via `resolveMirrorActor` — the same attribution gap that broke the release check had it thanking "user".
 
 Also here: **a canceled waiting room is never resurrected.** Reuse of a *closed* room is the designed cycle, but cancellation is a human saying that copy is dead — usually while tidying duplicates — and the tidying itself makes the canceled copy the most recently updated, so the old selector would have elected the corpse and put the live list of waiting conversations inside an issue the board shows as abandoned. It mints a fresh room instead.
+
+### The client's bypass value stops living in mirror descriptions (PON-223 punch list)
+
+A preview bypass token is a **credential**, and it is the client's, not ours — it opens every protected preview in their Vercel project, not just the one we linked. A Linear description is the worst place to keep one: persisted, rewritten into every later transition, and printed verbatim by any read of the issue. That is exactly how it reached this project's own terminal output twice.
+
+`buildStartHereBlock` now hands the tokenized URL to its caller instead of writing it, and `composeVerificationMirror` publishes it as a **session link** on the reviewer's own thread — the Preview button, same access, same click. The description says where the link is rather than repeating it.
+
+**It deliberately does not fall back to rendering the bare URL.** That is the login-walled link the delivery path stopped shipping to clients; a reviewer is owed the same rule, and a link that opens a hosting-provider sign-in teaches them the link lies. Publishing is best-effort and runs last — the review block is the deliverable, so a mirror that cannot take a session link still gets its description.
+
+Swept the existing board with a query for the parameter name: one description still carried a token (CKP-13, parked mid-flight on the old workflow) and was stripped of the whole query string. CKP-22's had already been replaced by the closed-mirror description.
+
+**This reduces the exposure; it does not eliminate it.** The token still reaches Linear, now as a session link rather than body text. Removing it entirely means the description holding a link to *us* and our server redirecting with the token attached — the credential never leaving the box, and revocable per preview instead of per workspace. That is the right end state and is filed as a follow-up rather than built at the end of a long session, because it puts a new public route on the request path.
+
+Worth remembering how the cheap version of this was almost shipped: the obvious move was "just take the link out of the description", and the mirror session's `externalUrls` turned out to carry only the pull request — so the description was the *only* place the reviewer's working preview link lived, and stripping it would have silently removed their access.

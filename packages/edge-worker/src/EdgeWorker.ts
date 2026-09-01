@@ -198,6 +198,7 @@ import {
 	resolveMirrorActor,
 } from "./operator-session.js";
 import {
+	containsBypassToken,
 	fetchPreviewDeployment,
 	renderPreview,
 	withPreviewBypass,
@@ -7336,9 +7337,18 @@ ${taskSection}`;
 		// first composition after capture and never again (first attempt
 		// wins), so later refresh ticks cost nothing and cannot re-stamp it.
 		await this.captureSummaryHead(issueId, record);
+		// PON-223 punch list (token hygiene): the reviewer's preview link is
+		// published as a SESSION link rather than written into the persisted
+		// description. Same access, same click, but the client's bypass value
+		// stops being carried in body text that every later transition
+		// rewrites and every read of the issue prints.
+		let previewForSession: string | undefined;
 		const startHere = await this.buildStartHereBlock(
 			record.prUrls,
 			record.workspaceId,
+			(url) => {
+				previewForSession = url;
+			},
 		);
 		const note = [
 			"---",
@@ -7381,6 +7391,27 @@ ${taskSection}`;
 				...(record.prUrls.length ? { brief: { addLinks: record.prUrls } } : {}),
 			},
 		);
+
+		// The Preview button on the reviewer's own thread. Best-effort and
+		// last: the review block is the deliverable here, and a mirror that
+		// cannot take a session link must still get its description.
+		if (previewForSession) {
+			const link = this.operatorSessions.forClientIssue(issueId);
+			const cockpitWs = this.config.cockpit?.linearWorkspaceId;
+			if (link?.mirrorSessionId && cockpitWs) {
+				try {
+					await this.issueTrackers
+						.get(cockpitWs)
+						?.updateAgentSession?.(link.mirrorSessionId, {
+							addedExternalUrls: [{ url: previewForSession, label: "Preview" }],
+						});
+				} catch (error) {
+					this.logger.debug(
+						`Could not publish the reviewer's preview link: ${String(error)}`,
+					);
+				}
+			}
+		}
 	}
 
 	/**
@@ -7488,6 +7519,9 @@ ${taskSection}`;
 	private async buildStartHereBlock(
 		prUrls: string[],
 		workspaceId: string | undefined,
+		/** Receives the tokenized preview URL so the caller can publish it as
+		 * a session link instead of persisting it in the description. */
+		onPreviewUrl?: (url: string) => void,
 	): Promise<string> {
 		const first = prUrls.map(parsePullRequestUrl).find(Boolean);
 		if (!first) return "";
@@ -7546,8 +7580,26 @@ ${taskSection}`;
 				undefined,
 				this.previewBypassTokenFor(workspaceId),
 			);
+			// The client's bypass value is a credential, and a description is
+			// the worst place to keep one: it is persisted, carried across
+			// every later transition, and surfaced verbatim by any read of the
+			// issue — it reached this session's own terminal output twice that
+			// way. So the tokenized link is handed to the caller to publish as
+			// a session link instead, and the description says where it is
+			// rather than repeating it.
+			//
+			// Deliberately NOT rendering the bare URL here as a consolation:
+			// that is exactly the login-walled link the delivery path stopped
+			// shipping to clients, and a reviewer deserves the same rule.
+			const bypassed =
+				preview?.state === "ready" &&
+				preview.url &&
+				containsBypassToken(preview.url);
+			if (bypassed && preview.url) onPreviewUrl?.(preview.url);
 			return [
-				renderPreview(preview),
+				bypassed
+					? `**Preview:** open it from the **Preview** link on this session${preview.sha ? ` (\`${preview.sha.slice(0, 7)}\`)` : ""} — it carries the client's access value, which is deliberately not written into this description.`
+					: renderPreview(preview),
 				...this.testAccountLines(workspaceId),
 				...files,
 			]
