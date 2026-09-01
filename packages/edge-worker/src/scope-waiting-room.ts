@@ -254,7 +254,14 @@ export class ScopeWaitingRoom {
 		const open = rooms.find(
 			(i) => i.state?.type !== "completed" && i.state?.type !== "canceled",
 		);
-		return (open ?? rooms[0])?.id;
+		// A CANCELED room is never reused. Closed-and-reopened is the designed
+		// cycle, but cancellation is a human saying this one is dead — usually
+		// while tidying duplicates — and resurrecting it puts the live list of
+		// waiting conversations inside an issue the board shows as abandoned.
+		// Falling through to `undefined` mints a fresh room instead, which is
+		// the honest outcome when every copy has been struck out.
+		const closed = rooms.find((i) => i.state?.type === "completed");
+		return (open ?? closed)?.id;
 	}
 
 	/**
