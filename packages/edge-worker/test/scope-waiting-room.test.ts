@@ -82,6 +82,22 @@ describe("the waiting list", () => {
 		expect(body).toContain("revision sent");
 	});
 
+	it("shows a mid-work question as needing an answer, not as a scope conversation", () => {
+		const body = renderWaitingRoom(
+			[
+				{
+					issueId: "i",
+					issueIdentifier: "ACM-9",
+					proposedAt: hoursAgo(1),
+					state: "needs-info",
+				},
+			],
+			{ now: NOW, stallAfterHours: 4, clientName },
+		);
+		expect(body).toContain("answer needed mid-work");
+		expect(body).not.toContain("awaiting reply");
+	});
+
 	it("survives a record with no timestamp rather than rendering NaN", () => {
 		const body = renderWaitingRoom(
 			[{ issueId: "i", issueIdentifier: "ACM-4" }],
