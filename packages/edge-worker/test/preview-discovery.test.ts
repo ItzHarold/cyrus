@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
 	assessOnboarding,
@@ -21,9 +22,12 @@ import {
  * environment variables the repo never documents.
  */
 
-const FIXTURE = join(
-	"/tmp/claude-0/-root/45db816f-a904-4862-9498-c72de3ed04ce/scratchpad",
-	"stranger-repo",
+// In the repository, deliberately. This used to point at a session's
+// scratchpad under /tmp — a directory systemd-tmpfiles ages out after ten
+// days and that no other checkout has. The suite was green on one box, for
+// ten days, and would have failed hard everywhere else (PON-223, finding F).
+const FIXTURE = fileURLToPath(
+	new URL("./fixtures/stranger-repo/", import.meta.url),
 );
 
 /** A reader over a real directory — same shape the GitHub reader implements. */
