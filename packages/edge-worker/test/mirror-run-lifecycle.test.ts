@@ -198,6 +198,82 @@ describe("a mirror-owned run that ends without handing anything over", () => {
 	});
 });
 
+describe("a reviewer talking to a RUNNING mirror run", () => {
+	it("streams the message into the run instead of answering with a canned line", async () => {
+		const { p } = setup();
+		const addStreamMessage = vi.fn();
+		p.agentSessionManager.sessions.get(MIRROR_SESSION).agentRunner = {
+			isRunning: () => true,
+			supportsStreamingInput: true,
+			addStreamMessage,
+		};
+		const cockpit = p.issueTrackers.get(COCKPIT_WS);
+
+		await p.handleMirrorAction(
+			{ ...delegation(HAROLD), rawBody: "use the existing Mailer helper" },
+			CLIENT_ISSUE,
+		);
+
+		expect(addStreamMessage).toHaveBeenCalledWith(
+			"use the existing Mailer helper",
+		);
+		const canned = cockpit.createAgentActivity.mock.calls.find((c: any) =>
+			String(c[0]?.content?.body ?? "").includes("Work is underway"),
+		);
+		expect(canned).toBeUndefined();
+	});
+});
+
+describe("a restart during a mirror-owned run", () => {
+	it("re-parks the work on boot instead of reporting a run that is not there", async () => {
+		const { p } = setup();
+		const reconcile = vi.fn().mockResolvedValue(undefined);
+		p.cockpitMirror.reconcile = reconcile;
+		p.cockpitMirror.resyncOperatorOrdering = vi
+			.fn()
+			.mockResolvedValue(undefined);
+		p.pruneEndedScopeConversations = vi.fn().mockResolvedValue(undefined);
+
+		await p.reconcileCockpitMirror();
+
+		expect(p.scopeApprovals.isImplementationDeferred(CLIENT_ISSUE)).toBe(true);
+		expect(reconcile).toHaveBeenCalledWith(
+			expect.objectContaining({
+				parked: expect.arrayContaining([
+					expect.objectContaining({
+						issue: expect.objectContaining({ issueId: CLIENT_ISSUE }),
+					}),
+				]),
+			}),
+		);
+		expect(p.cockpitMirror.upsert).toHaveBeenCalledWith(
+			expect.objectContaining({ issueId: CLIENT_ISSUE }),
+			CLIENT_WS,
+			"queued",
+		);
+	});
+
+	it("leaves a run that handed its work over alone", async () => {
+		const { p } = setup();
+		p.verificationGate.recordPending(CLIENT_ISSUE, {
+			workspaceId: CLIENT_WS,
+			issueIdentifier: "ACM-13",
+			sessionId: MIRROR_SESSION,
+			summary: "Done. https://github.com/Ponte-Digital/Acme-Metrics/pull/1",
+			isError: false,
+		});
+		p.cockpitMirror.reconcile = vi.fn().mockResolvedValue(undefined);
+		p.cockpitMirror.resyncOperatorOrdering = vi
+			.fn()
+			.mockResolvedValue(undefined);
+		p.pruneEndedScopeConversations = vi.fn().mockResolvedValue(undefined);
+
+		await p.reconcileCockpitMirror();
+
+		expect(p.scopeApprovals.isImplementationDeferred(CLIENT_ISSUE)).toBe(false);
+	});
+});
+
 describe("the WIP refusal", () => {
 	it("stays silent for machinery and speaks only to a person", async () => {
 		const { p } = setup();

@@ -6700,6 +6700,36 @@ ${taskSection}`;
 			// that cannot see it would close it as an orphan on every boot.
 			// An issue the lane already accounts for keeps its lane-derived
 			// entry (which carries the position); parked covers the rest.
+			// v3.1: a mirror-owned run that died with the process. Runners are
+			// never resumed on boot, so a link with nothing held and nothing
+			// running is an interrupted run, not an active one — reported as
+			// Active it sat with nothing running until the NEXT boot closed
+			// it as reconciled. Park it again first, so the parked category
+			// below picks it up and a re-delegation resumes it.
+			for (const link of this.operatorSessions.serialize()) {
+				if (!link.ownsDelivery) continue;
+				const scope = this.scopeApprovals.get(link.clientIssueId);
+				if (!scope || scope.state !== "approved") continue;
+				if (scope.implementationDeferred === true) continue;
+				if (this.verificationGate.get(link.clientIssueId)) continue;
+				const runner = this.agentSessionManager.getSession(
+					link.mirrorSessionId,
+				)?.agentRunner;
+				if (runner?.isRunning?.()) continue;
+				this.reparkInterruptedMirrorRun(
+					link.clientIssueId,
+					link,
+					"service_restart",
+				);
+				const laneWs = this.laneManager.workspaceOf(link.mirrorSessionId);
+				if (laneWs && this.laneManager.isActive(link.mirrorSessionId)) {
+					this.releaseLaneAndContinue(
+						laneWs,
+						link.mirrorSessionId,
+						"service_restart",
+					);
+				}
+			}
 			const accountedFor = new Set([
 				...active.map((e) => e.issue.issueId),
 				...queued.map((e) => e.issue.issueId),
@@ -9135,6 +9165,33 @@ ${taskSection}`;
 				);
 				return;
 			}
+			// A reviewer talking to a RUNNING mirror run is the point of the
+			// working surface — the implementation block tells the model to
+			// talk to them while it works. This branch used to answer every
+			// such message with the canned "underway" line and drop the
+			// words; the model never heard a thing. Stream them in.
+			const liveRunner =
+				this.agentSessionManager.getSession(mirrorSessionId)?.agentRunner;
+			if (
+				opts.instruction.trim() &&
+				liveRunner?.isRunning?.() &&
+				liveRunner.supportsStreamingInput &&
+				liveRunner.addStreamMessage
+			) {
+				try {
+					liveRunner.addStreamMessage(opts.instruction);
+					this.logger.event("mirror_instruction_streamed", {
+						clientIssueId,
+						mirrorSessionId,
+						length: opts.instruction.length,
+					});
+					return;
+				} catch (error) {
+					this.logger.warn(
+						`Could not stream the reviewer's message into the running mirror session: ${String(error)}`,
+					);
+				}
+			}
 			const underway = /^(active|queued|needs-info)/i.test(state);
 			await reply(
 				underway
@@ -9982,7 +10039,9 @@ ${taskSection}`;
 				? "it was stopped"
 				: reason === "runner_error"
 					? "the runner failed"
-					: "it ended without handing anything over";
+					: reason === "service_restart"
+						? "the service restarted underneath it"
+						: "it ended without handing anything over";
 		this.endNarrationTurn(
 			issueId,
 			`**Stopped before it was finished — your move.** The run ended (${why}). Whatever it pushed is still on the branch; delegate this mirror to me again and I'll pick it up from there. Nothing has gone to the client.`,
