@@ -195,6 +195,58 @@ describe("a rejection that cannot resume must not destroy the summary", () => {
 		const prompt = p.resumeAgentSession.mock.calls[0][4] as string;
 		expect(prompt).toContain("client_summary");
 		expect(prompt).toContain("record_operator_note");
-		expect(prompt).toMatch(/Do NOT put any preview or pull-request URL/);
+		expect(prompt).toMatch(/Do NOT put a PREVIEW URL in it/);
+		// The PR link must stay: prUrls are scraped from this prose, and
+		// forbidding it silently removed the client's merge path.
+		expect(prompt).toContain("pull request URL is fine");
+	});
+});
+
+describe("a rewrite must not lose the pull request", () => {
+	it("carries the merge path across a rejection that renames nothing", async () => {
+		// prUrls are scraped from the summary's prose. A regeneration only
+		// restates what was already built, so it can legitimately write no
+		// URL — and the client got a delivery with nothing to merge.
+		const p = worker();
+		p.savePersistedStateStrict = vi.fn().mockResolvedValue(undefined);
+		p.verificationGate.recordPending(ISSUE, {
+			workspaceId: WS,
+			sessionId: "s",
+			summary: "Done. https://github.com/Ponte-Digital/Acme-Metrics/pull/6",
+			isError: false,
+		});
+		expect(p.verificationGate.get(ISSUE).prUrls).toHaveLength(1);
+
+		p.verificationGate.reject(ISSUE);
+		p.verificationGate.recordPending(ISSUE, {
+			workspaceId: WS,
+			sessionId: "s",
+			summary: "Your dashboard now explains itself. No links in this one.",
+			isError: false,
+		});
+
+		expect(p.verificationGate.get(ISSUE).prUrls).toEqual([
+			"https://github.com/Ponte-Digital/Acme-Metrics/pull/6",
+		]);
+	});
+
+	it("a rewrite that names a DIFFERENT pull request wins", () => {
+		const p = worker();
+		p.verificationGate.recordPending(ISSUE, {
+			workspaceId: WS,
+			sessionId: "s",
+			summary: "https://github.com/Ponte-Digital/Acme-Metrics/pull/6",
+			isError: false,
+		});
+		p.verificationGate.reject(ISSUE);
+		p.verificationGate.recordPending(ISSUE, {
+			workspaceId: WS,
+			sessionId: "s",
+			summary: "Now on https://github.com/Ponte-Digital/Acme-Metrics/pull/9",
+			isError: false,
+		});
+		expect(p.verificationGate.get(ISSUE).prUrls).toEqual([
+			"https://github.com/Ponte-Digital/Acme-Metrics/pull/9",
+		]);
 	});
 });

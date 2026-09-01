@@ -53,7 +53,17 @@ export class VerificationGate {
 			sessionId: entry.sessionId,
 			summary: entry.summary,
 			isError: entry.isError,
-			prUrls: extractPullRequestUrls(entry.summary),
+			// PON-238: the pull request is a fact about the WORK, not about
+			// the run that last described it. These are scraped out of the
+			// summary's prose, so a rewrite that legitimately writes no URLs
+			// (a regeneration only restates what was already built) produced a
+			// record with no PR — nothing to mark ready, no merge path for the
+			// client, and no head for the staleness check to resolve. Carry
+			// the last known set when this summary names none.
+			prUrls:
+				extractPullRequestUrls(entry.summary).length > 0
+					? extractPullRequestUrls(entry.summary)
+					: (existing?.prUrls ?? this.carriedPrUrls.get(issueId) ?? []),
 			...(existing?.escalatedAt ? { escalatedAt: existing.escalatedAt } : {}),
 			...(existing?.delayNotedAt
 				? { delayNotedAt: existing.delayNotedAt }
@@ -180,9 +190,21 @@ export class VerificationGate {
 	reject(issueId: string): VerificationRecord | undefined {
 		const record = this.records.get(issueId);
 		if (!record || record.state !== "in-verification") return undefined;
+		// PON-238: the record is about to be deleted, and the rewrite that
+		// replaces it may describe the same pull request without naming it.
+		// Keep the link so the client still gets a merge path. In-memory
+		// only: a restart between the rejection and the rewrite's completion
+		// loses it, which degrades to the old behaviour rather than to
+		// anything worse.
+		if (record.prUrls?.length) {
+			this.carriedPrUrls.set(issueId, record.prUrls);
+		}
 		this.records.delete(issueId);
 		return record;
 	}
+
+	/** Last known PR links per issue, surviving a rejection (PON-238). */
+	private carriedPrUrls = new Map<string, string[]>();
 
 	/** Terminal issue: the record is done regardless of state. */
 	remove(issueId: string): boolean {
