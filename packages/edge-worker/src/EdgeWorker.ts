@@ -7058,6 +7058,89 @@ ${taskSection}`;
 		)?.[0];
 	}
 
+	/**
+	 * The ONE preview link the client is given (PON-238).
+	 *
+	 * It used to be scraped out of the summary's prose and then bypassed. That
+	 * put TWO links in front of the client: the prose kept its own bare copy,
+	 * which redirects to a hosting-provider login they have no account for,
+	 * beside a footer copy that works. Worse, they could point at different
+	 * builds — the prose link is whatever the run happened to write down,
+	 * which is the deployment of the commit it finished on, while the reviewer
+	 * verified the deployment of the head as it now stands.
+	 *
+	 * So the link is RESOLVED for the commit the summary describes
+	 * (`capturedHeadSha`, the same fact the staleness gate is keyed on) rather
+	 * than read out of prose — the PON-235 move applied to the link: a
+	 * client-facing artefact should not depend on a model writing the right
+	 * URL in the right place.
+	 *
+	 * Falls back to the scraped link (bypassed) rather than shipping none: a
+	 * delivery with no way to see the work is worse than one whose link came
+	 * from prose, and legacy records have no captured head at all.
+	 */
+	private async clientPreviewUrl(
+		record: VerificationRecord,
+		originRef: { owner: string; repo: string } | undefined,
+	): Promise<string | undefined> {
+		const bypass = this.previewBypassTokenFor(record.workspaceId);
+		const sha = record.capturedHeadSha;
+		if (originRef && sha) {
+			try {
+				const token = await this.mintGitHubTokenForRepo(
+					originRef.owner,
+					originRef.repo,
+				);
+				if (token) {
+					const preview = await fetchPreviewDeployment(
+						token,
+						originRef,
+						sha,
+						undefined,
+						bypass,
+					);
+					// Only a READY deployment is offered. A building or failed
+					// one has no url, and a link that 404s in front of the
+					// client teaches them the link lies.
+					if (preview?.state === "ready" && preview.url) return preview.url;
+				}
+			} catch (error) {
+				this.logger.debug(
+					`Could not resolve the delivery preview: ${String(error)}`,
+				);
+			}
+		}
+		return (
+			withPreviewBypass(this.extractPreviewUrl(record.summary) ?? "", bypass) ||
+			undefined
+		);
+	}
+
+	/**
+	 * No bare protected preview URL ever reaches the client (PON-238).
+	 *
+	 * The footer's link is built with the bypass, but the held summary is
+	 * posted VERBATIM, and a run that wrote a preview URL into its own prose
+	 * wrote the bare one. Harold followed such a link: it 302s to the hosting
+	 * provider's login page, which the client cannot pass.
+	 *
+	 * Runs are now asked to leave links out of the client summary entirely, so
+	 * on a regenerated summary this finds nothing. It exists for the ones
+	 * already held under the old scraping path, where the alternative is
+	 * shipping a link we know is dead.
+	 */
+	private bypassPreviewLinksIn(
+		summary: string,
+		workspaceId: string | undefined,
+	): string {
+		const bypass = this.previewBypassTokenFor(workspaceId);
+		if (!bypass) return summary;
+		return summary.replace(
+			/https?:\/\/[\w][\w.-]*vercel\.app[\w\-./?=&#%]*/gi,
+			(url) => withPreviewBypass(url, bypass),
+		);
+	}
+
 	/** Upsert the cockpit mirror to in-verification, assigned, with the held summary. */
 	/**
 	 * End the mirror's narration turn in plain words (PON-221).
@@ -7263,8 +7346,14 @@ ${taskSection}`;
 			await this.describePullRequests(record.prUrls),
 			startHere,
 			record.isError ? "**The session ended with an error.**" : "",
-			"",
-			"**What the session reported:**",
+			// The blank line is part of the heading, not its own element
+			// (PON-238). It used to be a bare `""`, which `.filter(Boolean)`
+			// removed — so the heading landed on the line directly after the
+			// last `Files changed` bullet and Markdown read it as a
+			// continuation of that list item. The client summary was rendered
+			// as though it belonged to the last file, which is why a reviewer
+			// looking for it on the mirror could not find it.
+			"\n**What the session reported:**",
 			record.summary.length > 3000
 				? `${record.summary.slice(0, 3000)}\n\n*(truncated — full summary delivered on approval)*`
 				: record.summary,
@@ -7958,11 +8047,7 @@ ${taskSection}`;
 		// — preview, merge path, and the operator's notes when present.
 		// PON-213: the client's copy is the one that has to open without a
 		// Vercel account — that is the whole point of holding the token.
-		const previewUrl =
-			withPreviewBypass(
-				this.extractPreviewUrl(record.summary) ?? "",
-				this.previewBypassTokenFor(record.workspaceId),
-			) || undefined;
+		const previewUrl = await this.clientPreviewUrl(record, originRef);
 		// PON-233: who did this, and who checked it. Derived from the mirror's
 		// assignee — the reviewer's own claim, which the mirror never writes —
 		// so it scales to more reviewers without another source of truth.
@@ -7979,7 +8064,11 @@ ${taskSection}`;
 		const whatNext = CLIENT_MESSAGES.reviewAndMerge(
 			this.testAccountsLine(record.workspaceId),
 		);
-		const clientSummary = [record.summary, whatNext, footer]
+		const clientSummary = [
+			this.bypassPreviewLinksIn(record.summary, record.workspaceId),
+			whatNext,
+			footer,
+		]
 			.filter(Boolean)
 			.join("\n\n");
 
@@ -8168,6 +8257,28 @@ ${taskSection}`;
 		issueId: string,
 		feedback: string,
 	): Promise<string> {
+		// PON-238: resolve everything the resume needs BEFORE clearing the
+		// record. `reject()` deletes it, and the resumability check used to
+		// come after — so a rejection that could not resume destroyed the
+		// client's held summary and had nothing to regenerate it with. The
+		// summary only survived truncated to 3000 characters in the mirror
+		// body. Look first, delete second.
+		const peek = this.verificationGate.get(issueId);
+		if (!peek || peek.state !== "in-verification") {
+			return "Nothing is awaiting verification on this issue.";
+		}
+		const owning = this.operatorSessions.forClientIssue(issueId);
+		const resumeSessionId =
+			owning?.ownsDelivery && owning.mirrorSessionId
+				? owning.mirrorSessionId
+				: peek.sessionId;
+		const session = this.agentSessionManager.getSession(resumeSessionId);
+		const repoId = this.sessionRepositories.get(resumeSessionId);
+		const repository = repoId ? this.repositories.get(repoId) : undefined;
+		if (!session || !repository) {
+			return "Rejection NOT recorded — this session can no longer be resumed (session or repository no longer known), and clearing the held summary would lose it with nothing to replace it. The summary is untouched and still deliverable. Prompt the client issue's thread directly to continue.";
+		}
+
 		const record = this.verificationGate.reject(issueId);
 		if (!record) {
 			return "Nothing is awaiting verification on this issue.";
@@ -8187,23 +8298,23 @@ ${taskSection}`;
 			"active",
 		);
 
-		// PON-225: work started from the mirror is continued ON the mirror.
-		// The record names the CLIENT session (that is where delivery posts),
-		// so resuming it blindly would move the conversation off the thread
-		// the reviewer is standing in and onto the client's — silent, and a
-		// fork of the very conversation that produced the work.
-		const owning = this.operatorSessions.forClientIssue(issueId);
-		const resumeSessionId =
-			owning?.ownsDelivery && owning.mirrorSessionId
-				? owning.mirrorSessionId
-				: record.sessionId;
-		const session = this.agentSessionManager.getSession(resumeSessionId);
-		const repoId = this.sessionRepositories.get(resumeSessionId);
-		const repository = repoId ? this.repositories.get(repoId) : undefined;
-		if (!session || !repository) {
-			return "Rejection recorded, but the session could not be resumed automatically (session or repository no longer known). Prompt the client issue's thread directly to continue.";
-		}
-		const prompt = `The completed work was reviewed internally and needs another pass before it reaches the client. Reviewer feedback:\n\n${feedback}\n\nAddress the feedback on the same branch and PR (keep the PR a draft), then stop and wait for verification again. Do not post any completion summary claiming the work is done for the client.`;
+		// PON-225: work started from the mirror is continued ON the mirror —
+		// resolved above, before the record was cleared. The record names the
+		// CLIENT session (that is where delivery posts), so resuming it
+		// blindly would move the conversation off the thread the reviewer is
+		// standing in and onto the client's — silent, and a fork of the very
+		// conversation that produced the work.
+		//
+		// PON-238: a regeneration hands the client's text over rather than
+		// having it scraped back out of the final message. `reject:` is the
+		// designated regeneration path (PON-210 refused to build a second one
+		// beside it), so it is where the PON-235 hand-off has to be asked for
+		// — otherwise every rewrite silently falls back to scraping, which is
+		// the failure PON-235 exists to remove. The link instruction is here
+		// for the same reason: the delivery composes exactly one preview link
+		// with the client's access value applied, so a URL written into the
+		// prose can only be a second, bare, login-walled copy of it.
+		const prompt = `The completed work was reviewed internally and needs another pass before it reaches the client. Reviewer feedback:\n\n${feedback}\n\nAddress the feedback on the same branch and PR (keep the PR a draft), then stop and wait for verification again.\n\nWhen you are done, hand the client's summary over with the \`client_summary\` input of \`record_operator_note\` — their language, what now works, complete and verbatim as they should receive it. Do NOT put any preview or pull-request URL in it: the delivery adds those itself, and a link written into the summary reaches the client without their access value and opens a login page they cannot pass. Your own final message is for the reviewer, not for them, and is not what gets delivered.`;
 		void this.resumeAgentSession(
 			session,
 			repository,
