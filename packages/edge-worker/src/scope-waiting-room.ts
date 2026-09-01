@@ -197,11 +197,14 @@ export class ScopeWaitingRoom {
 			// an idempotency guard there on an assumed race and it did not
 			// help, because the fix was to ADOPT what Linear already had
 			// rather than to trust our own map.
-			this.issueId = await this.findExistingRoom(config);
+			const found = await this.findExistingRoom(config);
+			this.issueId = found?.id;
 			// PON-231: an adopted room may be a closed one from a previous
 			// cycle. Put it back into a working state before writing the list
-			// into it.
-			if (this.issueId) await this.reopenRoom(config);
+			// into it. Only a CLOSED one: the search already knows the state,
+			// and reopening an open room was a states query and a state write
+			// on every boot with a non-empty list.
+			if (found?.closed) await this.reopenRoom(config);
 		}
 
 		if (!this.issueId) {
@@ -226,7 +229,7 @@ export class ScopeWaitingRoom {
 	private async findExistingRoom(config: {
 		linearWorkspaceId: string;
 		teamId: string;
-	}): Promise<string | undefined> {
+	}): Promise<{ id: string; closed: boolean } | undefined> {
 		const data = await this.gql<{
 			team: {
 				issues: {
@@ -265,7 +268,9 @@ export class ScopeWaitingRoom {
 		// Falling through to `undefined` mints a fresh room instead, which is
 		// the honest outcome when every copy has been struck out.
 		const closed = rooms.find((i) => i.state?.type === "completed");
-		return (open ?? closed)?.id;
+		if (open) return { id: open.id, closed: false };
+		if (closed) return { id: closed.id, closed: true };
+		return undefined;
 	}
 
 	/**

@@ -453,6 +453,25 @@ describe("PON-225 — a delivery-owning session feeds the verification gate", ()
 		expect(mirrorInVerification).toHaveBeenCalledWith(CLIENT_ISSUE);
 	});
 
+	it("reject: starts a new run for the hand-over guard, so the rejected summary cannot be re-held", async () => {
+		const { p } = await started();
+		p.holdCompletionForVerification(
+			MIRROR_SESSION,
+			"Done. https://github.com/Ponte-Digital/Acme-Metrics/pull/9",
+			false,
+		);
+		p.sessionRepositories.set(MIRROR_SESSION, repo.id);
+		const before = p.operatorSessions.forClientIssue(CLIENT_ISSUE)?.startedAt;
+		await new Promise((r) => setTimeout(r, 5));
+		await p.handleMirrorAction(
+			action("reject: rewrite the client summary"),
+			CLIENT_ISSUE,
+		);
+		const after = p.operatorSessions.forClientIssue(CLIENT_ISSUE)?.startedAt;
+		expect(after).toBeDefined();
+		expect(after > before).toBe(true);
+	});
+
 	it("reject: continues on the MIRROR session, not the client's thread", async () => {
 		const { p, resumed } = await started();
 		p.holdCompletionForVerification(
