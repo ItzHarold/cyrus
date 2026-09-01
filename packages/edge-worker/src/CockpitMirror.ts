@@ -860,10 +860,17 @@ export class CockpitMirror {
 				existing.tenantWorkspaceId,
 				issueId,
 			);
+			// v3.1: a client issue that is GONE (deleted, or unreadable) is not
+			// a delivery either. `issue_terminal` arrives for a deletion as
+			// well as for Done, and the lookup answers undefined for both a
+			// deleted issue and a failed read; the CKP-11 rule — completed is
+			// the narrow case, never the default — decides the tie.
 			const closeStateId =
 				clientState === "completed"
 					? setup.completedStateId
-					: clientState === "canceled" || DISCARD_REASONS.has(reason)
+					: clientState === "canceled" ||
+							(clientState === undefined && reason === "issue_terminal") ||
+							DISCARD_REASONS.has(reason)
 						? (setup.canceledStateId ?? setup.completedStateId)
 						: setup.completedStateId;
 

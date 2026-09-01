@@ -5,6 +5,7 @@ This changelog documents internal development changes, refactors, tooling update
 ## [Unreleased]
 
 ### Fixed
+- **A restart no longer re-notifies the reviewer.** The "finished this turn" hand-off and the "Ready for review" inbox comment fired again for every held item on every restart, as did the "closed without merging" notice; both are now remembered on the record. Unreadable merge polls are journaled (`merge_poll_unreadable`) instead of returning in silence, and a deleted client issue closes its mirror as canceled, not Done. ([#110](https://github.com/ItzHarold/cyrus/pull/110))
 - **The preview-discovery tests carry their own fixture.** They read a sample repository from a session scratchpad under `/tmp`, which systemd-tmpfiles removes after ten days and which no other checkout has; the fixture now lives under `packages/edge-worker/test/fixtures/`. ([#106](https://github.com/ItzHarold/cyrus/pull/106))
 - **The package test matrix no longer stops at the first failing package.** `pnpm --filter` bails on the first failure by default, so with `packages/claude-runner`'s three standing failures every `test:packages:run` since they appeared skipped `edge-worker` and every package after it, while still reporting the packages before it green. The root test scripts now pass `--no-bail`; a run reports every package. ([#102](https://github.com/ItzHarold/cyrus/pull/102))
 

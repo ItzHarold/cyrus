@@ -7285,7 +7285,13 @@ ${taskSection}`;
 	 */
 	private signOffIntoVerification(issueId: string): void {
 		if (this.verificationSignedOff.has(issueId)) return;
+		// Persisted on the record as well (v3.1): the set is in-memory, and
+		// boot reconcile recomposes every held mirror, so each restart
+		// re-posted the hand-off and the "Ready for review" comment for every
+		// held item — a fresh inbox ping per deploy for work nobody touched.
+		if (!this.verificationGate.markSignedOff(issueId)) return;
 		this.verificationSignedOff.add(issueId);
+		void this.persistScopeApprovals("verification_signed_off");
 		// PON-228: work started from the mirror ran on its OWN thread, and
 		// that is the thread the reviewer is standing in — so the sign-off
 		// belongs there, not on the narration thread beside it.
@@ -8550,17 +8556,28 @@ ${taskSection}`;
 		if (!record || !pr || record.mergedAt) return;
 		try {
 			const token = await this.mintGitHubTokenForRepo(pr.owner, pr.repo);
-			if (!token) return;
+			if (!token) {
+				this.noteMergePollUnreadable(issueId, record, pr, "no_github_token");
+				return;
+			}
 			const facts = await this.fetchPullRequestFacts(token, pr);
-			if (!facts) return;
+			if (!facts) {
+				this.noteMergePollUnreadable(issueId, record, pr, "pr_unreadable");
+				return;
+			}
 
 			if (!facts.merged) {
-				if (facts.closed && !this.mergeCloseNotified.has(issueId)) {
-					this.mergeCloseNotified.add(issueId);
+				// Once per pull request, across restarts: the guard used to be
+				// an in-memory set, so every deploy re-posted the notice.
+				if (
+					facts.closed &&
+					this.verificationGate.markClosedUnmergedNoticed(issueId)
+				) {
 					this.logger.event("client_closed_pr_unmerged", {
 						issueId,
 						issueIdentifier: record.issueIdentifier,
 					});
+					await this.persistScopeApprovals("client_closed_pr_unmerged");
 					void this.cockpitMirror.commentOnMirror(
 						issueId,
 						`**The client closed the pull request without merging.** That is not a completion — it usually means they do not want this as it stands. Nothing has been changed on their behalf; it is waiting on you.`,
@@ -8579,15 +8596,59 @@ ${taskSection}`;
 				mergeCommitSha: facts.mergeCommitSha,
 			});
 			await this.persistScopeApprovals("client_merged");
-			await this.closeOutMergedWork(issueId, record);
+			const closedOut = await this.closeOutMergedWork(issueId, record);
+			if (!closedOut) {
+				// The close-out is the one message this cycle owes the client.
+				// Do not complete their issue in silence: forget the merge mark
+				// so the next tick tries again, and tell the reviewer once.
+				this.verificationGate.unmarkMerged(issueId);
+				await this.persistScopeApprovals("client_merge_closeout_failed");
+				this.logger.event("client_merge_closeout_failed", {
+					issueId,
+					issueIdentifier: record.issueIdentifier,
+					pr: `${pr.owner}/${pr.repo}#${pr.number}`,
+				});
+				if (!this.closeOutFailureNoticed.has(issueId)) {
+					this.closeOutFailureNoticed.add(issueId);
+					void this.cockpitMirror.commentOnMirror(
+						issueId,
+						`**The client merged, but their close-out did not post.** Their issue stays open until it does; I retry every few minutes. If it keeps failing, the journal has the reason.`,
+					);
+				}
+			}
 		} catch (error) {
-			// Unknown, not "no". The next tick asks again.
-			this.logger.debug(`Merge check failed for ${issueId}: ${String(error)}`);
+			// Unknown, not "no". The next tick asks again — but say so: this
+			// used to log at debug, which production journals do not carry.
+			this.logger.warn(`Merge check failed for ${issueId}: ${String(error)}`);
 		}
 	}
 
-	/** Reported once per issue, not once per tick. */
-	private mergeCloseNotified = new Set<string>();
+	/** A failed close-out is announced to the reviewer once, not per tick. */
+	private closeOutFailureNoticed = new Set<string>();
+	/** One journal line per issue and reason, not one per tick. */
+	private mergePollUnreadableNoted = new Set<string>();
+
+	/**
+	 * A merge poll that cannot read the pull request used to return in
+	 * silence — no journal line, no counter — so a repository we lost access
+	 * to sat in "In client review" forever under a "watching" promise.
+	 */
+	private noteMergePollUnreadable(
+		issueId: string,
+		record: { issueIdentifier?: string },
+		pr: { owner: string; repo: string; number: number },
+		reason: "no_github_token" | "pr_unreadable",
+	): void {
+		const key = `${issueId}:${reason}`;
+		if (this.mergePollUnreadableNoted.has(key)) return;
+		this.mergePollUnreadableNoted.add(key);
+		this.logger.event("merge_poll_unreadable", {
+			issueId,
+			issueIdentifier: record.issueIdentifier,
+			pr: `${pr.owner}/${pr.repo}#${pr.number}`,
+			reason,
+		});
+	}
 
 	/**
 	 * Issues WE moved to Done after the client merged (PON-235).
@@ -8615,14 +8676,18 @@ ${taskSection}`;
 			workspaceId: string;
 			issueIdentifier?: string;
 		},
-	): Promise<void> {
+	): Promise<boolean> {
 		try {
 			await this.agentSessionManager.postResponseActivityStrict(
 				record.sessionId,
 				CLIENT_MESSAGES.mergedCloseOut(),
 			);
 		} catch (error) {
+			// Not "carry on": the caller retries the whole close-out next tick
+			// and tells the reviewer. Completing the client's issue without
+			// the one message it owes them was the previous behaviour.
 			this.logger.error("Could not post the merge close-out:", error);
+			return false;
 		}
 		void this.cockpitMirror.commentOnMirror(
 			issueId,
@@ -8631,6 +8696,7 @@ ${taskSection}`;
 		// The mirror closes honestly against the client issue's own state
 		// (PON-209), so move the client issue first and let that path do it.
 		await this.moveIssueToCompletedState(issueId, record.workspaceId);
+		return true;
 	}
 
 	/**

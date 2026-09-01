@@ -157,6 +157,34 @@ export class VerificationGate {
 		return true;
 	}
 
+	/** Once per held turn, across restarts. True on the real transition only. */
+	markSignedOff(issueId: string): boolean {
+		const record = this.records.get(issueId);
+		if (!record || record.state !== "in-verification" || record.signedOffAt)
+			return false;
+		record.signedOffAt = new Date().toISOString();
+		return true;
+	}
+
+	/** Once per watched pull request, across restarts. */
+	markClosedUnmergedNoticed(issueId: string): boolean {
+		const record = this.records.get(issueId);
+		if (!record || record.closedUnmergedNoticedAt) return false;
+		record.closedUnmergedNoticedAt = new Date().toISOString();
+		return true;
+	}
+
+	/**
+	 * The merge was seen but the client's close-out did not post: forget the
+	 * mark so the next tick tries the whole close-out again (v3.1).
+	 */
+	unmarkMerged(issueId: string): void {
+		const record = this.records.get(issueId);
+		if (!record) return;
+		delete record.mergedAt;
+		delete record.mergeCommitSha;
+	}
+
 	listRework(): Array<{ issueId: string } & VerificationRecord> {
 		const out: Array<{ issueId: string } & VerificationRecord> = [];
 		for (const [issueId, record] of this.records) {

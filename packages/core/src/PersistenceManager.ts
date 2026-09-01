@@ -175,6 +175,14 @@ export interface SerializedVerificationRecord {
 	state: "in-verification" | "delivered" | "rework";
 	/** When the client confirmed a change to delivered work (v3.1). */
 	reworkRequestedAt?: string;
+	/**
+	 * When the reviewer was told this turn is finished (v3.1). Persisted:
+	 * the in-memory guard alone re-posted the hand-off and the "Ready for
+	 * review" comment on every restart, for every held item.
+	 */
+	signedOffAt?: string;
+	/** When the reviewer was told the client closed the PR unmerged (v3.1). */
+	closedUnmergedNoticedAt?: string;
 	/** When the work FIRST completed — the escalation ladder clock. */
 	completedAt: string;
 	workspaceId: string;
