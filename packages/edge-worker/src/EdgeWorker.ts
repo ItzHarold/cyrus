@@ -8821,7 +8821,12 @@ ${taskSection}`;
 			});
 			return {
 				ok: false,
-				say: `This client already has work in flight — ${held} — and they have ${wip.limit === 1 ? "one lane" : `${wip.limit} lanes`}. Nothing has been started here; it stays queued until that reaches Done or is cancelled.`,
+				// Same rule as the other two refusals: an unattributed
+				// delegation is machinery, and a refusal on every mirror
+				// birth is noise on the one surface that must stay readable.
+				say: action.actorId
+					? `This client already has work in flight — ${held} — and they have ${wip.limit === 1 ? "one lane" : `${wip.limit} lanes`}. Nothing has been started here; it stays queued until that reaches Done or is cancelled.`
+					: undefined,
 			};
 		}
 
@@ -9201,6 +9206,11 @@ ${taskSection}`;
 			startedAt: existing?.startedAt ?? new Date().toISOString(),
 			...(action.actorId ? { reviewerId: action.actorId } : {}),
 			operatorHoldsBranch: false,
+			// A plain instruction on a mirror-started run must not turn it
+			// back into a client-thread delivery: this literal used to drop
+			// the flag, so after one "make the header bigger" the next
+			// `reject:` regenerated on the CLIENT's thread.
+			...(existing?.ownsDelivery ? { ownsDelivery: true } : {}),
 		};
 		// Registered BEFORE the resume: every exemption (quietness, the scope
 		// gate, the verification gate) keys on this, and they are consulted
@@ -9917,6 +9927,8 @@ ${taskSection}`;
 			// in-verification instead of closing. Idempotent with the
 			// interceptor-side transition (runner-already-stopped ordering).
 			this.mirrorInVerification(endedIssueId);
+		} else if (endedIssueId && operatorLink?.ownsDelivery) {
+			this.reparkInterruptedMirrorRun(endedIssueId, operatorLink, reason);
 		} else if (
 			endedIssueId &&
 			this.shouldCloseCockpitMirror(sessionId, endedIssueId)
@@ -9931,6 +9943,50 @@ ${taskSection}`;
 		const workspaceId = this.laneManager.workspaceOf(sessionId);
 		if (!workspaceId || !this.laneManager.isActive(sessionId)) return;
 		this.releaseLaneAndContinue(workspaceId, sessionId, reason);
+	}
+
+	/**
+	 * A mirror-owned run ended without handing anything over (v3.1).
+	 *
+	 * Stopped by the reviewer, crashed, or killed with the process: that is
+	 * neither finished work nor abandoned work. It used to fall through to
+	 * shouldCloseCockpitMirror, which had no reason to say no, and the
+	 * mirror closed as Done — "stop_signal" is not a discard reason — with
+	 * the client's approved work half-built on a branch nobody was pointed
+	 * at, and the reviewer's next delegation landing on a closed issue.
+	 *
+	 * Park it again instead. The same door a re-delegation uses
+	 * (startWorkFromMirror) picks it up on the same worktree and branch.
+	 */
+	private reparkInterruptedMirrorRun(
+		issueId: string,
+		link: OperatorSessionLink,
+		reason: string,
+	): void {
+		const reparked = this.scopeApprovals.markImplementationInterrupted(issueId);
+		this.logger.event("mirror_run_interrupted", {
+			clientIssueId: issueId,
+			issueIdentifier: link.clientIssueIdentifier,
+			mirrorSessionId: link.mirrorSessionId,
+			reason,
+			reparked,
+		});
+		if (reparked) void this.persistScopeApprovals("mirror_run_interrupted");
+		void this.cockpitMirror.upsert(
+			{ issueId, issueIdentifier: link.clientIssueIdentifier },
+			link.clientWorkspaceId,
+			"queued",
+		);
+		const why =
+			reason === "stop_signal"
+				? "it was stopped"
+				: reason === "runner_error"
+					? "the runner failed"
+					: "it ended without handing anything over";
+		this.endNarrationTurn(
+			issueId,
+			`**Stopped before it was finished — your move.** The run ended (${why}). Whatever it pushed is still on the branch; delegate this mirror to me again and I'll pick it up from there. Nothing has gone to the client.`,
+		);
 	}
 
 	/**
@@ -11089,23 +11145,9 @@ ${taskSection}`;
 				return;
 			}
 		}
-		const isTextStopRequest = /^\s*stop(\s+session|\s+working)?[\s.!?]*$/i.test(
-			activityBody,
-		);
-
-		// Branch 1: Handle stop signal (checked FIRST, before any routing work)
-		// Per CLAUDE.md: "an agentSession MUST already exist" for stop signals
-		// IMPORTANT: Stop signals do NOT require repository lookup
-		if (signal === "stop" || isTextStopRequest) {
-			// A queued session has no runner — a stop removes it from the lane
-			// queue instead (PON-112).
-			if (this.laneManager.isQueued(agentSessionId)) {
-				await this.handleQueuedSessionStop(webhook);
-				return;
-			}
-			await this.handleStopSignal(webhook);
-			return;
-		}
+		// (A second stop branch used to sit here. It became unreachable when
+		// the stop moved above the mirror intercept in #99 — same locals, same
+		// regex — and is gone.)
 
 		// Branch 1.5: Handle re-prompt for parked (blocked-by) sessions
 		// When a user re-prompts and the session is parked, re-check blocking status.

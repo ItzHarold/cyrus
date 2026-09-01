@@ -609,6 +609,28 @@ describe("operator session — the operator takes the branch", () => {
 		expect(prompt).toContain("handed the branch back");
 	});
 
+	it("a plain instruction on a mirror-started run keeps ownsDelivery", async () => {
+		// runOperatorIteration re-registers the link from a fresh literal;
+		// it used to omit the flag, so after one "make the header bigger"
+		// the next `reject:` regenerated on the CLIENT's thread.
+		const { p } = setup();
+		p.operatorSessions.register({
+			mirrorSessionId: MIRROR_SESSION,
+			mirrorIssueId: MIRROR_ISSUE,
+			clientSessionId: CLIENT_SESSION,
+			clientIssueId: CLIENT_ISSUE,
+			clientWorkspaceId: CLIENT_WS,
+			cockpitWorkspaceId: COCKPIT_WS,
+			repositoryId: repo.id,
+			startedAt: new Date().toISOString(),
+			ownsDelivery: true,
+		});
+		await p.handleMirrorAction(action("make the header bigger"), CLIENT_ISSUE);
+		expect(p.operatorSessions.forClientIssue(CLIENT_ISSUE)?.ownsDelivery).toBe(
+			true,
+		);
+	});
+
 	it("still delivers on approve after the operator committed", async () => {
 		const { p } = setup();
 		p.deliverVerifiedWork = vi.fn().mockResolvedValue("Delivered.");
