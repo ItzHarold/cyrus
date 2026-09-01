@@ -8,12 +8,12 @@
 	"scripts": {
 		"build": "pnpm -r --filter='!@cyrus/electron' build",
 		"dev": "pnpm -r --parallel dev",
-		"test": "pnpm -r test",
+		"test": "pnpm -r --no-bail test",
 		"lint": "biome check",
 		"format": "biome check --write --unsafe",
-		"test:packages": "pnpm --filter './packages/*' test",
-		"test:packages:run": "pnpm --filter './packages/*' test:run",
-		"test:apps": "pnpm --filter './apps/*' test",
+		"test:packages": "pnpm --no-bail --filter './packages/*' test",
+		"test:packages:run": "pnpm --no-bail --filter './packages/*' test:run",
+		"test:apps": "pnpm --no-bail --filter './apps/*' test",
 		"typecheck": "pnpm -r typecheck",
 		"prepare": "husky"
 	},

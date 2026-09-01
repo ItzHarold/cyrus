@@ -4,6 +4,9 @@ This changelog documents internal development changes, refactors, tooling update
 
 ## [Unreleased]
 
+### Fixed
+- **The package test matrix no longer stops at the first failing package.** `pnpm --filter` bails on the first failure by default, so with `packages/claude-runner`'s three standing failures every `test:packages:run` since they appeared skipped `edge-worker` and every package after it, while still reporting the packages before it green. The root test scripts now pass `--no-bail`; a run reports every package.
+
 ### Added
 - Delegating a queued cockpit mirror now starts the client's implementation run on the mirror itself: the client's repository and worktree, the cockpit's thread, and a draft pull request on the client's repo. The run's closing summary is held by the verification gate exactly as before, so `approve:` still delivers it. Starting is reviewer-gated and takes the client's lane, refusing with the reason when that client is already building. ([PON-225](https://linear.app/ponte-digital/issue/PON-225))
 
