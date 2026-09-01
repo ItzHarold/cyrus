@@ -13601,6 +13601,50 @@ ${input.userComment}
 				// not been asked to do yet. persistScopeApprovals refreshes the
 				// waiting room, which is where a stalled conversation surfaces.
 				await this.persistScopeApprovals("scope_confirm_posted");
+			} else if (
+				gateQuestion &&
+				gateIssueId &&
+				this.scopeGatePendingForIssue(organizationId, gateIssueId)
+			) {
+				// An item the operator cannot see is the precise failure the
+				// waiting room exists to prevent (FRO-65, live).
+				//
+				// Both registers recognise by EXACT canonical form — the scope
+				// record needs the `Approve scope` option, needs-info needs the
+				// `Missing info` header — and needs-info is additionally scoped
+				// to gate-closed issues. So a pre-approval question in neither
+				// form lands in neither register: the session sits at
+				// `awaitingInput`, the lane correctly releases, nothing is
+				// blocked, and the conversation is simply invisible.
+				//
+				// That is not a rare shape. FRO-65 asked a good question —
+				// the repository had no tests at all, so it asked what the
+				// client actually wanted rather than proposing scope for a
+				// false premise. Exactness is right for DECISIONS (an approval
+				// must never be inferred from prose); it is wrong as the only
+				// route onto a list whose whole job is "somebody is waiting".
+				//
+				// `recordProposed` is deliberately the mechanism rather than a
+				// new store: it already keeps the earliest `proposedAt`, it is
+				// idempotent, and the SLA clock is `approvedAt`, which this
+				// does not touch. A later real scope proposal on the same
+				// issue refines this record rather than replacing it.
+				const session =
+					this.agentSessionManager.getSession(linearAgentSessionId);
+				const already = this.scopeApprovals.get(gateIssueId);
+				this.scopeApprovals.recordProposed(gateIssueId, {
+					workspaceId: organizationId,
+					issueIdentifier: session?.issueContext?.issueIdentifier,
+				});
+				if (!already) {
+					this.logger.event("scope_conversation_registered", {
+						issueId: gateIssueId,
+						issueIdentifier: session?.issueContext?.issueIdentifier,
+						workspaceId: organizationId,
+						sessionId: linearAgentSessionId,
+					});
+				}
+				await this.persistScopeApprovals("scope_conversation_registered");
 			}
 			// PON-172: a needs-info ask gets its own bookkeeping — a distinct
 			// release reason, a cockpit state, and a persisted record so the

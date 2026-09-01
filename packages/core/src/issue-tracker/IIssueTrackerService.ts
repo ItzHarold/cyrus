@@ -139,7 +139,13 @@ import type {
  * erroring. Implementations validate before sending.
  */
 export interface AgentSessionPlanStep {
-	label: string;
+	/**
+	 * `content`, not `label`: the platform's own field name for a plan step.
+	 * The API validated every update since PON-116 as "expected array,
+	 * received object" and the checklist never rendered — see
+	 * LinearIssueTrackerService.updateAgentSession.
+	 */
+	content: string;
 	status: "pending" | "inProgress" | "completed";
 }
 
