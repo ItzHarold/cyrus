@@ -972,6 +972,11 @@ export class CockpitMirror {
 			issue: CockpitIssueRef;
 			tenantWorkspaceId: string;
 		}>;
+		/** Waiting on the client mid-work (v3.1): keeps its mirror on restart. */
+		needsInfo?: Array<{
+			issue: CockpitIssueRef;
+			tenantWorkspaceId: string;
+		}>;
 	}): Promise<void> {
 		try {
 			if (!this.deps.getConfig()) return;
@@ -1049,6 +1054,11 @@ export class CockpitMirror {
 				if (terminal.has(entry.issue.issueId)) continue;
 				liveIds.add(entry.issue.issueId);
 				await this.upsert(entry.issue, entry.tenantWorkspaceId, "rework");
+			}
+			for (const entry of live.needsInfo ?? []) {
+				if (terminal.has(entry.issue.issueId)) continue;
+				liveIds.add(entry.issue.issueId);
+				await this.upsert(entry.issue, entry.tenantWorkspaceId, "needs-info");
 			}
 			for (const issueId of [...this.mirrors.keys()]) {
 				if (!liveIds.has(issueId)) {
