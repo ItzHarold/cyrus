@@ -235,6 +235,11 @@ interface LaneStartOptions {
 import { randomUUID } from "node:crypto";
 import { McpConfigService } from "./McpConfigService.js";
 import { PromptBuilder } from "./PromptBuilder.js";
+import {
+	opaquePreviewUrl,
+	PreviewLinkStore,
+	publicBaseUrlFrom,
+} from "./preview-links.js";
 import type {
 	IssueContextResult,
 	PromptAssembly,
@@ -354,6 +359,9 @@ export class EdgeWorker extends EventEmitter {
 	/** Per-issue scope-approval records for the scope-confirm gate (PON-150) */
 	private scopeApprovals: ScopeApprovalStore = new ScopeApprovalStore();
 	private needsInfo: NeedsInfoStore = new NeedsInfoStore();
+	/** Opaque preview links: the bypass value never leaves the box (v3.1). */
+	private previewLinks: PreviewLinkStore = new PreviewLinkStore();
+	private previewLinkDirectWarned = false;
 	/** Operator-cockpit mirror (PON-151) — derived view, write-only from here */
 	private cockpitMirror!: CockpitMirror;
 	/**
@@ -1235,6 +1243,7 @@ export class EdgeWorker extends EventEmitter {
 		await this.registerCyrusToolsMcpEndpoint();
 		// 4. Register /status endpoint for process activity monitoring
 		this.registerStatusEndpoint();
+		this.registerPreviewRedirectEndpoint();
 
 		// 5. Register /version endpoint for CLI version info
 		this.registerVersionEndpoint();
@@ -1501,6 +1510,85 @@ export class EdgeWorker extends EventEmitter {
 
 		this.logger.info("✅ Status endpoint registered");
 		this.logger.info("   Route: GET /status");
+	}
+
+	/**
+	 * `GET /preview/:id` — the one public route that resolves an opaque
+	 * preview link (v3.1). Unauthenticated by design: the id is the secret
+	 * (128 random bits), the response is a redirect with no body, nothing is
+	 * cached, and an unknown id says so in one plain sentence.
+	 */
+	private registerPreviewRedirectEndpoint(): void {
+		const fastify = this.sharedApplicationServer.getFastifyInstance();
+		fastify.get<{ Params: { id: string } }>(
+			"/preview/:id",
+			async (request, reply) => {
+				const outcome = this.previewRedirectFor(request.params.id);
+				reply.header("Cache-Control", "no-store");
+				if (outcome.status !== 302) {
+					return reply
+						.status(404)
+						.type("text/plain")
+						.send("This preview link is no longer valid.");
+				}
+				return reply.redirect(outcome.location, 302);
+			},
+		);
+		this.logger.info("✅ Preview redirect endpoint registered");
+		this.logger.info("   Route: GET /preview/:id");
+	}
+
+	/** Resolve an opaque preview id; the bypass value is applied now, from config. */
+	private previewRedirectFor(
+		id: string,
+	): { status: 302; location: string } | { status: 404 } {
+		const record = this.previewLinks.resolve(id);
+		if (!record) {
+			this.logger.event("preview_link_unknown", { id: id.slice(0, 8) });
+			return { status: 404 };
+		}
+		this.logger.event("preview_link_resolved", {
+			id: id.slice(0, 8),
+			issueId: record.issueId,
+		});
+		return {
+			status: 302,
+			location: withPreviewBypass(
+				record.target,
+				this.previewBypassTokenFor(record.workspaceId),
+			),
+		};
+	}
+
+	/**
+	 * The link to publish for a preview: opaque when the box has a public
+	 * base URL, the direct (tokenized) link otherwise — said once in the
+	 * journal, because a link that carries the client's credential is the
+	 * exposure this exists to end.
+	 */
+	private opaquePreviewLink(
+		target: string,
+		issueId: string,
+		workspaceId: string | undefined,
+	): string {
+		const base = publicBaseUrlFrom(process.env.CYRUS_BASE_URL);
+		if (!base || !workspaceId) {
+			if (!this.previewLinkDirectWarned) {
+				this.previewLinkDirectWarned = true;
+				this.logger.warn(
+					"CYRUS_BASE_URL is not set: preview links are published with the client's bypass value inside them",
+				);
+			}
+			return target;
+		}
+		const id = this.previewLinks.mint(target, { issueId, workspaceId });
+		this.logger.event("preview_link_minted", {
+			issueId,
+			workspaceId,
+			id: id.slice(0, 8),
+		});
+		void this.savePersistedState();
+		return opaquePreviewUrl(base, id);
 	}
 
 	/**
@@ -4226,6 +4314,14 @@ ${taskSection}`;
 
 		// Cockpit (PON-151): a terminal client issue closes its mirror.
 		void this.cockpitMirror.close(issueId, "issue_terminal");
+		// The issue is over: its preview links stop opening (v3.1).
+		const revokedLinks = this.previewLinks.revokeForIssue(issueId);
+		if (revokedLinks > 0) {
+			this.logger.event("preview_links_revoked", {
+				issueId,
+				count: revokedLinks,
+			});
+		}
 
 		// Verification gate (PON-152): a terminal issue's record is done.
 		if (this.verificationGate.remove(issueId)) {
@@ -7212,6 +7308,7 @@ ${taskSection}`;
 	private bypassPreviewLinksIn(
 		summary: string,
 		workspaceId: string | undefined,
+		issueId: string,
 	): string {
 		const bypass = this.previewBypassTokenFor(workspaceId);
 		if (!bypass) return summary;
@@ -7222,7 +7319,14 @@ ${taskSection}`;
 				// rewritten whole hands the client a 404.
 				const trailing = /[.,;:!?)]+$/.exec(url)?.[0] ?? "";
 				const bare = trailing ? url.slice(0, -trailing.length) : url;
-				return withPreviewBypass(bare, bypass) + trailing;
+				// Opaque when the box can resolve it; the credential stays here.
+				return (
+					this.opaquePreviewLink(
+						withPreviewBypass(bare, bypass),
+						issueId,
+						workspaceId,
+					) + trailing
+				);
 			},
 		);
 	}
@@ -7494,7 +7598,16 @@ ${taskSection}`;
 					await this.issueTrackers
 						.get(cockpitWs)
 						?.updateAgentSession?.(link.mirrorSessionId, {
-							addedExternalUrls: [{ url: previewForSession, label: "Preview" }],
+							addedExternalUrls: [
+								{
+									url: this.opaquePreviewLink(
+										previewForSession,
+										issueId,
+										link.clientWorkspaceId,
+									),
+									label: "Preview",
+								},
+							],
 						});
 				} catch (error) {
 					this.logger.debug(
@@ -8223,7 +8336,10 @@ ${taskSection}`;
 		// — preview, merge path, and the operator's notes when present.
 		// PON-213: the client's copy is the one that has to open without a
 		// Vercel account — that is the whole point of holding the token.
-		const previewUrl = await this.clientPreviewUrl(record, originRef);
+		const resolvedPreview = await this.clientPreviewUrl(record, originRef);
+		const previewUrl = resolvedPreview
+			? this.opaquePreviewLink(resolvedPreview, issueId, record.workspaceId)
+			: undefined;
 		// PON-233: who did this, and who checked it. Derived from the mirror's
 		// assignee — the reviewer's own claim, which the mirror never writes —
 		// so it scales to more reviewers without another source of truth.
@@ -8241,7 +8357,7 @@ ${taskSection}`;
 			this.testAccountsLine(record.workspaceId),
 		);
 		const clientSummary = [
-			this.bypassPreviewLinksIn(record.summary, record.workspaceId),
+			this.bypassPreviewLinksIn(record.summary, record.workspaceId, issueId),
 			whatNext,
 			footer,
 		]
@@ -14341,6 +14457,7 @@ ${input.userComment}
 			cockpitMirrors: this.cockpitMirror.serialize(),
 			pendingDeliveries: this.verificationGate.serialize(),
 			heldClientLinks: this.agentSessionManager.serializeHeldLinks?.() ?? {},
+			previewLinks: this.previewLinks.serialize(),
 			mentionSessionIds: [...this.mentionSessionIds],
 			operatorSessions: this.operatorSessions.serialize(),
 		};
@@ -14441,6 +14558,7 @@ ${input.userComment}
 		// are one fact split across two objects, and restoring only half of
 		// it loses the links on the next approval.
 		this.agentSessionManager.restoreHeldLinks?.(state.heldClientLinks);
+		this.previewLinks.restore(state.previewLinks);
 
 		// Restore mention markers (PON-151/152): a mention session completing
 		// after a restart must still post conversationally, never be held.

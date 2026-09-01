@@ -93,6 +93,11 @@ export interface SerializableEdgeWorkerState {
 	 * nothing to click, and nothing anywhere would say why.
 	 */
 	heldClientLinks?: Record<string, Array<{ url: string; label: string }>>;
+	/**
+	 * Opaque preview links (v3.1): id → bare preview target. The bypass value
+	 * is applied at redirect time from the tenant's config, never stored here.
+	 */
+	previewLinks?: Record<string, SerializedPreviewLink>;
 	// Mention-session markers (v4.5, PON-151/152). A mention session
 	// completing after a restart must still post conversationally, never be
 	// held for verification or close a delegation's mirror.
@@ -166,6 +171,14 @@ export interface SerializedOperatorSession {
 /**
  * One completed-but-unapproved piece of work (PON-152).
  */
+export interface SerializedPreviewLink {
+	/** The preview URL WITHOUT its bypass parameters. */
+	target: string;
+	issueId: string;
+	workspaceId: string;
+	createdAt: string;
+}
+
 export interface SerializedVerificationRecord {
 	/**
 	 * `rework` (v3.1): the client confirmed a change to delivered work. The
