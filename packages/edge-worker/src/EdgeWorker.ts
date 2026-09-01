@@ -195,6 +195,7 @@ import {
 	OPERATOR_GIT_DENY,
 	type OperatorSessionLink,
 	OperatorSessionRegistry,
+	resolveMirrorActor,
 } from "./operator-session.js";
 import {
 	fetchPreviewDeployment,
@@ -5240,12 +5241,17 @@ ${taskSection}`;
 		if (issueId) {
 			const clientIssueId = this.cockpitMirror.clientIssueIdFor(issueId);
 			if (clientIssueId) {
+				// PON-237: same resolution as the prompted path. A mention
+				// normally sets `creator`, but the mentioning comment carries
+				// the person too — one helper so the two entrances to the same
+				// reviewer check can never disagree about who is asking.
+				const actor = resolveMirrorActor(webhook);
 				await this.handleMirrorAction(
 					{
 						organizationId: workspaceId,
 						mirrorSessionId: sessionId,
-						actorId: webhook.agentSession.creator?.id,
-						actorName: webhook.agentSession.creator?.name,
+						actorId: actor.id,
+						actorName: actor.name,
 						rawBody: webhook.agentSession.comment?.body ?? "",
 					},
 					clientIssueId,
@@ -7817,6 +7823,30 @@ ${taskSection}`;
 		if (record.state === "delivered") {
 			return `Already delivered at ${record.deliveredAt}.`;
 		}
+		// PON-237: the state guard above catches a REPLAYED approve, but two
+		// approves arriving together would both pass it — the record is not
+		// marked delivered until after the post. A client receiving their
+		// delivery twice is the kind of thing that only ever happens in front
+		// of them, so hold the issue for the length of one delivery.
+		if (this.deliveriesInFlight.has(issueId)) {
+			return "A delivery for this issue is already going out — nothing sent twice.";
+		}
+		this.deliveriesInFlight.add(issueId);
+		try {
+			return await this.performDelivery(issueId, notes, record);
+		} finally {
+			this.deliveriesInFlight.delete(issueId);
+		}
+	}
+
+	/** Issues with a delivery mid-flight (PON-237). */
+	private deliveriesInFlight = new Set<string>();
+
+	private async performDelivery(
+		issueId: string,
+		notes: string | undefined,
+		record: VerificationRecord,
+	): Promise<string> {
 		// PON-233: the mirror session that did the work, when there is one.
 		// It decides where the sign-off goes and who signed the delivery.
 		const link = this.operatorSessions.forClientIssue(issueId);
@@ -9177,14 +9207,23 @@ ${taskSection}`;
 				return;
 			}
 			if (!action.actorId || !reviewers.includes(action.actorId)) {
+				// PON-237: two different failures, and telling them apart is
+				// the whole point. "You are not a reviewer" said to the actual
+				// reviewer — because attribution was missing, not because they
+				// lacked standing — sends them looking for a permissions
+				// problem that does not exist. Say which one happened.
+				const unattributed = !action.actorId;
 				this.logger.event("verification_action_refused", {
 					clientIssueId,
 					actorId: action.actorId,
 					actorName: action.actorName,
 					intent: intent.kind,
+					reason: unattributed ? "no_actor" : "not_a_reviewer",
 				});
 				await reply(
-					"Only a configured reviewer can release work to the client. You can still work on it here — say what you want changed.",
+					unattributed
+						? "I couldn't verify who sent that, so I haven't released anything — this is about attribution, not about you. Send it again from the mirror's own thread; if it keeps happening, say so and I'll look at why the actor is missing."
+						: "Only a configured reviewer can release work to the client. You can still work on it here — say what you want changed.",
 				);
 				return;
 			}
@@ -10836,12 +10875,16 @@ ${taskSection}`;
 				mirrorIssueIdForPrompt,
 			);
 			if (mirrorClientIssueId) {
+				// PON-237: the ACTIVITY carries who typed it; the session's
+				// `creator` is unset by design on the very threads a reviewer
+				// works in. See resolveMirrorActor.
+				const actor = resolveMirrorActor(webhook);
 				await this.handleMirrorAction(
 					{
 						organizationId: webhook.organizationId,
 						mirrorSessionId: agentSessionId,
-						actorId: webhook.agentSession.creator?.id,
-						actorName: webhook.agentSession.creator?.name,
+						actorId: actor.id,
+						actorName: actor.name,
 						rawBody: activityBody,
 					},
 					mirrorClientIssueId,
