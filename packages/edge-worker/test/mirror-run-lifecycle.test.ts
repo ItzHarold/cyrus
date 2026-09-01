@@ -292,3 +292,33 @@ describe("the WIP refusal", () => {
 		expect(spoken.say).toMatch(/work in flight/);
 	});
 });
+
+describe("the delivery signature", () => {
+	it("names the mirror's assignee, and nobody else", async () => {
+		const { p } = setup();
+		p.issueTrackers.set(COCKPIT_WS, {
+			createAgentActivity: vi.fn(async () => ({ success: true })),
+			fetchUser: vi.fn(async (id: string) =>
+				id === HAROLD ? { displayName: "Harold Ponte da Costa" } : undefined,
+			),
+		});
+		const link = p.operatorSessions.get(MIRROR_SESSION);
+		expect(await p.deliverySignature(CLIENT_ISSUE, link)).toBe(
+			"Implemented by Ponte Digital · Reviewed by Harold Ponte da Costa",
+		);
+	});
+
+	it("omits the line rather than naming the last person who typed", async () => {
+		const { p } = setup();
+		p.cockpitMirror.assigneeIdFor = vi.fn().mockResolvedValue(undefined);
+		p.issueTrackers.set(COCKPIT_WS, {
+			createAgentActivity: vi.fn(async () => ({ success: true })),
+			fetchUser: vi.fn(async () => ({ displayName: "Somebody Else" })),
+		});
+		const link = {
+			...p.operatorSessions.get(MIRROR_SESSION),
+			reviewerId: "user-colleague",
+		};
+		expect(await p.deliverySignature(CLIENT_ISSUE, link)).toBeUndefined();
+	});
+});

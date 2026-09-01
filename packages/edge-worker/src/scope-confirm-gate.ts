@@ -195,7 +195,10 @@ export function interpretCanonicalScopeAnswer(
  * actually posted (PON-142's rule), and the gate itself is only recognised
  * by an exact "Approve scope" option in the first place.
  */
-function splitLabelAndNote(response: string): { head: string; note?: string } {
+export function splitLabelAndNote(response: string): {
+	head: string;
+	note?: string;
+} {
 	const newline = response.indexOf("\n");
 	if (newline === -1) return { head: normalize(response) };
 	const note = response.slice(newline + 1).trim();

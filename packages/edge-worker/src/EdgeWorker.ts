@@ -7217,7 +7217,13 @@ ${taskSection}`;
 		if (!bypass) return summary;
 		return summary.replace(
 			/https?:\/\/[\w][\w.-]*vercel\.app[\w\-./?=&#%]*/gi,
-			(url) => withPreviewBypass(url, bypass),
+			(url) => {
+				// Sentence punctuation after a URL is not part of it: ".../dashboard."
+				// rewritten whole hands the client a 404.
+				const trailing = /[.,;:!?)]+$/.exec(url)?.[0] ?? "";
+				const bare = trailing ? url.slice(0, -trailing.length) : url;
+				return withPreviewBypass(bare, bypass) + trailing;
+			},
 		);
 	}
 
@@ -8221,7 +8227,7 @@ ${taskSection}`;
 		// PON-233: who did this, and who checked it. Derived from the mirror's
 		// assignee — the reviewer's own claim, which the mirror never writes —
 		// so it scales to more reviewers without another source of truth.
-		const signature = await this.deliverySignature(issueId, link);
+		const signature = await this.deliverySignature(issueId);
 		const footer = CLIENT_MESSAGES.deliveryFooter(
 			previewUrl,
 			mergeablePrUrls.join(" · ") || undefined,
@@ -8318,16 +8324,22 @@ ${taskSection}`;
 	 */
 	private async deliverySignature(
 		issueId: string,
-		link?: OperatorSessionLink,
 	): Promise<string | undefined> {
 		const cockpitWs = this.config.cockpit?.linearWorkspaceId;
 		if (!cockpitWs) return undefined;
 		try {
-			const reviewerId =
-				(await this.cockpitMirror.assigneeIdFor(issueId)) ??
-				link?.reviewerId ??
-				this.subscribersForWorkspace(link?.clientWorkspaceId)[0];
-			if (!reviewerId) return undefined;
+			// The assignee, and nothing else. The two fallbacks this had — the
+			// last actor on the thread, then the configured reviewer — could
+			// put a name on a client's thread that never reviewed the work.
+			// No assignee: no signature, and a journal line so it is noticed.
+			const reviewerId = await this.cockpitMirror.assigneeIdFor(issueId);
+			if (!reviewerId) {
+				this.logger.event("delivery_signature_omitted", {
+					issueId,
+					reason: "no_assignee",
+				});
+				return undefined;
+			}
 			const user = await this.issueTrackers
 				.get(cockpitWs)
 				?.fetchUser?.(reviewerId);
@@ -8449,9 +8461,21 @@ ${taskSection}`;
 			return "Rejection NOT recorded — this session can no longer be resumed (session or repository no longer known), and clearing the held summary would lose it with nothing to replace it. The summary is untouched and still deliverable. Prompt the client issue's thread directly to continue.";
 		}
 
-		const record = this.verificationGate.reject(issueId);
-		if (!record) {
-			return "Nothing is awaiting verification on this issue.";
+		// The peek above is the guard: reject() returns the same object, or
+		// nothing under exactly the same condition, and nothing awaits in
+		// between. The second check had been dead since #95.
+		this.verificationGate.reject(issueId);
+		const record = peek;
+		// A rejected regeneration is a new run for the hand-over guard. The
+		// summary being regenerated was recorded during THIS link's life, so
+		// with startedAt unchanged it passed the "recorded during this run"
+		// check and was re-held unchanged whenever the model did not hand a
+		// new one over — the stale artefact the guard exists to stop.
+		if (owning?.ownsDelivery) {
+			this.operatorSessions.register({
+				...owning,
+				startedAt: new Date().toISOString(),
+			});
 		}
 		// PON-221: the work is going back to the agent, so the next time it
 		// reaches review it is a genuinely new turn and says so again.

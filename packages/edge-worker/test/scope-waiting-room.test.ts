@@ -286,6 +286,9 @@ describe("the room itself", () => {
 
 		const writes = calls.filter((c) => c.query.includes("issueUpdate"));
 		expect(writes.every((w) => w.variables.id === "room-open")).toBe(true);
+		// An open room is not reopened: no state write, no states query.
+		expect(writes.some((w) => (w.variables as { s?: string }).s)).toBe(false);
+		expect(calls.some((c) => c.query.includes("states(first:30)"))).toBe(false);
 	});
 
 	it("creates the room OUTSIDE the project, so it is never in the work queue", async () => {

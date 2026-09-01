@@ -101,6 +101,19 @@ describe("no bare login-walled link reaches the client", () => {
 		expect(out).not.toMatch(/vercel\.app\s/);
 	});
 
+	it("keeps sentence punctuation outside the link", () => {
+		// "…/dashboard." rewritten whole hands the client a 404.
+		const p = worker();
+		const out = p.bypassPreviewLinksIn(
+			"It is live at https://acme-3fvg-ponte.vercel.app/dashboard. Enjoy!",
+			WS,
+		);
+		expect(out).toContain(
+			`/dashboard?x-vercel-protection-bypass=${BYPASS}&x-vercel-set-bypass-cookie=true. Enjoy!`,
+		);
+		expect(out).not.toContain("dashboard.?");
+	});
+
 	it("leaves an unconfigured tenant's text exactly as it was", () => {
 		const p = worker();
 		p.config.linearWorkspaces = { [WS]: {} };

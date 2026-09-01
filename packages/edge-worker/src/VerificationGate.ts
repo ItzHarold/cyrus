@@ -42,6 +42,7 @@ export class VerificationGate {
 		},
 	): void {
 		const existing = this.records.get(issueId);
+		const scraped = extractPullRequestUrls(entry.summary);
 		this.records.set(issueId, {
 			state: "in-verification",
 			completedAt:
@@ -61,8 +62,8 @@ export class VerificationGate {
 			// client, and no head for the staleness check to resolve. Carry
 			// the last known set when this summary names none.
 			prUrls:
-				extractPullRequestUrls(entry.summary).length > 0
-					? extractPullRequestUrls(entry.summary)
+				scraped.length > 0
+					? scraped
 					: (existing?.prUrls ?? this.carriedPrUrls.get(issueId) ?? []),
 			// A rework run's hold keeps the merge watch: the pull request the
 			// client was told about is still theirs to merge, at any moment.

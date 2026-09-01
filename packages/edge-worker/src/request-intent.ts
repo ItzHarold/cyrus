@@ -37,6 +37,8 @@
  * exactly, not infer from prose. Recognised by the exact "yes" label, so an
  * unrelated elicitation cannot reopen a delivered piece of work.
  */
+import { splitLabelAndNote } from "./scope-confirm-gate.js";
+
 export const REWORK_YES_LABEL = "Yes, make this change";
 export const REWORK_NO_LABEL = "No, leave it as it is";
 
@@ -59,14 +61,9 @@ export function interpretReworkAnswer(response: string): {
 	confirmed: boolean;
 	note?: string;
 } {
-	const newline = response.indexOf("\n");
-	const head = (newline === -1 ? response : response.slice(0, newline))
-		.trim()
-		.toLowerCase();
-	const note =
-		newline === -1
-			? undefined
-			: response.slice(newline + 1).trim() || undefined;
+	// The same split the scope gate reads a label-plus-note with — one
+	// parser for one platform shape, not two copies to drift apart.
+	const { head, note } = splitLabelAndNote(response);
 	return {
 		confirmed: head === REWORK_YES_LABEL.toLowerCase(),
 		...(note ? { note } : {}),
