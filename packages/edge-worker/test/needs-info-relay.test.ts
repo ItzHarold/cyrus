@@ -432,3 +432,61 @@ describe("the waiting room", () => {
 		);
 	});
 });
+
+describe("a client message while the mirror owns the run (finding G)", () => {
+	function owned() {
+		const ctx = setup();
+		ctx.p.operatorSessions.register({
+			...ctx.p.operatorSessions.get(MIRROR_SESSION),
+			ownsDelivery: true,
+		});
+		return ctx;
+	}
+
+	it("reaches the reviewer, is acknowledged once, and never starts a run on the client's thread", async () => {
+		const { p, clientPosts, cockpitPosts } = owned();
+
+		await p.handleUserPromptedAgentActivity(answer("Any news on this?"));
+
+		expect(p.handleNormalPromptedActivity).not.toHaveBeenCalled();
+		expect(p.startWorkFromMirror).not.toHaveBeenCalled();
+		const relayed = cockpitPosts.find(
+			(a) => a.agentSessionId === MIRROR_SESSION,
+		);
+		expect(relayed.content.body).toContain("Any news on this?");
+		expect(p.cockpitMirror.commentOnMirror).toHaveBeenCalledWith(
+			CLIENT_ISSUE,
+			expect.stringContaining("wrote mid-work"),
+		);
+		const acks = clientPosts.filter((a) => a.content.type === "response");
+		expect(acks).toHaveLength(1);
+		expect(acks[0].content.body).toMatch(/working on this/);
+	});
+
+	it("still holds while the work is under review, not only while it runs", async () => {
+		const { p } = owned();
+		p.verificationGate.recordPending(CLIENT_ISSUE, {
+			workspaceId: CLIENT_WS,
+			sessionId: MIRROR_SESSION,
+			summary: "done https://github.com/o/r/pull/6",
+			isError: false,
+		});
+		await p.handleUserPromptedAgentActivity(answer("Any news?"));
+		expect(p.handleNormalPromptedActivity).not.toHaveBeenCalled();
+	});
+
+	it("after delivery, the client's thread keeps its own conversation", async () => {
+		const { p } = owned();
+		p.verificationGate.recordPending(CLIENT_ISSUE, {
+			workspaceId: CLIENT_WS,
+			sessionId: MIRROR_SESSION,
+			summary: "done https://github.com/o/r/pull/6",
+			isError: false,
+		});
+		p.verificationGate.markDelivered(CLIENT_ISSUE);
+		await p.handleUserPromptedAgentActivity(
+			answer("Why did you do it this way?"),
+		);
+		expect(p.handleNormalPromptedActivity).toHaveBeenCalled();
+	});
+});

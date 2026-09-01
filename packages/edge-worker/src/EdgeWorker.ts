@@ -8892,6 +8892,68 @@ ${taskSection}`;
 	}
 
 	/**
+	 * A client message on their own thread while the mirror owns the run
+	 * (v3.1 finding G). Nothing runs on the client's thread: they get one
+	 * acknowledgement in their language, and their words go to the reviewer
+	 * unchanged — on the mirror thread and in the inbox. Whether and how to
+	 * answer is the reviewer's call (`ask client:`, or the delivery).
+	 */
+	private async relayClientMessageToMirror(
+		webhook: AgentSessionPromptedWebhook,
+		clientIssueId: string,
+		link: OperatorSessionLink,
+	): Promise<void> {
+		const clientSessionId = webhook.agentSession.id;
+		const clientWorkspaceId = webhook.organizationId;
+		const issueIdentifier =
+			webhook.agentSession.issue?.identifier ?? link.clientIssueIdentifier;
+		const body = webhook.agentActivity?.content?.body?.trim() ?? "";
+		const author = resolveMirrorActor(webhook).name;
+		this.logger.event("client_message_relayed_to_mirror", {
+			clientIssueId,
+			issueIdentifier,
+			mirrorSessionId: link.mirrorSessionId,
+			length: body.length,
+		});
+		try {
+			await this.issueTrackers
+				.get(link.cockpitWorkspaceId)
+				?.createAgentActivity({
+					agentSessionId: link.mirrorSessionId,
+					content: {
+						type: "thought",
+						body: `**The client wrote on their thread${author ? ` (${author})` : ""}.** Their words, unchanged:\n\n${body || "(no text)"}\n\nNothing went back to them beyond an acknowledgement. If they need an answer before delivery, \`ask client:\` here or say so.`,
+					},
+				});
+		} catch (error) {
+			this.logger.debug(
+				`Could not relay the client's message to the mirror thread: ${String(error)}`,
+			);
+		}
+		void this.cockpitMirror.commentOnMirror(
+			clientIssueId,
+			`**The client wrote mid-work** on ${issueIdentifier ?? "their issue"} — their words are in the session thread. They have been told we are on it and nothing else.`,
+		);
+		try {
+			await this.issueTrackers.get(clientWorkspaceId)?.createAgentActivity({
+				agentSessionId: clientSessionId,
+				content: {
+					type: "response",
+					body: this.agentSessionManager.sanitizeClientSurfaceText(
+						clientSessionId,
+						"response",
+						"Thanks — noted. We're working on this now and will come back to you here as soon as it's ready to look at.",
+					),
+				},
+			});
+		} catch (error) {
+			this.logger.warn(
+				`Could not acknowledge the client's mid-work message: ${String(error)}`,
+			);
+		}
+	}
+
+	/**
 	 * Reviewer-triggered needs-info, client side (v3.1 P2).
 	 *
 	 * The client's words go to the mirror session unchanged — into the parked
@@ -11482,6 +11544,24 @@ ${taskSection}`;
 				`No issue ID found in prompted webhook ${agentSessionId}`,
 			);
 			return;
+		}
+
+		// v3.1 finding G: while the MIRROR owns the run, the client's own
+		// thread runs nothing. Before this, "any news?" on the client's thread
+		// resumed the client's scoping session as an implementing session in
+		// the same worktree — a second runner on the same branch, talking on
+		// the one thread that must stay quiet, with no rule telling it the
+		// work was happening elsewhere. The words go to the reviewer instead.
+		const owningLink = this.operatorSessions.forClientIssue(issueId);
+		if (
+			owningLink?.ownsDelivery &&
+			agentSessionId !== owningLink.mirrorSessionId
+		) {
+			const held = this.verificationGate.get(issueId);
+			if (!held || held.state !== "delivered") {
+				await this.relayClientMessageToMirror(webhook, issueId, owningLink);
+				return;
+			}
 		}
 
 		// PON-112: lane admission for resumes. "At most one active session per
