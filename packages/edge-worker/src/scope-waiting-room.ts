@@ -85,12 +85,16 @@ export function renderWaitingRoom(
 			return `| ${stalled ? "⏳ " : ""}${e.issueIdentifier ?? e.issueId.slice(0, 8)} | ${
 				opts.clientName(e.workspaceId) ?? "—"
 			} | ${hours === undefined ? "—" : `${hours}h`} | ${
-				e.state === "revised" ? "revision sent" : "awaiting reply"
+				e.state === "revised"
+					? "revision sent"
+					: e.state === "needs-info"
+						? "answer needed mid-work"
+						: "awaiting reply"
 			} |`;
 		});
 
 	return [
-		"These issues are mid-scope-conversation with their client. **They are not work yet** — nothing has been approved, so nothing appears on the board.",
+		"These issues are waiting on their client — mid-scope-conversation, or mid-work on a question only the client can answer. Scope conversations are **not work yet**: nothing appears on the board until the client approves. A mid-work question keeps its mirror, marked Needs info.",
 		"",
 		"This list exists so a conversation that has gone quiet is noticeable. It updates itself and closes when nothing is waiting.",
 		"",
