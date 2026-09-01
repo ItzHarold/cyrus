@@ -10536,7 +10536,13 @@ ${taskSection}`;
 
 		const existingRunner = foundSession.agentRunner;
 		const issueTitle = issue?.title || "this issue";
-		const senderName = webhook.agentSession.creator?.name || "user";
+		// Same attribution lesson as the release check: on a mirror thread the
+		// session's `creator` is unset, so the confirmation used to thank
+		// "user" for stopping a run they had just rescued.
+		const senderName =
+			resolveMirrorActor(webhook).name ||
+			webhook.agentSession.creator?.name ||
+			"user";
 
 		// Only warm sessions can be safely interrupted without killing the
 		// underlying request. Non-warm sessions get a single-shot full stop —
@@ -10974,6 +10980,34 @@ ${taskSection}`;
 		const agentSessionId = webhook.agentSession.id;
 		const activityBody = webhook.agentActivity?.content?.body || "";
 		const signal = (webhook.agentActivity as any)?.signal;
+
+		const isTextStopRequestEarly =
+			/^\s*stop(\s+session|\s+working)?[\s.!?]*$/i.test(activityBody);
+
+		// A STOP outranks the mirror intercept (PON-229 punch list).
+		//
+		// The intercept below used to come first and return unconditionally,
+		// so on a mirror thread the stop never reached its handler — and
+		// Linear's own Stop button sends an empty body, which
+		// `classifyMirrorIntent` reads as `orient`, a CLAIM. Pressing Stop on
+		// a runaway mirror session therefore announced "I am taking this" and
+		// let it keep running; typing "stop" was sent in as work. The one
+		// control a reviewer needs against a session burning budget on the
+		// client's repository was the one control that did nothing.
+		//
+		// Ordered here rather than handled inside `handleMirrorAction`: a stop
+		// is not an operator *action* on the work, it is a control on the
+		// runner, and the existing handler already resolves mirror sessions
+		// (they are registered in the same session manager) and closes the
+		// turn with a confirmation.
+		if (signal === "stop" || isTextStopRequestEarly) {
+			if (this.laneManager.isQueued(agentSessionId)) {
+				await this.handleQueuedSessionStop(webhook);
+				return;
+			}
+			await this.handleStopSignal(webhook);
+			return;
+		}
 
 		// PON-152: replies in a mirror issue's thread are operator actions
 		// too — the failure report says "approve again to retry", and the

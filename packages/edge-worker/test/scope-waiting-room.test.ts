@@ -163,7 +163,7 @@ describe("the room itself", () => {
 		return { room, calls };
 	}
 
-	it("reuses a CLOSED room instead of minting another (PON-231)", async () => {
+	it("reuses a CLOSED room instead of minting another", async () => {
 		// The room closes when nothing is waiting and reopens when something
 		// is. Searching only open issues meant every cycle created a fresh
 		// one — four closed copies of the same room piled up on the board in
@@ -201,6 +201,40 @@ describe("the room itself", () => {
 		);
 		expect(reopen).toBeDefined();
 		expect(reopen?.variables.id).toBe("room-old");
+	});
+
+	it("never resurrects a CANCELED room — it mints a fresh one", async () => {
+		// Cancellation is a human saying this copy is dead, usually while
+		// tidying duplicates. Reusing it puts the live list of waiting
+		// conversations inside an issue the board shows as abandoned, and the
+		// tidying itself makes the canceled copy the most recently updated —
+		// so the cleanup would elect the corpse.
+		const { room, calls } = makeRoom([
+			{
+				team: {
+					issues: {
+						nodes: [
+							{
+								id: "room-dead",
+								title: WAITING_ROOM_TITLE,
+								state: { type: "canceled" },
+							},
+						],
+					},
+				},
+			},
+			{ issueCreate: { success: true, issue: { id: "room-new" } } },
+			{ issueUpdate: { success: true } },
+		]);
+
+		await room.sync([
+			{ issueId: "i", issueIdentifier: "ACM-7", proposedAt: hoursAgo(1) },
+		]);
+
+		expect(calls.find((c) => c.query.includes("issueCreate"))).toBeDefined();
+		expect(
+			calls.find((c) => JSON.stringify(c.variables).includes("room-dead")),
+		).toBeUndefined();
 	});
 
 	it("still prefers an OPEN room when both exist", async () => {

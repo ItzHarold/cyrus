@@ -317,3 +317,13 @@ Several sections above were written under working labels that **never existed as
 Note that 228 and 229 are a genuine **swap**, not a shift: each commit cites the other's number. A sequential find-and-replace collapses them onto one number — use placeholders.
 
 **Standing rule, from 2026-09-01: never cite an issue number you have not read back from Linear in the same session.** Filing the issue first and quoting the number it was actually assigned costs one API call; the alternative produced ten wrong citations across six merged commits and a documentation file that future sessions read as ground truth. A number that cannot be resolved is worse than no number, because it sends the reader looking for context that was never written.
+
+### A reviewer can stop a runaway mirror session (PON-223 punch list)
+
+The mirror intercept in `handleUserPromptedAgentActivity` returned unconditionally **before** the stop check, so on a mirror thread a stop never reached its handler. Worse than a no-op: Linear's Stop button sends an empty body, and `classifyMirrorIntent` reads an empty body as `orient` — a **claim**. Pressing Stop on a runaway announced "I am taking this" and let it keep running; typing "stop" was passed in as work.
+
+This is the one control that matters most on that surface. An operator session works the **client's** repository on the **client's** credential, so a run that will not stop spends their budget and can keep moving a branch under review. Required before any real client.
+
+The stop is now ordered above the intercept — deliberately there rather than inside `handleMirrorAction`, because a stop is not an operator action on the work, it is a control on the runner. `handleStopSignal` already resolves mirror sessions (they live in the same session manager), already handles the queued case, and already closes the turn with a confirmation, so the fix is ordering, not new machinery. The confirmation now names the actor via `resolveMirrorActor` — the same attribution gap that broke the release check had it thanking "user".
+
+Also here: **a canceled waiting room is never resurrected.** Reuse of a *closed* room is the designed cycle, but cancellation is a human saying that copy is dead — usually while tidying duplicates — and the tidying itself makes the canceled copy the most recently updated, so the old selector would have elected the corpse and put the live list of waiting conversations inside an issue the board shows as abandoned. It mints a fresh room instead.
