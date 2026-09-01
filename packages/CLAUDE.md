@@ -189,7 +189,7 @@ Scope approval no longer starts implementation. The auto-start was intrinsic —
 - **The credential follows the cockpit.** `buildAgentRunnerConfig` reads `operatorSessions.get(sessionId)?.cockpitWorkspaceId` first. Deliberately not a new parameter on `resumeAgentSession`: its `linearWorkspaceId` is dual-purpose and also selects the tracker that fetches the issue, so passing the cockpit id there fetches a client issue from the wrong workspace and throws before any runner starts.
 - **`buildMirrorImplementationBlock`, not `buildOperatorSessionBlock`.** The latter forbids a client-facing summary, which is precisely what this run must end with. Narration is for the reviewer; the closing summary is for the client, and it must spell the PR and preview URLs out in full because they are read back out of that text.
 
-### Machinery must not fabricate a surface (PON-226)
+### Machinery must not fabricate a surface (PON-227)
 
 Two defects of one class, both found live during the acceptance run: a surface said work was happening when none was.
 
@@ -198,7 +198,7 @@ Two defects of one class, both found live during the acceptance run: a surface s
 
 The rule worth carrying: **liveness is not existence.** Any recovery that asks "is something running?" to decide "did anything happen?" will fire on every failure path it was never meant to cover.
 
-### The reviewer gets a finished turn (PON-228)
+### The reviewer gets a finished turn (PON-229)
 
 Three symptoms, one cause. The verification gate suppresses a mirror run's final response — correctly, it is the client's and it is held — but **a Linear turn is closed only BY a response**. So the implementation session ran forever: no finished moment, the reviewer's own messages queued behind a turn that never ended (making in-session iteration impossible), and nothing announced that work was ready. The work was done and the surface could not say so.
 
@@ -209,7 +209,7 @@ Three symptoms, one cause. The verification gate suppresses a mirror run's final
 
 Guard is `verificationSignedOff`, cleared on deliver and reject, so a second round of review signs off again.
 
-### A question must never mutate the branch (PON-229)
+### A question must never mutate the branch (PON-228)
 
 Found live on CKP-22: the reviewer asked *"why did you make metric-definitions.ts its own file instead of keeping the notes inline?"* — a question about a decision — and the session edited files, committed, pushed a second commit onto the branch under review, and rewrote the pull-request description.
 
@@ -224,7 +224,7 @@ Intrinsic, not a classifier: free English is exactly the shape a code-side match
 
 **The asymmetry is load-bearing.** Both blocks say which way to fall and why: answering something that wanted action costs one message, while acting on something that wanted an answer rewrites a branch someone was mid-review of — or changes delivered software in front of the client who owns it.
 
-### The client's merge closes the cycle (PON-233)
+### The client's merge closes the cycle (PON-230)
 
 Delivery hands work to the client; it no longer finishes it. The mirror moves to **In client review**, and only their squash-merge (or a cancel) reaches Done.
 
@@ -237,7 +237,7 @@ Delivery hands work to the client; it no longer finishes it. The mirror moves to
 - **Close-out order is load-bearing**: client close-out → mirror comment → move their issue to completed. That last write fires the terminal path, which removes the record, closes the mirror and deletes the worktree.
 - **`releaseHeldLinks` cannot attach the client's links on a mirror-originated run** — they were published to the mirror session, so nothing is held under the client's id. `attachClientDeliveryLinks` writes them explicitly, or their Linear renders a delivery with no Diff and no merge button.
 
-### The client's summary is handed over, not scraped (PON-235)
+### The client's summary is handed over, not scraped (PON-230)
 
 Twice a mirror run ended its final message with a line addressed to the REVIEWER — *"Done and verified. Here's the state"*, then *"Hand-off recorded. Two things flagged for you"* — and the client received it, because the final-response interceptor captures the whole message. Sharpening the instruction fixed the first shape; the next run found another.
 
@@ -249,7 +249,7 @@ Guarded on `clientSummaryAt > link.startedAt`: the field persists across runs, a
 
 Also here: **we no longer post `Session stopped — <ID> was marked as Done or Canceled` on a thread we ourselves just closed out.** Observed live on the first merge-closes-the-loop run — the client got "Merged — this is now part of your project", then that. `selfCompletedIssues` suppresses it for the seconds between our own write and the webhook it causes.
 
-### A change request reopens the work (PON-236)
+### A change request reopens the work
 
 Delivered work is never edited quietly. The delivered-thread block asks the client to confirm a restated delta using two canonical labels, and the machinery recognises the exact "yes" — the same shape the scope gate uses, because a client's agreement to more work is a decision to recognise exactly, not to infer from prose. Label-plus-note is read the way PON-230 taught the scope gate, since a client who picks an option and then explains is the normal case.
 
@@ -259,7 +259,7 @@ Re-entry sets `implementationDeferred` back on the scope record, so it starts th
 
 Guarded on the record being **delivered**: before that the client has been given nothing, so those labels must move nothing.
 
-### The reviewer could not release their own work (PON-237)
+### The reviewer could not release their own work
 
 Harold typed `approve: Verified on the preview…` into CKP-22's implementation thread and got back *"Only a configured reviewer can release work to the client."* He is the mirror's assignee — the same identity PON-225's check accepts to START the work. The journal named nobody: `{"clientIssueId":"b22fbd9d-…","intent":"approve"}`, no actor at all, twice (15:52:47, 15:53:05 — he tried again).
 
@@ -273,26 +273,47 @@ The check was right; **the actor was never resolved**. The prompted path read `a
 
 All four fixes mutation-checked: reverting each one fails its test.
 
-### One preview link, and it opens (PON-238)
+### One preview link, and it opens
 
 Four defects found by a reviewer reading a delivery *before* releasing it — the read Harold made because the summary was nowhere he could find it.
 
-- **The client got two preview links, one of them dead.** The footer's link is built with the tenant's bypass value, but the held summary is posted VERBATIM, and a run that wrote a preview URL into its own prose wrote the bare one. Followed unauthenticated, it 302s to the hosting provider's login — which the client has no account for. Worse, the two could point at different builds: the prose link is the deployment of whatever commit the run finished on, the reviewer verified the head as it now stands. `clientPreviewUrl` now RESOLVES the link for `capturedHeadSha` — the same fact the staleness gate is keyed on — instead of scraping prose. That is PON-235's move applied to the link: a client-facing artefact must not depend on a model writing the right URL in the right place. Only a **ready** deployment is offered (a link that 404s while building teaches the client the link lies), and it falls back to the scraped link rather than shipping none, because a delivery with no way to see the work is worse.
+- **The client got two preview links, one of them dead.** The footer's link is built with the tenant's bypass value, but the held summary is posted VERBATIM, and a run that wrote a preview URL into its own prose wrote the bare one. Followed unauthenticated, it 302s to the hosting provider's login — which the client has no account for. Worse, the two could point at different builds: the prose link is the deployment of whatever commit the run finished on, the reviewer verified the head as it now stands. `clientPreviewUrl` now RESOLVES the link for `capturedHeadSha` — the same fact the staleness gate is keyed on — instead of scraping prose. That is PON-230's move applied to the link: a client-facing artefact must not depend on a model writing the right URL in the right place. Only a **ready** deployment is offered (a link that 404s while building teaches the client the link lies), and it falls back to the scraped link rather than shipping none, because a delivery with no way to see the work is worse.
 - **`bypassPreviewLinksIn` is the safety net, not the fix.** Runs are now asked to leave links out of the client summary entirely, so on a regenerated summary it finds nothing. It exists for summaries already held under the old scraping path, where the alternative is knowingly shipping a dead link.
 - **The summary was rendered inside the file list.** The blank line before `**What the session reported:**` was a bare `""` element in an array ending `.filter(Boolean)` — which removed it. The heading landed on the line after the last `Files changed` bullet and Markdown read it as a continuation of that list item. The blank line is now part of the heading string. A reviewer could not find the client's summary on the mirror; that is a rendering bug, not a reviewer problem.
 - **`reject:` could destroy the summary it exists to regenerate.** `VerificationGate.reject()` DELETES the record, and the resumability check came after it — so a rejection that could not resume cleared the client's held summary and had nothing to replace it, surviving only truncated to 3000 characters in the mirror body. Resolve session and repository FIRST, delete second, and refuse honestly while leaving the record deliverable. It did not bite on ACM-21 only because `sessionRepositories` is rebuilt on boot from the persisted `issueRepositoryCache`; that is a happy accident of another feature, not a guarantee this path was entitled to.
-- **The regeneration path now asks for the hand-over.** `reject:` is the designated rewrite route (PON-210 refused to build a second one beside it), so it is where PON-235's `client_summary` hand-off has to be requested — otherwise every regeneration silently falls back to scraping, which is the exact failure PON-235 exists to remove. The same prompt forbids URLs in the summary, since the delivery composes the one link itself.
+- **The regeneration path now asks for the hand-over.** `reject:` is the designated rewrite route (PON-210 refused to build a second one beside it), so it is where PON-230's `client_summary` hand-off has to be requested — otherwise every regeneration silently falls back to scraping, which is the exact failure PON-230 exists to remove. The same prompt forbids URLs in the summary, since the delivery composes the one link itself.
 
 All five mutation-checked. The first draft of the rendering test asserted array-join semantics rather than the composer's output — decorative, and it passed under mutation; it now drives `composeVerificationMirror` and reads the note the mirror actually receives.
 
 **Follow-up, same issue:** telling the rewrite to omit URLs silently removed the client's merge path. `recordPending` scrapes `prUrls` out of the summary's prose, so a regeneration — which only restates what was already built and has no reason to name a URL — produced a record with no pull request: nothing to mark ready, no merge line, and no head for the staleness check or the preview lookup to resolve. Two changes: the instruction now forbids only the PREVIEW url (naming the PR is expected), and the gate carries the last known `prUrls` across a rejection, because the pull request is a fact about the WORK, not about the run that last described it. A rewrite naming a different PR still wins. The carry is in-memory, so a restart mid-rewrite degrades to the old behaviour rather than to anything worse.
 
-### The client's session carries the work (PON-239)
+### The client's session carries the work (PON-231)
 
-The delivery already sets the pull request and the bypassed preview as **external URLs on the CLIENT's agent session** (`attachClientDeliveryLinks` → `agentSessionUpdate(addedExternalUrls)`), and has since PON-233. Verified live on ACM-21: `client_delivery_links_attached count: 2`, and Linear returns both on the session. **The app half was never the gap** — a delivery that shows as links in text rather than a Diff tab is a workspace-integration gap on the client's side, not a missing call.
+The delivery already sets the pull request and the bypassed preview as **external URLs on the CLIENT's agent session** (`attachClientDeliveryLinks` → `agentSessionUpdate(addedExternalUrls)`), and has since PON-230. Verified live on ACM-21: `client_delivery_links_attached count: 2`, and Linear returns both on the session. **The app half was never the gap** — a delivery that shows as links in text rather than a Diff tab is a workspace-integration gap on the client's side, not a missing call.
 
 It had no test, which is how "already works" quietly becomes "used to work". Five guards now, all mutation-checked: both URLs are set; they target the CLIENT session and never the mirror (getting that backwards renders the delivery on the cockpit and leaves the client with prose); the preview keeps its access value (stripping it hands them a login they cannot pass); an empty set sends no update; and a failure to attach never fails the delivery — the summary IS the delivery, so losing the native surface is a degradation while losing the summary is the product failing.
 
 **What the native surface actually requires, client-side** (Linear docs, `linear.app/docs/diffs` and `/coding-sessions`): the workspace connects the GitHub integration AND grants **code access** for the repository — code access is the separate permission that turns a PR link into a Diff, and an already-connected workspace still has to add it. Then, per person: a personal GitHub connection under Connected Accounts, and Settings → Code & reviews → *Enable code reviews*. Merging from Linear runs **as the authenticated GitHub user**, so that person needs write access on the repo — and if the GitHub org uses an IP allow list, Linear's IPs must be added or diffs and review actions silently fail. None of this is reachable from our side: we hold no credential for the client's Linear or their GitHub org, so it is an onboarding step we ask for and confirm by asking, never something we can check (the standing "we can only see the repository" constraint).
 
 Link-based delivery is the documented fallback when a client skips it, and it is why the footer's links must be complete and correct on their own.
+
+### Issue-number decoder — read this before citing a PON number
+
+Several sections above were written under working labels that **never existed as Linear issues**. The labels were invented in commit messages and PR bodies before the issues were filed, and the numbering drifted. Every editable artefact (these headings, PR bodies, board text) has been remapped to real numbers; **merged commit messages were left as they are**, so this table is the permanent decoder for `git log`.
+
+| Cited in a merged commit | What it actually is |
+|---|---|
+| PON-226 — "Machinery must not fabricate a surface" | **PON-227** |
+| PON-228 — "The reviewer gets a finished turn" | **PON-229** |
+| PON-229 — "A question must never mutate the branch" | **PON-228** |
+| PON-233 — "The client's merge closes the cycle" | **PON-230** |
+| PON-234 — per-company WIP = 1 | **PON-230** (documented in its body) |
+| PON-235 — "Hand the client's summary over" | **PON-230** (its defect #1) |
+| PON-236 — "A change request reopens the work" | **no issue** — PON-230's "Not in this increment" follow-up |
+| PON-237 — "The reviewer could not release their own work" | **no issue** — see the section above |
+| PON-238 — "One preview link, and it opens" | **no issue** — see the section above |
+| PON-239 — "The client's session carries the work" | **PON-231** |
+
+Note that 228 and 229 are a genuine **swap**, not a shift: each commit cites the other's number. A sequential find-and-replace collapses them onto one number — use placeholders.
+
+**Standing rule, from 2026-09-01: never cite an issue number you have not read back from Linear in the same session.** Filing the issue first and quoting the number it was actually assigned costs one API call; the alternative produced ten wrong citations across six merged commits and a documentation file that future sessions read as ground truth. A number that cannot be resolved is worse than no number, because it sends the reader looking for context that was never written.
