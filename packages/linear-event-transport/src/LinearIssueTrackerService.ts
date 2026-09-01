@@ -859,9 +859,17 @@ export class LinearIssueTrackerService implements IIssueTrackerService {
 	 *
 	 * - `plan` REPLACES the whole checklist. The caller sends every step, every
 	 *   time; there is no merge.
-	 * - `plan` is typed `JSONObject` server-side, so a malformed step is accepted
-	 *   and then silently ignored. Steps are validated here rather than trusting
-	 *   the API to reject them.
+	 * - `plan` is typed `JSONObject` server-side but validated as a BARE ARRAY
+	 *   of `{ content, status }` (developers/agent-interaction: "a full array
+	 *   of steps, where each step has a content string and a status"). This
+	 *   method sent `{ steps: [{ label, status }] }` from PON-116 until
+	 *   2026-09-01 and every update was refused with "Invalid agent session
+	 *   plan: []: expected array, received object" — logged, swallowed by the
+	 *   never-throws contract below, and the checklist never rendered once.
+	 *   The shape is pinned by a test now; the API's "JSONObject" is not a
+	 *   description of what it accepts.
+	 * - A malformed step is accepted and then silently ignored, so steps are
+	 *   validated here rather than trusting the API to reject them.
 	 *
 	 * Never throws. These are cosmetic updates sitting on the critical path of
 	 * real client work, and a checklist that fails to render must not take down
@@ -876,8 +884,8 @@ export class LinearIssueTrackerService implements IIssueTrackerService {
 		if (input.plan) {
 			const valid = input.plan.every(
 				(step: AgentSessionPlanStep) =>
-					typeof step?.label === "string" &&
-					step.label.length > 0 &&
+					typeof step?.content === "string" &&
+					step.content.length > 0 &&
 					["pending", "inProgress", "completed"].includes(step?.status),
 			);
 			if (!valid) {
@@ -886,7 +894,7 @@ export class LinearIssueTrackerService implements IIssueTrackerService {
 				);
 				return false;
 			}
-			variables.plan = { steps: input.plan };
+			variables.plan = input.plan;
 		}
 
 		if (input.addedExternalUrls?.length) {
