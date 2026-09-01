@@ -313,6 +313,73 @@ say so rather than forcing.
 </mirror_implementation_session>`;
 }
 
+/** Who sent a mirror action. */
+export interface MirrorActor {
+	id?: string;
+	name?: string;
+}
+
+/**
+ * Resolve the person behind a mirror action (PON-237).
+ *
+ * Four fields can carry them, and WHICH are populated depends on how the
+ * session was born — so no single one is enough:
+ *
+ * - `agentActivity.content.user` — richest, and already the transport's
+ *   source of truth for a prompt's author.
+ * - `agentActivity.userId` — "the ID of the user who created this agent
+ *   activity"; present on a prompt however the session was created.
+ * - `agentSession.creator` — documented as unset when a session was
+ *   "initiated via automation or by an agent user".
+ * - `agentSession.comment.user` — the mention that opened the session.
+ *
+ * The bug this exists for: the reviewer's `approve:`, typed into a mirror's
+ * implementation thread, read `creator` alone. That thread's session is
+ * routinely created by our own re-delegation recovery, so `creator` is unset
+ * BY DESIGN on exactly the threads a reviewer works in — every release
+ * arrived unattributed and was refused as though the reviewer were a
+ * stranger. Reading the activity fixes it without weakening the check: this
+ * resolves who is asking, it never decides whether they may.
+ *
+ * An actor is returned only when an id was found. A name alone authorizes
+ * nothing, and handing one back invites a caller to match on it.
+ */
+export function resolveMirrorActor(webhook: {
+	agentActivity?: unknown;
+	agentSession?: unknown;
+}): MirrorActor {
+	const record = (v: unknown): Record<string, unknown> | undefined =>
+		v && typeof v === "object" ? (v as Record<string, unknown>) : undefined;
+	const text = (v: unknown): string | undefined =>
+		typeof v === "string" && v.length > 0 ? v : undefined;
+	const person = (v: unknown): MirrorActor | undefined => {
+		const u = record(v);
+		return u
+			? { id: text(u.id), name: text(u.displayName) ?? text(u.name) }
+			: undefined;
+	};
+
+	const activity = record(webhook.agentActivity);
+	const session = record(webhook.agentSession);
+	const candidates = [
+		person(record(activity?.content)?.user),
+		{ id: text(activity?.userId), name: undefined },
+		person(session?.creator),
+		person(record(session?.comment)?.user),
+	];
+
+	const identified = candidates.find((c) => c?.id);
+	if (!identified?.id) return {};
+	// A later candidate may still carry the name the winner lacked — matched
+	// on id, so two different people can never be spliced into one actor.
+	// This is what keeps the refusal journal readable; finding THIS bug cost
+	// a dig precisely because the line named nobody.
+	return {
+		id: identified.id,
+		name: candidates.find((c) => c?.id === identified.id && c?.name)?.name,
+	};
+}
+
 /**
  * Destructive git, denied for operator sessions (PON-208, R9).
  *
