@@ -1,9 +1,12 @@
+import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
+	chmodSync,
 	createWriteStream,
 	existsSync,
 	mkdirSync,
 	readFileSync,
+	unlinkSync,
 	type WriteStream,
 	writeFileSync,
 } from "node:fs";
@@ -13,6 +16,7 @@ import {
 	type CanUseTool,
 	type HookCallbackMatcher,
 	type HookEvent,
+	type McpServerConfig,
 	type PermissionResult,
 	type Query,
 	query,
@@ -254,6 +258,61 @@ export declare interface ClaudeRunner {
 /**
  * Manages Claude SDK sessions and communication
  */
+/**
+ * Split the merged MCP servers into what must stay in the SDK call and what
+ * goes to a per-session file.
+ *
+ * In-process servers (`type: "sdk"`) are objects the SDK hosts itself; they
+ * cannot be expressed in a file and carry no credential, so they stay inline.
+ * Everything else — http and stdio servers, headers included — is written to
+ * `<cyrusHome>/runtime/mcp/mcp-<random>.json`, mode 0600 in a 0700 directory,
+ * and the CLI loads it via `--mcp-config <path>` (`--strict-mcp-config` still
+ * applies to file-loaded servers). The file is deleted when the session ends.
+ *
+ * If the file cannot be written the servers go inline, loudly: a session that
+ * cannot start is worse for the client than a credential visible to root on
+ * a box root already owns. The warning is the signal that the hygiene lapsed.
+ */
+export function stageMcpServers(
+	mcpServers: Record<string, Record<string, unknown>>,
+	cyrusHome: string,
+	logger: { warn: (message: string) => void },
+): {
+	inlineMcpServers: Record<string, Record<string, unknown>>;
+	mcpConfigFile: string | null;
+} {
+	const inlineMcpServers: Record<string, Record<string, unknown>> = {};
+	const staged: Record<string, Record<string, unknown>> = {};
+	for (const [name, cfg] of Object.entries(mcpServers)) {
+		if (cfg?.type === "sdk") inlineMcpServers[name] = cfg;
+		else staged[name] = cfg;
+	}
+	if (Object.keys(staged).length === 0) {
+		return { inlineMcpServers, mcpConfigFile: null };
+	}
+	try {
+		const dir = join(cyrusHome, "runtime", "mcp");
+		mkdirSync(dir, { recursive: true, mode: 0o700 });
+		const file = join(dir, `mcp-${randomBytes(8).toString("hex")}.json`);
+		writeFileSync(file, JSON.stringify({ mcpServers: staged }), {
+			mode: 0o600,
+		});
+		// The mode on write is masked by the umask; make 0600 explicit.
+		chmodSync(file, 0o600);
+		return { inlineMcpServers, mcpConfigFile: file };
+	} catch (error) {
+		logger.warn(
+			`Could not stage the MCP config as a file (${
+				error instanceof Error ? error.message : String(error)
+			}); passing it inline — the session's MCP headers are visible in its argv`,
+		);
+		return {
+			inlineMcpServers: { ...inlineMcpServers, ...staged },
+			mcpConfigFile: null,
+		};
+	}
+}
+
 export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 	/**
 	 * ClaudeRunner supports streaming input via startStreaming(), addStreamMessage(), and completeStream()
@@ -269,6 +328,8 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 	private messages: SDKMessage[] = [];
 	private streamingPrompt: StreamingPrompt | null = null;
 	private activeQuery: Query | null = null;
+	/** Per-session MCP config file, deleted when the session ends (PON-223 B). */
+	private mcpConfigFile: string | null = null;
 	private cyrusHome: string;
 	private formatter: IMessageFormatter;
 	private pendingResultMessage: SDKMessage | null = null;
@@ -626,6 +687,19 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 				);
 			}
 
+			// The SDK hands `mcpServers` to the CLI as `--mcp-config <inline
+			// JSON>`, so every header in it — the tenant's Linear OAuth bearer
+			// token among them — sits in the child's argv, readable by any local
+			// process for the session's lifetime (PON-223, finding B). The CLI
+			// also accepts a FILE for --mcp-config: stage the same JSON in a
+			// 0600 file under cyrusHome and pass the path through extraArgs.
+			const { inlineMcpServers, mcpConfigFile } = stageMcpServers(
+				mcpServers as Record<string, Record<string, unknown>>,
+				this.config.cyrusHome,
+				this.logger,
+			);
+			this.mcpConfigFile = mcpConfigFile;
+
 			// Log allowed directories if configured
 			if (this.config.allowedDirectories) {
 				this.logger.debug(
@@ -711,7 +785,9 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 							autoMemoryDirectory: this.config.autoMemoryDirectory,
 						},
 					}),
-					...(Object.keys(mcpServers).length > 0 && { mcpServers }),
+					...(Object.keys(inlineMcpServers).length > 0 && {
+						mcpServers: inlineMcpServers as Record<string, McpServerConfig>,
+					}),
 					// Only use MCP servers we explicitly pass via `mcpConfig` /
 					// `mcpServers`. The flag is undertyped in the SDK's TS
 					// definition (described as "strict validation") but Claude
@@ -733,7 +809,12 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 						outputFormat: this.config.outputFormat,
 					}),
 					...(this.config.sandbox && { sandbox: this.config.sandbox }),
-					...(this.config.extraArgs && { extraArgs: this.config.extraArgs }),
+					...((this.config.extraArgs || mcpConfigFile) && {
+						extraArgs: {
+							...this.config.extraArgs,
+							...(mcpConfigFile && { "mcp-config": mcpConfigFile }),
+						},
+					}),
 					...(pathToClaudeCodeExecutable && { pathToClaudeCodeExecutable }),
 					...(this.config.spawnClaudeCodeProcess && {
 						spawnClaudeCodeProcess: this.config.spawnClaudeCodeProcess,
@@ -913,6 +994,17 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 			this.abortController = null;
 			this.activeQuery = null;
 			this.pendingResultMessage = null;
+
+			// The MCP config file carries a credential; it lives exactly as long
+			// as the session.
+			if (this.mcpConfigFile) {
+				try {
+					unlinkSync(this.mcpConfigFile);
+				} catch {
+					// Already gone, or never written: nothing to keep secret.
+				}
+				this.mcpConfigFile = null;
+			}
 
 			// Complete and clean up streaming prompt if it exists
 			if (this.streamingPrompt) {
