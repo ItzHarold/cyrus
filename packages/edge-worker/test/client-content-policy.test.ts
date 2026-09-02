@@ -66,6 +66,36 @@ describe("policy matching", () => {
 		).toEqual([]);
 	});
 
+	it("flags cross-tenant queue vocabulary — another tenant's items never reach a client surface", () => {
+		// The operator cockpit's own attention view, if it ever leaked to a
+		// client: a global "suggested next", a foreign item named as a blocker,
+		// cross-client position, queue depth. Each must trip the sweep.
+		for (const leak of [
+			"Suggested next across clients — assign yourself to start.",
+			"You're waiting on FRO-76 before this can build.",
+			"There are 3 issues ahead of you in the global queue.",
+			"This is behind another client's delivery.",
+			"Position across workspaces: #4.",
+		]) {
+			expect(findClientContentViolations(leak).map((v) => v.rule)).toContain(
+				"cross-tenant-position",
+			);
+		}
+	});
+
+	it("the per-tenant client ack is NOT cross-tenant vocabulary", () => {
+		// What the client legitimately sees — its own position within its OWN
+		// tenant's queue, and the product's one-issue-at-a-time promise — must
+		// pass clean. The ban is on cross-tenant framing, not on queue words.
+		for (const clean of [
+			"Queued — position #3 in your queue. We'll start it next.",
+			"We work one issue at a time; your backlog is unlimited.",
+			"You're first in line — starting now.",
+		]) {
+			expect(findClientContentViolations(clean)).toEqual([]);
+		}
+	});
+
 	it("redacts the unambiguous cases loudly and leaves ambiguous words alone", () => {
 		const { text, redactions } = redactClientContent(
 			"Cyrus wrote /root/.service/workspaces/ABC-1/file.ts using claude-opus-5; quite the opus.",

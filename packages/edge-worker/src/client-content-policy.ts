@@ -24,7 +24,8 @@ export interface ClientContentViolation {
 		| "internal-path"
 		| "model-id"
 		| "model-family-word"
-		| "preview-bypass-token";
+		| "preview-bypass-token"
+		| "cross-tenant-position";
 	/** The offending excerpt */
 	match: string;
 	/** Whether redactClientContent can rewrite this safely */
@@ -97,6 +98,24 @@ const RULES: Array<{
 		rule: "preview-bypass-token",
 		pattern: /x-vercel-protection-bypass=[^&\s)\]]+/gi,
 		redactable: true,
+	},
+	// TENANT ISOLATION (2026-09-02): cross-tenant queue vocabulary. The tenant
+	// (workspace) is the isolation boundary — a client surface names only the
+	// client's OWN work, never another tenant's items, a global/cross-client
+	// position, or operator load language. The per-tenant ack the client DOES
+	// get ("position #3 in your queue") is fine and matches none of these; the
+	// operator cockpit's own attention view ("Suggested next across clients",
+	// "waiting: FRO-76") is the leak this bans from ever reaching a client.
+	// NOT redactable — if one of these reaches a client surface the copy is
+	// wrong at the source and must be rewritten, not silently patched (like the
+	// model-family word, the tripwire logs it; the static sweep fails the
+	// template). The cockpit mirror stays OPERATOR_SIDE-exempt from the sweep,
+	// so this bans the phrasing on the CLIENT surfaces only.
+	{
+		rule: "cross-tenant-position",
+		pattern:
+			/\b(?:across clients|across tenants|across workspaces|other clients'|another client'?s|global queue|suggested next across|queue position across|waiting on [A-Z][A-Z0-9]*-\d+|\d+ (?:issues?|items?|builds?) (?:ahead|behind))\b/gi,
+		redactable: false,
 	},
 ];
 

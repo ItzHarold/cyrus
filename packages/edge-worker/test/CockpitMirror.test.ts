@@ -807,26 +807,27 @@ describe("CockpitMirror", () => {
 				)?.description ?? "",
 			);
 
-		it("exactly one startable mirror is next up; a gated one says why; a queued one says what it is behind", async () => {
+		it("one global suggested-next; a gated one says its OWN tenant's reason; ranks are per-tenant, never cross-tenant", async () => {
 			makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
 			await mirror.upsert(issue, TENANT_WS, "queued"); // mirror-1, DVV
 			await mirror.upsert(issueB, TENANT2, "active"); // mirror-2, Acme building
 			await mirror.upsert(issueC, TENANT2, "queued"); // mirror-3, Acme, gated
 
-			// The DVV mirror is the one to start: it carries the label that
-			// renders in every list view, and the description says so.
+			// The DVV mirror is the operator's suggested pick across clients —
+			// a suggestion, labeled as one, that gates nothing.
 			expect(lastLabels("mirror-1")).toContain("label-next-up");
-			expect(lastDescription("mirror-1")).toContain("▶ **Next up**");
+			expect(lastDescription("mirror-1")).toContain("▶ **Suggested next**");
 			// The Acme mirror cannot start while Acme is building: no marker,
-			// and the reason in the reviewer's words.
+			// and the reason names only its OWN tenant's work.
 			expect(lastLabels("mirror-3") ?? []).not.toContain("label-next-up");
 			expect(lastDescription("mirror-3")).toContain(
 				"waiting: Client tenant-2 has ACM-2 active (one build at a time)",
 			);
-			// And it knows its place in the order.
-			expect(lastDescription("mirror-3")).toContain(
-				"behind DVV-12 (DeVitaliteitVerrijkers)",
-			);
+			// It knows its place in its OWN tenant's queue (#1 of 1), and names
+			// NO other tenant's work — no cross-tenant "behind".
+			expect(lastDescription("mirror-3")).toContain("#1 of 1");
+			expect(lastDescription("mirror-3")).not.toContain("DVV-12");
+			expect(lastDescription("mirror-3")).not.toContain("behind");
 			// Never more than one next-up across the board.
 			const nextUps = Object.entries(mirror.serialize()).filter(
 				([, r]) => r.nextUp,
@@ -838,16 +839,20 @@ describe("CockpitMirror", () => {
 			);
 		});
 
-		it("two startable mirrors from two clients: only the first in the order is next up, the other is behind it", async () => {
+		it("two startable mirrors from two clients: one global suggested-next; each shows its OWN tenant's rank, no cross-tenant reference", async () => {
 			makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
 			await mirror.upsert(issue, TENANT_WS, "queued"); // mirror-1, DVV
 			await mirror.upsert(issueC, TENANT2, "queued"); // mirror-2, Acme, nothing in flight
 
 			expect(lastLabels("mirror-1")).toContain("label-next-up");
 			expect(lastLabels("mirror-2") ?? []).not.toContain("label-next-up");
+			// The Acme mirror is #1 of 1 in ITS OWN tenant's queue — not "#2"
+			// (a global rank) and never "behind" the DVV item.
 			expect(lastDescription("mirror-2")).toContain(
-				"**Working order:** #2 — behind DVV-12 (DeVitaliteitVerrijkers)",
+				"**In this client's queue:** #1 of 1",
 			);
+			expect(lastDescription("mirror-2")).not.toContain("DVV-12");
+			expect(lastDescription("mirror-2")).not.toContain("behind");
 			expect(
 				Object.values(mirror.serialize()).filter((r) => r.nextUp),
 			).toHaveLength(1);
@@ -872,7 +877,7 @@ describe("CockpitMirror", () => {
 
 			expect(mirror.serialize()[issue.issueId]?.queueRank).toBe(1);
 			expect(lastLabels("mirror-1")).toContain("label-next-up");
-			expect(lastDescription("mirror-1")).toContain("▶ **Next up**");
+			expect(lastDescription("mirror-1")).toContain("▶ **Suggested next**");
 		});
 
 		it("a claimed in-verification mirror is that reviewer's, not next up for anyone", async () => {
@@ -911,7 +916,7 @@ describe("CockpitMirror", () => {
 			await mirror.upsert(issueB, TENANT2, "delivered"); // Acme frees up
 
 			expect(lastLabels("mirror-3")).toContain("label-next-up");
-			expect(lastDescription("mirror-3")).toContain("▶ **Next up**");
+			expect(lastDescription("mirror-3")).toContain("▶ **Suggested next**");
 		});
 
 		it("a mirror carries the tenant label and never a state label, through every transition (requirement C)", async () => {

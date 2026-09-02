@@ -207,7 +207,7 @@ const WAITING_STATES = new Set([
 // the client-issue line no longer promises links that are held, and the
 // preview renders as an anchor. Mirrors written by the previous release
 // refresh themselves on first touch rather than showing the old wording.
-const DESCRIPTION_VERSION = 5;
+const DESCRIPTION_VERSION = 6;
 /** Bumped when the label shape changes; mirrors below it get their labels rewritten. */
 const LABELS_VERSION = 1;
 /** The one queued mirror to start next. */
@@ -730,7 +730,11 @@ export class CockpitMirror {
 					? await this.claimedMirrorIds(config.linearWorkspaceId)
 					: new Set<string>();
 				let waitingRank = 0;
-				const perClient = new Map<string, number>();
+				// TENANT ISOLATION: the per-position counter is keyed by the
+				// tenant WORKSPACE, not by a global counter — a mirror is
+				// numbered only against its own tenant's waiting work. After
+				// this loop, perTenant.get(ws) is that tenant's total (the M).
+				const perTenant = new Map<string, number>();
 				for (const issueId of order) {
 					const record = this.mirrors.get(issueId);
 					if (!record?.mirrorIssueId) continue;
@@ -750,14 +754,11 @@ export class CockpitMirror {
 						if (record.queueRank !== undefined) changed++;
 						record.queueRank = undefined;
 						record.clientQueuePosition = undefined;
+						record.tenantQueueTotal = undefined;
 						continue;
 					}
-					const client = this.deps.resolveClient(
-						record.tenantWorkspaceId,
-						record.teamKey,
-					);
-					const within = (perClient.get(client.id) ?? 0) + 1;
-					perClient.set(client.id, within);
+					const within = (perTenant.get(record.tenantWorkspaceId) ?? 0) + 1;
+					perTenant.set(record.tenantWorkspaceId, within);
 					waitingRank += 1;
 					if (
 						record.queueRank !== waitingRank ||
@@ -768,13 +769,13 @@ export class CockpitMirror {
 					record.queueRank = waitingRank;
 					record.clientQueuePosition = within;
 				}
-				// v3.1 (requirement B): exactly one startable mirror is next up;
-				// a gated one says why; every queued one says what it is behind.
+				// v3.1 (requirement B): exactly one startable mirror is next up
+				// (the global suggestion); a gated one says why in its OWN
+				// tenant's terms; no cross-tenant "behind" is ever written.
 				// Surfaced natively — the next-up LABEL renders in list views —
 				// and in the description, which is rewritten here when the
 				// order changed rather than waiting for the next transition.
 				let nextUpAssigned = false;
-				const ahead: string[] = [];
 				const rewrite: SerializedCockpitMirror[] = [];
 				for (const issueId of order) {
 					const record = this.mirrors.get(issueId);
@@ -808,30 +809,25 @@ export class CockpitMirror {
 							nextUpAssigned = true;
 						}
 					}
-					const behind =
-						record.queueRank !== undefined && ahead.length > 0
-							? ahead.slice(-2).join(", ")
+					// TENANT ISOLATION: the M in "N of M" — this tenant's own
+					// waiting total; no cross-tenant "behind" is ever written.
+					const tenantQueueTotal =
+						record.queueRank !== undefined
+							? perTenant.get(record.tenantWorkspaceId)
 							: undefined;
 					if (
 						record.nextUp !== nextUp ||
 						record.gatedBy !== gatedBy ||
-						record.behind !== behind ||
+						record.behind !== undefined ||
+						record.tenantQueueTotal !== tenantQueueTotal ||
 						(record.labelsVersion ?? 0) < LABELS_VERSION
 					) {
 						record.nextUp = nextUp;
 						record.gatedBy = gatedBy;
-						record.behind = behind;
+						record.behind = undefined;
+						record.tenantQueueTotal = tenantQueueTotal;
 						changed++;
 						rewrite.push(record);
-					}
-					if (record.queueRank !== undefined) {
-						const client = this.deps.resolveClient(
-							record.tenantWorkspaceId,
-							record.teamKey,
-						);
-						ahead.push(
-							`${record.issueIdentifier ?? "another issue"} (${client.displayName ?? client.id})`,
-						);
 					}
 				}
 				for (const record of rewrite) {
@@ -1928,17 +1924,22 @@ export class CockpitMirror {
 				? `**Work this with @${this.agentHandle}** — delegate it, or just say what you want changed. Other agents installed in this workspace cannot see this work.`
 				: "",
 			"",
-			// PON-211: say the place out loud. The ordering has been computed
-			// and written as sortOrder since PON-173, which decides row order
-			// in a view — useful, and invisible on the issue itself.
-			// v3.1 (requirement B): the working order, said outright — the one
-			// to start next, what each queued item is behind, and why a gated
-			// one cannot start yet.
-			record.nextUp
-				? "▶ **Next up** — #1 in the working order. Assign yourself and delegate it to me to start."
-				: record.queueRank
-					? `**Working order:** #${record.queueRank}${record.behind ? ` — behind ${record.behind}` : ""}${record.gatedBy ? ` — waiting: ${record.gatedBy}` : ""}${record.clientQueuePosition ? ` · #${record.clientQueuePosition} for this client` : ""}.`
-					: "",
+			// PON-211 / TENANT ISOLATION: say the place out loud, scoped to
+			// this tenant. The cross-client order is written as sortOrder (row
+			// order in the operator's view) and drives the single "suggested
+			// next" marker — a suggestion, never a queue that anything waits
+			// on. The number shown is this mirror's position in its OWN
+			// tenant's queue (#N of M); a gated one names only its own tenant's
+			// reason. A mirror never names another tenant's work.
+			record.clientQueuePosition
+				? `**In this client's queue:** #${record.clientQueuePosition}${
+						record.tenantQueueTotal ? ` of ${record.tenantQueueTotal}` : ""
+					}${record.gatedBy ? ` — waiting: ${record.gatedBy}` : ""}.${
+						record.nextUp
+							? " ▶ **Suggested next** across clients — a suggestion, not a queue; nothing waits on it. Assign yourself and delegate to start."
+							: ""
+					}`
+				: "",
 			// PON-221: an age the reviewer can act on, measured from this
 			// mirror's own transition. The ISO stamp this replaced was
 			// regenerated on every write, so it told you when the body was

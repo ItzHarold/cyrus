@@ -287,18 +287,31 @@ export interface SerializedCockpitMirror {
 	/** Team key within the client's workspace, e.g. "ACM". */
 	teamKey?: string;
 	/**
-	 * Place in the cross-client queue of work waiting on a reviewer
-	 * (PON-211), 1-based. Undefined when this mirror is not waiting — it is
-	 * claimed, or the agent's/client's turn. Rank 1 is next up.
+	 * Internal marker: set (to a value) while this mirror is waiting on a
+	 * reviewer, undefined when it is not (claimed, or the agent's/client's
+	 * turn). Its VALUE is a cross-client counter used only to drive the
+	 * operator's `sortOrder` list; per TENANT ISOLATION it is never shown as a
+	 * rank — the client-facing position is `clientQueuePosition` of
+	 * `tenantQueueTotal`, both scoped to this tenant.
 	 */
 	queueRank?: number;
-	/** Place within this client's own queue, 1-based (PON-211). */
+	/** This mirror's place within its OWN tenant's queue, 1-based. */
 	clientQueuePosition?: number;
-	/** v3.1: the one queued mirror to start next (carries the `next-up` label). */
+	/** Size of this tenant's own waiting queue — the M in "N of M". */
+	tenantQueueTotal?: number;
+	/**
+	 * The one global "suggested next" marker (carries the `next-up` label).
+	 * A read-only operator suggestion across clients — it gates nothing.
+	 */
 	nextUp?: boolean;
-	/** v3.1: why this queued mirror cannot start yet, in the reviewer's words. */
+	/** v3.1: why this queued mirror cannot start yet — its OWN tenant's reason. */
 	gatedBy?: string;
-	/** v3.1: what this mirror is behind in the working order. */
+	/**
+	 * Retired (tenant isolation): a mirror never names what it is "behind",
+	 * because the items ahead could belong to another tenant. Kept on the type
+	 * only so a rollback build can read old persisted records; always written
+	 * undefined now.
+	 */
 	behind?: string;
 	/** v3.1: labels last written in this shape (state labels stripped). */
 	labelsVersion?: number;
