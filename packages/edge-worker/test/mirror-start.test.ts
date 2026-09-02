@@ -875,3 +875,96 @@ describe("PON-225 — the Anthropic credential follows the cockpit", () => {
 		expect(seen).toEqual([CLIENT_WS]);
 	});
 });
+
+describe("a WIP-gated delegation opens no second thread (both entry paths)", () => {
+	beforeEach(() => {
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+	});
+
+	// delegateId / agentSessionCreated: the delegation is handled as a mirror
+	// action. A WIP refusal must start no run, open no second thread, and leave
+	// the mirror Queued — the explanation goes into the delegation's own thread.
+	it("delegateId path: a WIP-gated delegation starts no run and the mirror stays queued", async () => {
+		const { p, resumed, cockpitPosts } = setup();
+		p.cockpitMirror.clientWorkInFlight = vi.fn().mockReturnValue({
+			inFlight: [{ issueIdentifier: "ACM-1", state: "active" }],
+			limit: 1,
+		});
+		const createAgentSession = vi.fn();
+		p.activitySinks.set(COCKPIT_WS, {
+			postActivity: vi.fn(),
+			createAgentSession,
+		});
+		p.cockpitMirror.commentOnMirror = vi.fn();
+
+		await p.handleMirrorAction(action(""), CLIENT_ISSUE);
+
+		expect(resumed).toHaveLength(0); // no run started
+		expect(createAgentSession).not.toHaveBeenCalled(); // no new thread
+		expect(p.cockpitMirror.commentOnMirror).not.toHaveBeenCalled();
+		expect(p.scopeApprovals.isImplementationDeferred(CLIENT_ISSUE)).toBe(true); // stays Queued
+		// The refusal explanation lands on the delegation's own thread.
+		expect(cockpitPosts.at(-1).content.body).toMatch(/in flight/);
+	});
+
+	// assigneeId / handleIssueAssignedWebhook -> recoverMissingSessionForAssignment.
+	// Observed live on CKP-25: a WIP-gated delegation, then 60s later
+	// assignment_session_recovered opened a REDUNDANT second thread on the
+	// mirror. A parked mirror has a birth/narration thread but no operator link
+	// (that is registered only once work starts), so keying reuse on the link
+	// alone missed it. Recovery must reuse the narration thread instead.
+	it("assigneeId path: a WIP-gated re-assignment reuses the birth thread and opens no second thread", async () => {
+		const { p, resumed } = setup();
+		// Parked: no operator link. The birth/narration thread exists.
+		p.cockpitMirror.narrationSessionIdFor = vi
+			.fn()
+			.mockReturnValue(MIRROR_SESSION);
+		p.cockpitMirror.clientWorkInFlight = vi.fn().mockReturnValue({
+			inFlight: [{ issueIdentifier: "ACM-1", state: "active" }],
+			limit: 1,
+		});
+		const createAgentSessionOnIssue = vi.fn();
+		p.issueTrackers.set(COCKPIT_WS, {
+			createAgentActivity: vi.fn().mockResolvedValue({ success: true }),
+			createAgentSessionOnIssue,
+		});
+		const events: string[] = [];
+		p.logger.event = vi.fn((name: string) => events.push(name));
+
+		await p.recoverMissingSessionForAssignment(
+			MIRROR_ISSUE,
+			"CKP-9",
+			COCKPIT_WS,
+		);
+
+		// The defect: recovery minted a second agent thread on the mirror.
+		expect(createAgentSessionOnIssue).not.toHaveBeenCalled();
+		// It reused the birth/narration thread instead...
+		expect(events).toContain("mirror_redelegation_reused_thread");
+		// ...and the WIP gate on that thread still refused the run; still Queued.
+		expect(resumed).toHaveLength(0);
+		expect(p.scopeApprovals.isImplementationDeferred(CLIENT_ISSUE)).toBe(true);
+	});
+
+	// The fix is surgical: a mirror with NO thread at all still falls through to
+	// create its FIRST (birth) thread — only the SECOND is prevented.
+	it("assigneeId path: a mirror with no thread yet still creates its first", async () => {
+		const { p } = setup();
+		p.cockpitMirror.narrationSessionIdFor = vi.fn().mockReturnValue(undefined);
+		const createAgentSessionOnIssue = vi.fn().mockResolvedValue(undefined);
+		p.issueTrackers.set(COCKPIT_WS, {
+			createAgentActivity: vi.fn().mockResolvedValue({ success: true }),
+			createAgentSessionOnIssue,
+		});
+
+		await p.recoverMissingSessionForAssignment(
+			MIRROR_ISSUE,
+			"CKP-9",
+			COCKPIT_WS,
+		);
+
+		expect(createAgentSessionOnIssue).toHaveBeenCalledTimes(1);
+	});
+});
