@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 - **Mid-work questions to you now come from the reviewer, and your answer goes straight back into the work.** When the reviewer needs something only you can answer, the question appears on your issue, in plain terms, framed as what is needed to finish. Your reply — text and any files — reaches the work word for word, and you get one short acknowledgement. Nothing else is posted to you until the work is ready. ([#107](https://github.com/ItzHarold/cyrus/pull/107))
 
 ### Changed
+- A reviewer's `cancel: <reason>` on a mirror now reaches the client: they get the reason on their own thread, their issue goes to Canceled, the mirror follows and that company's queue advances. A comment on a queued mirror is conversation — only the claimant's delegation starts the work ([#115](https://github.com/ItzHarold/cyrus/pull/115))
 - **Approving a scope now queues the work instead of starting it on the spot.** When you approve, you get a short confirmation that the work is accepted into your queue, and the thread then stays quiet until there is something to review. Work begins when our review team picks it up, and everything you receive at delivery has been through that review first. Questions you ask in the meantime are still answered — they just never start the build early. ([PON-224](https://linear.app/ponte-digital/issue/PON-224))
 
 ### Fixed
