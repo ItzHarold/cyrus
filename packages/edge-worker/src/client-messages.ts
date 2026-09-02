@@ -8,6 +8,8 @@
  * production incident.
  */
 
+import type { AgentSessionPlanStep } from "cyrus-core";
+
 export const CLIENT_MESSAGES = {
 	/** PON-161: worktree creation refused at session start. */
 	worktreeRefusedAtStart: (repositoryName: string) =>
@@ -146,3 +148,52 @@ export const CLIENT_MESSAGES = {
 		`If anything about it needs changing later, open a new request and ` +
 		`we'll pick it up.`,
 } as const;
+
+/**
+ * The client-facing lifecycle plan (v3.1).
+ *
+ * Linear renders an agent session's `plan` as a numbered step list at the top
+ * of the thread. A CLIENT session must never show the model's internal task
+ * list there — that is the reviewer's surface, kept on the mirror. It shows
+ * this fixed four-step lifecycle instead, and step status is driven by the
+ * STATE MACHINE, never by the model: the phase is decided by where the issue
+ * is (scope agreed → building → delivered → merged), not by what the session
+ * happens to be doing. The strings are client language and pass the
+ * content-policy sweep like every other export in this module.
+ */
+export type ClientLifecyclePhase =
+	| "scoping"
+	| "agreed"
+	| "building"
+	| "review"
+	| "merged";
+
+const CLIENT_LIFECYCLE_STEPS = [
+	"Scope agreed",
+	"In development",
+	"Ready for your review",
+	"Merged",
+] as const;
+
+// Explicit per-phase status for each of the four steps — spelled out rather
+// than derived, so the surface a client sees can be read straight off the code.
+const CLIENT_LIFECYCLE_STATUS: Record<
+	ClientLifecyclePhase,
+	Array<AgentSessionPlanStep["status"]>
+> = {
+	scoping: ["inProgress", "pending", "pending", "pending"],
+	agreed: ["completed", "pending", "pending", "pending"],
+	building: ["completed", "inProgress", "pending", "pending"],
+	review: ["completed", "completed", "inProgress", "pending"],
+	merged: ["completed", "completed", "completed", "completed"],
+};
+
+export function buildClientLifecyclePlan(
+	phase: ClientLifecyclePhase,
+): AgentSessionPlanStep[] {
+	const status = CLIENT_LIFECYCLE_STATUS[phase];
+	return CLIENT_LIFECYCLE_STEPS.map((content, i) => ({
+		content,
+		status: status[i] ?? "pending",
+	}));
+}

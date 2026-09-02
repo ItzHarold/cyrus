@@ -170,7 +170,11 @@ import {
 	findClientContentViolations,
 	sanitizeClientPaths,
 } from "./client-content-policy.js";
-import { CLIENT_MESSAGES } from "./client-messages.js";
+import {
+	buildClientLifecyclePlan,
+	CLIENT_MESSAGES,
+	type ClientLifecyclePhase,
+} from "./client-messages.js";
 import { ClientRegistry, teamKeyOf } from "./client-registry.js";
 import { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
 import { EgressProxy } from "./EgressProxy.js";
@@ -5886,6 +5890,35 @@ ${taskSection}`;
 	}
 
 	/**
+	 * Publish the client-facing lifecycle plan on a client session (v3.1).
+	 *
+	 * The client's native plan (Linear's numbered step list) never shows the
+	 * model's task list — that stays the reviewer's surface on the mirror. It
+	 * shows a fixed four-step lifecycle whose status is driven from HERE, the
+	 * state machine, at each transition. Operator-guarded: a mirror session
+	 * must keep its detailed model plan, so this refuses to overwrite one even
+	 * if a caller passes a mirror session by mistake. Best-effort — a lost plan
+	 * update is never a broken session.
+	 */
+	private async publishClientLifecyclePlan(
+		sessionId: string | undefined,
+		phase: ClientLifecyclePhase,
+	): Promise<void> {
+		if (!sessionId) return;
+		if (this.operatorSessions.isOperatorSession(sessionId)) return;
+		try {
+			await this.agentSessionManager.publishSessionPlan(
+				sessionId,
+				buildClientLifecyclePlan(phase),
+			);
+		} catch (error) {
+			this.logger.debug(
+				`Client lifecycle plan publish failed for ${sessionId}: ${String(error)}`,
+			);
+		}
+	}
+
+	/**
 	 * The rule blocks appended to a session's system prompt (PON-211).
 	 *
 	 * An operator session gets NEITHER of the client-facing blocks. Appending
@@ -6465,6 +6498,10 @@ ${taskSection}`;
 					hasClientNote: replyNote !== undefined,
 				});
 				await this.persistScopeApprovals("scope_confirmed");
+				// v3.1: the client's lifecycle plan advances to "scope agreed".
+				// Their session's native plan is code-driven from here, never
+				// the model's task list.
+				void this.publishClientLifecyclePlan(webhook.agentSession.id, "agreed");
 				// PON-219: this is now the mirror's BIRTH, not a transition on
 				// an existing one — the cockpit contains only approved work.
 				//
@@ -8659,6 +8696,9 @@ ${taskSection}`;
 		prUrls: string[],
 		previewUrl?: string,
 	): Promise<void> {
+		// v3.1: the client's lifecycle advances to "ready for your review" as
+		// the work reaches their session — independent of whether links attach.
+		void this.publishClientLifecyclePlan(record.sessionId, "review");
 		const urls = [
 			...prUrls.map((url) => ({ url, label: "Pull request" })),
 			...(previewUrl ? [{ url: previewUrl, label: "Preview" }] : []),
@@ -8992,6 +9032,8 @@ ${taskSection}`;
 				record.sessionId,
 				CLIENT_MESSAGES.mergedCloseOut(undefined, timing.cycle),
 			);
+			// v3.1: the client's lifecycle completes at "merged".
+			void this.publishClientLifecyclePlan(record.sessionId, "merged");
 		} catch (error) {
 			// Not "carry on": the caller retries the whole close-out next tick
 			// and tells the reviewer. Completing the client's issue without
@@ -9916,6 +9958,10 @@ ${taskSection}`;
 				hasInstruction: opts.instruction.length > 0,
 			});
 			void this.savePersistedState();
+			// v3.1: client lifecycle advances to "in development". Published on
+			// the CLIENT session — the mirror session keeps the detailed model
+			// plan for the reviewer.
+			void this.publishClientLifecyclePlan(clientSession.id, "building");
 
 			const prompt =
 				`Implement ${scope.issueIdentifier ?? "this issue"}.` +

@@ -6,7 +6,10 @@ import {
 	findClientContentViolations,
 	redactClientContent,
 } from "../src/client-content-policy.js";
-import { CLIENT_MESSAGES } from "../src/client-messages.js";
+import {
+	buildClientLifecyclePlan,
+	CLIENT_MESSAGES,
+} from "../src/client-messages.js";
 
 /**
  * Client-visible content policy (PON-168 / R2). Three suites:
@@ -202,6 +205,26 @@ describe("static sweep — registered client-facing templates are clean", () => 
 				findClientContentViolations(rendered),
 				`CLIENT_MESSAGES.${name} violates the client content policy`,
 			).toEqual([]);
+		}
+	});
+
+	it("the client lifecycle plan is clean client language (v3.1)", () => {
+		// The lifecycle plan is the ONLY plan a client session ever shows; its
+		// step text is a client surface and must pass the sweep like every
+		// other export in this module.
+		for (const phase of [
+			"scoping",
+			"agreed",
+			"building",
+			"review",
+			"merged",
+		] as const) {
+			for (const step of buildClientLifecyclePlan(phase)) {
+				expect(
+					findClientContentViolations(step.content),
+					`lifecycle plan step "${step.content}" (${phase}) violates policy`,
+				).toEqual([]);
+			}
 		}
 	});
 
