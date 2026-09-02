@@ -60,6 +60,7 @@ describe("EdgeWorker - Parent Branch Handling", () => {
 		workspaceBaseDir: "/test/workspaces",
 		baseBranch: "main",
 		linearWorkspaceId: "test-workspace",
+		teamKeys: ["TEST"],
 		isActive: true,
 		allowedTools: ["Read", "Edit"],
 		labelPrompts: {
@@ -233,7 +234,7 @@ Base Branch: {{base_branch}}`;
 		// Arrange
 		const createdWebhook: LinearAgentSessionCreatedWebhook = {
 			type: "Issue",
-			action: "agentSessionCreated",
+			action: "created",
 			organizationId: "test-workspace",
 			agentSession: {
 				id: "agent-session-123",
@@ -286,7 +287,7 @@ Base Branch: {{base_branch}}`;
 
 		const createdWebhook: LinearAgentSessionCreatedWebhook = {
 			type: "Issue",
-			action: "agentSessionCreated",
+			action: "created",
 			organizationId: "test-workspace",
 			agentSession: {
 				id: "agent-session-123",
@@ -340,7 +341,7 @@ Base Branch: {{base_branch}}`;
 
 		const createdWebhook: LinearAgentSessionCreatedWebhook = {
 			type: "Issue",
-			action: "agentSessionCreated",
+			action: "created",
 			organizationId: "test-workspace",
 			agentSession: {
 				id: "agent-session-123",
@@ -398,7 +399,7 @@ Base Branch: {{base_branch}}`;
 
 		const createdWebhook: LinearAgentSessionCreatedWebhook = {
 			type: "Issue",
-			action: "agentSessionCreated",
+			action: "created",
 			organizationId: "test-workspace",
 			agentSession: {
 				id: "agent-session-123",

@@ -74,6 +74,7 @@ describe("EdgeWorker - Screenshot Upload Guidance Hooks", () => {
 		workspaceBaseDir: "/test/workspaces",
 		baseBranch: "main",
 		linearWorkspaceId: "test-workspace",
+		teamKeys: ["TEST"],
 		isActive: true,
 		allowedTools: ["Read", "Edit"],
 	};
@@ -317,7 +318,7 @@ Issue: {{issue_identifier}}`;
 
 			const webhook: LinearAgentSessionCreatedWebhook = {
 				type: "Issue",
-				action: "agentSessionCreated",
+				action: "created",
 				organizationId: "test-workspace",
 				agentSession: {
 					id: "agent-session-123",
@@ -347,7 +348,7 @@ Issue: {{issue_identifier}}`;
 
 			const webhook: LinearAgentSessionCreatedWebhook = {
 				type: "Issue",
-				action: "agentSessionCreated",
+				action: "created",
 				organizationId: "test-workspace",
 				agentSession: {
 					id: "agent-session-123",
@@ -387,7 +388,7 @@ Issue: {{issue_identifier}}`;
 
 			const webhook: LinearAgentSessionCreatedWebhook = {
 				type: "Issue",
-				action: "agentSessionCreated",
+				action: "created",
 				organizationId: "test-workspace",
 				agentSession: {
 					id: "agent-session-123",
@@ -425,7 +426,7 @@ Issue: {{issue_identifier}}`;
 
 			const webhook: LinearAgentSessionCreatedWebhook = {
 				type: "Issue",
-				action: "agentSessionCreated",
+				action: "created",
 				organizationId: "test-workspace",
 				agentSession: {
 					id: "agent-session-123",
@@ -468,7 +469,7 @@ Issue: {{issue_identifier}}`;
 
 			const webhook: LinearAgentSessionCreatedWebhook = {
 				type: "Issue",
-				action: "agentSessionCreated",
+				action: "created",
 				organizationId: "test-workspace",
 				agentSession: {
 					id: "agent-session-123",
@@ -500,7 +501,7 @@ Issue: {{issue_identifier}}`;
 
 			const webhook: LinearAgentSessionCreatedWebhook = {
 				type: "Issue",
-				action: "agentSessionCreated",
+				action: "created",
 				organizationId: "test-workspace",
 				agentSession: {
 					id: "agent-session-123",

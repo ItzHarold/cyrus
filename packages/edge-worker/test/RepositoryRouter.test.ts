@@ -4,6 +4,7 @@ import type {
 	RepositoryConfig,
 } from "cyrus-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { CLIENT_MESSAGES } from "../src/client-messages.js";
 import {
 	RepositoryRouter,
 	type RepositoryRouterDeps,
@@ -288,15 +289,27 @@ class RoutingAssertion {
 		return this;
 	}
 
-	shouldNeedSelection(): this {
-		expect(this.result.type).toBe("needs_selection");
+	/** Unmapped team — the agent refuses and notifies the operator (2a). */
+	shouldBeUnmapped(): this {
+		expect(this.result.type).toBe("unmapped");
 		return this;
 	}
 
-	shouldNeedSelectionWithRepos(expectedCount: number): this {
-		expect(this.result.type).toBe("needs_selection");
-		if (this.result.type === "needs_selection") {
+	shouldBeUnmappedWithRepos(expectedCount: number): this {
+		expect(this.result.type).toBe("unmapped");
+		if (this.result.type === "unmapped") {
 			expect(this.result.workspaceRepos).toHaveLength(expectedCount);
+		}
+		return this;
+	}
+
+	/** Ambiguous route — >1 candidate; the agent asks (2b). */
+	shouldBeAmbiguousWith(expectedCandidates: RepositoryConfig[]): this {
+		expect(this.result.type).toBe("ambiguous");
+		if (this.result.type === "ambiguous") {
+			expect(this.result.candidates.map((r) => r.id).sort()).toEqual(
+				expectedCandidates.map((r) => r.id).sort(),
+			);
 		}
 		return this;
 	}
@@ -1239,19 +1252,21 @@ describe("RepositoryRouter", () => {
 					repo,
 				]);
 
-				// Then: Should select repo via team prefix routing
-				expectRouting(result).shouldSelectRepositoryVia(repo, "team-prefix");
+				// Then: routes via the team key parsed from the identifier prefix.
+				// This is team-key routing (the separate "team-prefix" method was
+				// folded into "team-based" — the prefix is just another team key).
+				expectRouting(result).shouldSelectRepositoryVia(repo, "team-based");
 			});
 
-			it("should continue to next priority when team does not match", async () => {
-				// Given: Repositories with specific team keys
+			it("does not route to an unconfigured repo when the team does not match — unmapped", async () => {
+				// Given: a team-specific repo and one with no routing config
 				const repo1 = env
 					.repository("repo-1", "Team A Repo")
 					.withTeams("TEAM_A")
 					.build();
 
 				const repo2 = env
-					.repository("repo-2", "Catch All Repo")
+					.repository("repo-2", "Unconfigured Repo")
 					.asCatchAll()
 					.build();
 
@@ -1267,27 +1282,27 @@ describe("RepositoryRouter", () => {
 					repo2,
 				]);
 
-				// Then: Should fallback to catch-all routing
-				expectRouting(result).shouldSelectRepositoryVia(repo2, "catch-all");
+				// Then: no catch-all guess — the team is unmapped and refuses
+				expectRouting(result).shouldBeUnmapped();
 			});
 		});
 	});
 
 	// ========================================================================
-	// Priority 5: Catch-All Routing
+	// No catch-all: an unconfigured repo is NEVER a routing target (2026-09-02)
 	// ========================================================================
 
-	describe("Priority 5: Catch-All Routing", () => {
-		describe("when no specific routing rules match", () => {
-			it("should route to catch-all repository with no routing configuration", async () => {
+	describe("No catch-all routing", () => {
+		describe("a repo with no routing configuration is not routable", () => {
+			it("an unmatched team does not fall back to an unconfigured repo — unmapped", async () => {
 				// Given: One repository with routing config, one without
 				const specificRepo = env
 					.repository("repo-1", "Specific Repo")
 					.withTeams("TEAM1")
 					.build();
 
-				const catchAllRepo = env
-					.repository("repo-2", "Catch All Repo")
+				const unconfiguredRepo = env
+					.repository("repo-2", "Unconfigured Repo")
 					.asCatchAll()
 					.build();
 
@@ -1300,25 +1315,22 @@ describe("RepositoryRouter", () => {
 				// When: Determining repository
 				const result = await env.router.determineRepositoryForWebhook(webhook, [
 					specificRepo,
-					catchAllRepo,
+					unconfiguredRepo,
 				]);
 
-				// Then: Should select catch-all repository
-				expectRouting(result).shouldSelectRepositoryVia(
-					catchAllRepo,
-					"catch-all",
-				);
+				// Then: no guess — unmapped (the old catch-all is gone)
+				expectRouting(result).shouldBeUnmapped();
 			});
 
-			it("should prefer first catch-all when multiple catch-all repositories exist", async () => {
-				// Given: Multiple catch-all repositories
-				const catchAll1 = env
-					.repository("repo-1", "First Catch All")
+			it("a workspace of only unconfigured repos is unmapped, not a first-repo guess", async () => {
+				// Given: repos with no routing config at all
+				const unconfigured1 = env
+					.repository("repo-1", "First Unconfigured")
 					.asCatchAll()
 					.build();
 
-				const catchAll2 = env
-					.repository("repo-2", "Second Catch All")
+				const unconfigured2 = env
+					.repository("repo-2", "Second Unconfigured")
 					.asCatchAll()
 					.build();
 
@@ -1326,12 +1338,12 @@ describe("RepositoryRouter", () => {
 
 				// When: Determining repository
 				const result = await env.router.determineRepositoryForWebhook(webhook, [
-					catchAll1,
-					catchAll2,
+					unconfigured1,
+					unconfigured2,
 				]);
 
-				// Then: Should select first catch-all repository
-				expectRouting(result).shouldSelectRepositoryVia(catchAll1, "catch-all");
+				// Then: never guess a repo — unmapped
+				expectRouting(result).shouldBeUnmapped();
 			});
 		});
 	});
@@ -1342,7 +1354,7 @@ describe("RepositoryRouter", () => {
 
 	describe("Workspace Fallback & Edge Cases", () => {
 		describe("when single repository exists", () => {
-			it("should request user selection when single configured repository doesn't match routing", async () => {
+			it("refuses as unmapped when the single configured repository does not match the team", async () => {
 				// Given: Single repository with specific team configuration that doesn't match
 				const repo = env
 					.repository("repo-1", "Only Repo")
@@ -1361,12 +1373,12 @@ describe("RepositoryRouter", () => {
 				]);
 
 				// Then: No default assignment — request user selection
-				expectRouting(result).shouldNeedSelectionWithRepos(1);
+				expectRouting(result).shouldBeUnmappedWithRepos(1);
 			});
 		});
 
 		describe("when multiple repositories exist with no routing match", () => {
-			it("should request user selection when multiple configured repositories don't match", async () => {
+			it("refuses as unmapped when no configured repository matches the team", async () => {
 				// Given: Multiple repositories with specific configurations
 				const repo1 = env
 					.repository("repo-1", "Repo 1")
@@ -1391,7 +1403,7 @@ describe("RepositoryRouter", () => {
 				]);
 
 				// Then: Should request user selection
-				expectRouting(result).shouldNeedSelectionWithRepos(2);
+				expectRouting(result).shouldBeUnmappedWithRepos(2);
 			});
 		});
 
@@ -1468,7 +1480,7 @@ describe("RepositoryRouter", () => {
 				const webhook = env.webhook().withSession("session-123").build();
 
 				// When: Eliciting user selection
-				await env.router.elicitUserRepositorySelection(webhook, [repo1, repo2]);
+				await env.router.elicitAmbiguousRepository(webhook, [repo1, repo2]);
 
 				// Then: Options carry repository NAMES (PON-142). They used to carry
 				// URLs, which Linear echoed back in a form that never string-matched
@@ -1478,7 +1490,7 @@ describe("RepositoryRouter", () => {
 					agentSessionId: "session-123",
 					content: {
 						type: "elicitation",
-						body: "Which repository should I work in for this issue?",
+						body: CLIENT_MESSAGES.repositoryAmbiguous(),
 					},
 					signal: AgentActivitySignal.Select,
 					signalMetadata: {
@@ -1494,7 +1506,7 @@ describe("RepositoryRouter", () => {
 				const webhook = env.webhook().build();
 
 				// When: Eliciting user selection
-				await env.router.elicitUserRepositorySelection(webhook, [repo]);
+				await env.router.elicitAmbiguousRepository(webhook, [repo]);
 
 				// Then: Should use repository name
 				expect(env.mockLinearClient.createAgentActivity).toHaveBeenCalledWith(
@@ -1512,7 +1524,7 @@ describe("RepositoryRouter", () => {
 				const webhook = env.webhook().withSession("session-123").build();
 
 				// When: Eliciting user selection
-				await env.router.elicitUserRepositorySelection(webhook, [repo]);
+				await env.router.elicitAmbiguousRepository(webhook, [repo]);
 
 				// Then: Should have pending selection
 				expect(env.router.hasPendingSelection("session-123")).toBe(true);
@@ -1529,7 +1541,7 @@ describe("RepositoryRouter", () => {
 					.mockResolvedValueOnce({}); // Error activity succeeds
 
 				// When: Eliciting user selection
-				await env.router.elicitUserRepositorySelection(webhook, [repo]);
+				await env.router.elicitAmbiguousRepository(webhook, [repo]);
 
 				// Then: Should post error activity
 				expect(env.mockLinearClient.createAgentActivity).toHaveBeenCalledTimes(
@@ -1566,7 +1578,7 @@ describe("RepositoryRouter", () => {
 					.mockRejectedValue(new Error("API error"));
 
 				// When: Eliciting user selection (should not throw)
-				await env.router.elicitUserRepositorySelection(webhook, [repo]);
+				await env.router.elicitAmbiguousRepository(webhook, [repo]);
 
 				// Then: Should have cleaned up pending selection
 				expect(env.router.hasPendingSelection("session-123")).toBe(false);
@@ -1593,7 +1605,7 @@ describe("RepositoryRouter", () => {
 					.build();
 
 				const webhook = env.webhook().withSession("session-1").build();
-				await env.router.elicitUserRepositorySelection(webhook, [repo1, repo2]);
+				await env.router.elicitAmbiguousRepository(webhook, [repo1, repo2]);
 
 				// When: User selects backend repository
 				const result = await env.router.selectRepositoryFromResponse(
@@ -1611,7 +1623,7 @@ describe("RepositoryRouter", () => {
 				const repo2 = env.repository("repo-2", "Backend Repo").build();
 
 				const webhook = env.webhook().withSession("session-1").build();
-				await env.router.elicitUserRepositorySelection(webhook, [repo1, repo2]);
+				await env.router.elicitAmbiguousRepository(webhook, [repo1, repo2]);
 
 				// When: User selects backend repository by name
 				const result = await env.router.selectRepositoryFromResponse(
@@ -1623,22 +1635,24 @@ describe("RepositoryRouter", () => {
 				expect(result).toBe(repo2);
 			});
 
-			it("should fallback to first repository when selection not found", async () => {
-				// Given: User selecting non-existent repository
+			it("returns null and keeps the selection pending when the reply matches no candidate — never guesses", async () => {
+				// Given: an ambiguous-route selection is pending
 				const repo1 = env.repository("repo-1", "Repo 1").build();
 				const repo2 = env.repository("repo-2", "Repo 2").build();
 
 				const webhook = env.webhook().withSession("session-1").build();
-				await env.router.elicitUserRepositorySelection(webhook, [repo1, repo2]);
+				await env.router.elicitAmbiguousRepository(webhook, [repo1, repo2]);
 
-				// When: User provides invalid selection
+				// When: User provides a reply that matches no offered repository
 				const result = await env.router.selectRepositoryFromResponse(
 					"session-1",
 					"Non-existent Repo",
 				);
 
-				// Then: Should fallback to first repository
-				expect(result).toBe(repo1);
+				// Then: no guess (null), and the selection stays pending so a later
+				// click still resolves it (the caller re-posts the ask).
+				expect(result).toBeNull();
+				expect(env.router.hasPendingSelection("session-1")).toBe(true);
 			});
 
 			it("resolves a legacy URL answer despite .git/case differences (PON-142)", async () => {
@@ -1655,7 +1669,7 @@ describe("RepositoryRouter", () => {
 					.build();
 
 				const webhook = env.webhook().withSession("session-1").build();
-				await env.router.elicitUserRepositorySelection(webhook, [repo1, repo2]);
+				await env.router.elicitAmbiguousRepository(webhook, [repo1, repo2]);
 
 				const result = await env.router.selectRepositoryFromResponse(
 					"session-1",
@@ -1673,7 +1687,7 @@ describe("RepositoryRouter", () => {
 				const repo2 = env.repository("repo-2", "beta").build();
 
 				const webhook = env.webhook().withSession("session-1").build();
-				await env.router.elicitUserRepositorySelection(webhook, [repo1, repo2]);
+				await env.router.elicitAmbiguousRepository(webhook, [repo1, repo2]);
 
 				const result = await env.router.selectRepositoryFromResponse(
 					"session-1",
@@ -1684,11 +1698,11 @@ describe("RepositoryRouter", () => {
 				expect(result).not.toBe(repo1);
 			});
 
-			it("an unresolved answer falls back LOUDLY, naming the value (PON-142)", async () => {
-				// The unrelated-prompt contract keeps first-configured as the
-				// destination — but never silently. The silent version of this
-				// path is how a correct answer was misrouted for as long as the
-				// code existed, with nothing in the logs to see.
+			it("an unresolved answer is refused LOUDLY, never guessed (repo routing 2b)", async () => {
+				// The reply matched no candidate. It must NOT resolve to a repo —
+				// the old code ran the first-configured one (a silent misroute).
+				// It returns null, logs the unresolved reply and the offered names,
+				// and keeps the selection pending so a real pick still lands.
 				const warnSpy = vi.fn();
 				(
 					env.router as unknown as {
@@ -1699,14 +1713,15 @@ describe("RepositoryRouter", () => {
 				const repo1 = env.repository("repo-1", "alpha").build();
 				const repo2 = env.repository("repo-2", "beta").build();
 				const webhook = env.webhook().withSession("session-1").build();
-				await env.router.elicitUserRepositorySelection(webhook, [repo1, repo2]);
+				await env.router.elicitAmbiguousRepository(webhook, [repo1, repo2]);
 
 				const result = await env.router.selectRepositoryFromResponse(
 					"session-1",
 					"also please fix the header while you are at it",
 				);
 
-				expect(result).toBe(repo1);
+				expect(result).toBeNull();
+				expect(env.router.hasPendingSelection("session-1")).toBe(true);
 				const warned = warnSpy.mock.calls.map((c) => String(c[0])).join(" ");
 				expect(warned).toContain("repo_selection_unresolved");
 				expect(warned).toContain("also please fix the header");
@@ -1730,7 +1745,7 @@ describe("RepositoryRouter", () => {
 				// Given: Pending repository selection
 				const repo = env.repository("repo-1", "Repo").build();
 				const webhook = env.webhook().withSession("session-1").build();
-				await env.router.elicitUserRepositorySelection(webhook, [repo]);
+				await env.router.elicitAmbiguousRepository(webhook, [repo]);
 
 				expect(env.router.hasPendingSelection("session-1")).toBe(true);
 
@@ -1752,8 +1767,8 @@ describe("RepositoryRouter", () => {
 				const webhook2 = env.webhook().withSession("session-2").build();
 
 				// When: Creating pending selections
-				await env.router.elicitUserRepositorySelection(webhook1, [repo1]);
-				await env.router.elicitUserRepositorySelection(webhook2, [repo2]);
+				await env.router.elicitAmbiguousRepository(webhook1, [repo1]);
+				await env.router.elicitAmbiguousRepository(webhook2, [repo2]);
 
 				// Then: Both should be tracked
 				expect(env.router.hasPendingSelection("session-1")).toBe(true);
@@ -1864,7 +1879,7 @@ describe("RepositoryRouter", () => {
 		});
 
 		describe("when routing priority chain is fully tested", () => {
-			it("should traverse entire priority chain from label to catch-all", async () => {
+			it("should traverse entire priority chain from label to unmapped", async () => {
 				// Given: Repository with all routing configs
 				const fullRepo = env
 					.repository("repo-full", "Full Config")
@@ -1875,7 +1890,7 @@ describe("RepositoryRouter", () => {
 					.build();
 
 				const catchAllRepo = env
-					.repository("repo-catch", "Catch All")
+					.repository("repo-catch", "Unconfigured")
 					.inWorkspace("default-workspace")
 					.asCatchAll()
 					.build();
@@ -1928,7 +1943,7 @@ describe("RepositoryRouter", () => {
 				]);
 				expectRouting(result).shouldSelectRepositoryVia(fullRepo, "team-based");
 
-				// Test Priority 5: Catch-all (nothing matches)
+				// End of chain: nothing matches → unmapped (no catch-all guess)
 				env.issueHasLabels("issue-4", "other-label");
 				env.issueIsInProject("issue-4", "Other Project");
 				webhook = env
@@ -1941,10 +1956,7 @@ describe("RepositoryRouter", () => {
 					fullRepo,
 					catchAllRepo,
 				]);
-				expectRouting(result).shouldSelectRepositoryVia(
-					catchAllRepo,
-					"catch-all",
-				);
+				expectRouting(result).shouldBeUnmapped();
 			});
 		});
 	});
@@ -2152,7 +2164,7 @@ describe("RepositoryRouter", () => {
 				]);
 
 				// Then: No default — prompt user
-				expectRouting(result).shouldNeedSelectionWithRepos(2);
+				expectRouting(result).shouldBeUnmappedWithRepos(2);
 			});
 		});
 

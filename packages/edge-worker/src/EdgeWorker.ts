@@ -629,9 +629,12 @@ export class EdgeWorker extends EventEmitter {
 				}
 			},
 			hasActiveSession: (issueId: string, _repositoryId: string) => {
+				// Priority 0 is a best-effort optimization (TODO-remove) — it must
+				// never crash routing. Null-safe so a missing/partial session
+				// manager falls through to normal routing rather than throwing.
 				const activeSessions =
-					this.agentSessionManager.getActiveSessionsByIssueId(issueId);
-				return activeSessions.length > 0;
+					this.agentSessionManager?.getActiveSessionsByIssueId?.(issueId);
+				return (activeSessions?.length ?? 0) > 0;
 			},
 			getIssueTracker: (linearWorkspaceId: string) => {
 				return this.getIssueTrackerForWorkspace(linearWorkspaceId);
@@ -5592,13 +5595,25 @@ ${taskSection}`;
 				return;
 			}
 
-			// Handle needs_selection case
-			if (routingResult.type === "needs_selection") {
-				await this.repositoryRouter.elicitUserRepositorySelection(
+			// Unmapped team (2a): no repository is mapped for this issue. Refuse
+			// in client language + notify the operator; NEVER guess a repo and
+			// never start a runner.
+			if (routingResult.type === "unmapped") {
+				await this.repositoryRouter.refuseUnmappedRepository(
 					webhook,
 					routingResult.workspaceRepos,
 				);
-				// Selection in progress - will be handled by handleRepositorySelectionResponse
+				return;
+			}
+
+			// Ambiguous route (2b): an implicit mapping matched >1 repo. Ask,
+			// once, with a canonical Select of the candidates. Resolution
+			// continues in handleRepositorySelectionResponse.
+			if (routingResult.type === "ambiguous") {
+				await this.repositoryRouter.elicitAmbiguousRepository(
+					webhook,
+					routingResult.candidates,
+				);
 				return;
 			}
 
@@ -11798,8 +11813,16 @@ ${taskSection}`;
 		);
 
 		if (!repository) {
-			log.error(
-				`Failed to select repository for agent session ${agentSessionId}`,
+			// Ambiguous-route reply that matched no candidate. The router kept
+			// the pending selection alive rather than guessing one; re-post the
+			// Select so a click still resolves it. If there is no pending
+			// selection (a stale reply), this is a no-op.
+			log.warn(
+				`Repository selection unresolved for ${agentSessionId} — re-asking, not guessing`,
+			);
+			await this.repositoryRouter.repostPendingSelection(
+				agentSessionId,
+				webhook.organizationId,
 			);
 			return;
 		}

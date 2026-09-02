@@ -49,6 +49,26 @@ export const CLIENT_MESSAGES = {
 		`needed from you.`,
 
 	/**
+	 * Repo routing 2a: the issue's team has no repository connected to it yet.
+	 * The agent refuses rather than guessing a repository. Client language — no
+	 * mention of routing tables, team keys, or which repos exist; the operator
+	 * is notified separately to set the mapping up.
+	 */
+	repositoryNotConnected: () =>
+		`We're not set up to work in this team's repository yet, so I can't ` +
+		`start this one. The operator has been notified to connect it — nothing ` +
+		`is needed from you, and we'll pick this up as soon as it's linked.`,
+
+	/**
+	 * Repo routing 2b: the issue's team maps to more than one repository, so
+	 * routing is ambiguous. Ask which one — offered as a canonical Select of
+	 * the candidate repositories; picking one resolves it.
+	 */
+	repositoryAmbiguous: () =>
+		`This team works in more than one repository — which one should I use ` +
+		`for this issue?`,
+
+	/**
 	 * PON-202: delivery is blocked on our side. Said when a push or a pull
 	 * request cannot be completed — never with the reason, never with a
 	 * workaround. A client asked to fetch a branch or apply a pasted diff has
