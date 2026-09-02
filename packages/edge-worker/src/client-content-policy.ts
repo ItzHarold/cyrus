@@ -104,8 +104,19 @@ const RULES: Array<{
 	// client's OWN work, never another tenant's items, a global/cross-client
 	// position, or operator load language. The per-tenant ack the client DOES
 	// get ("position #3 in your queue") is fine and matches none of these; the
-	// operator cockpit's own attention view ("Suggested next across clients",
-	// "waiting: FRO-76") is the leak this bans from ever reaching a client.
+	// operator cockpit's own attention view ("Suggested next across clients")
+	// is the leak this bans from ever reaching a client.
+	//
+	// This same function REFUSES four operator→client text paths (delivery
+	// notes, cancel reasons, reviewer questions, needs-info relays), so the
+	// pattern is deliberately narrowed to phrasing that is ALWAYS cross-tenant
+	// or global — never a legitimate same-tenant reference. In particular it
+	// does NOT match a bare "waiting on <ISSUE-ID>": an operator note may
+	// reference the client's OWN issue by identifier, and refusing that would
+	// false-block a delivery. The cockpit no longer renders cross-tenant
+	// "behind" at all (that code is gone), so the structural guard covers the
+	// identifier case; this rule covers the vocabulary case on client surfaces.
+	//
 	// NOT redactable — if one of these reaches a client surface the copy is
 	// wrong at the source and must be rewritten, not silently patched (like the
 	// model-family word, the tripwire logs it; the static sweep fails the
@@ -114,7 +125,7 @@ const RULES: Array<{
 	{
 		rule: "cross-tenant-position",
 		pattern:
-			/\b(?:across clients|across tenants|across workspaces|other clients'|another client'?s|global queue|suggested next across|queue position across|waiting on [A-Z][A-Z0-9]*-\d+|\d+ (?:issues?|items?|builds?) (?:ahead|behind))\b/gi,
+			/\b(?:across clients|across tenants|across workspaces|other clients'|another client'?s|global queue|suggested next across|queue position across|\d+ (?:issues?|items?|builds?) (?:ahead|behind))\b/gi,
 		redactable: false,
 	},
 ];
