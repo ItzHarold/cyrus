@@ -12,6 +12,7 @@ import type {
 } from "cyrus-claude-runner";
 import {
 	type AgentPendingWork,
+	type AgentSessionPlanStep,
 	AgentSessionStatus,
 	AgentSessionType,
 	type AgentSessionUpdateFields,
@@ -261,6 +262,14 @@ export class AgentSessionManager extends EventEmitter {
 	 */
 	private async publishPlan(sessionId: string): Promise<void> {
 		if (!this.updateSessionSurface) return;
+		// v3.1: the model's task list is the REVIEWER's surface. Linear renders
+		// a session's `plan` as a numbered step list at the top of the thread,
+		// so publishing the model tracker here put the internal task text onto
+		// the CLIENT's own session. A client session shows the code-maintained
+		// lifecycle plan instead (`publishSessionPlan`, driven by the state
+		// machine) and never the model steps. Operator/mirror sessions are
+		// excluded by `clientQuietSession` (PON-208) and keep the detailed plan.
+		if (this.isClientQuietSession?.(sessionId)) return;
 		const tracker = this.planTrackers.get(sessionId);
 		const plan = tracker?.snapshot();
 		if (!tracker || !plan) return;
@@ -270,6 +279,25 @@ export class AgentSessionManager extends EventEmitter {
 			if (!ok) tracker.disable();
 		} catch {
 			tracker.disable();
+		}
+	}
+
+	/**
+	 * Publish an explicit plan on a session — the code-maintained client
+	 * lifecycle plan (v3.1). Unlike `publishPlan` it does not read the model's
+	 * task tracker; the caller supplies the steps from the state machine. This
+	 * is the ONLY plan a client session ever receives. Best-effort: a failed
+	 * publish is a lost surface update, never a broken session.
+	 */
+	async publishSessionPlan(
+		sessionId: string,
+		plan: AgentSessionPlanStep[],
+	): Promise<void> {
+		if (!this.updateSessionSurface || plan.length === 0) return;
+		try {
+			await this.updateSessionSurface(sessionId, { plan });
+		} catch {
+			// A lost plan update must never take anything else down.
 		}
 	}
 
