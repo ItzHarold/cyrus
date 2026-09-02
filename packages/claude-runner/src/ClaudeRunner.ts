@@ -354,8 +354,9 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 		this.cyrusHome = config.cyrusHome;
 		this.formatter = new ClaudeMessageFormatter();
 
-		// Create canUseTool callback if onAskUserQuestion is provided
-		if (config.onAskUserQuestion) {
+		// Create canUseTool callback if either hook is provided: the
+		// AskUserQuestion interception OR the v3.1 capability gate.
+		if (config.onAskUserQuestion || config.guardCapability) {
 			this.canUseToolCallback = this.createCanUseToolCallback();
 		}
 
@@ -385,6 +386,21 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 				toolUseID: string;
 			},
 		): Promise<PermissionResult> => {
+			// v3.1 capability gate runs for EVERY tool, before anything else:
+			// a denied capability (e.g. a client session trying to mutate the
+			// work) is stopped by construction, whatever the prompt said.
+			if (this.config.guardCapability) {
+				try {
+					const guard = await this.config.guardCapability(toolName, input);
+					if (guard?.deny) {
+						return { behavior: "deny", message: guard.message };
+					}
+				} catch (error) {
+					this.logger.error(
+						`capability guard threw for ${toolName}: ${String(error)}`,
+					);
+				}
+			}
 			// Only intercept AskUserQuestion tool
 			if (toolName !== "AskUserQuestion") {
 				// Allow all other tools to proceed normally

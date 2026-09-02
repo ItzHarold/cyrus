@@ -42,34 +42,6 @@ import { splitLabelAndNote } from "./scope-confirm-gate.js";
 export const REWORK_YES_LABEL = "Yes, make this change";
 export const REWORK_NO_LABEL = "No, leave it as it is";
 
-/**
- * Implementation tools withheld from a CLIENT session that must not change
- * the work (2026-09-02). Two phases withhold them, for the same reason — a
- * prompt telling the model not to build is an instruction it can miss, and a
- * miss changes the client's software when nobody asked:
- *   - SCOPE PENDING: before the client approves the scope, the session
- *     investigates and proposes, it does not build. The mirror is born inert
- *     on approval; the reviewer's delegation starts the build.
- *   - DELIVERED (§8.8): a change to delivered work goes back through review
- *     as rework, never straight onto the client's branch.
- * Either way the session can still read (Read/Grep/Glob) and ask
- * (AskUserQuestion). The build — first pass or rework — runs on the
- * reviewer's mirror session, which is neither scope-pending nor delivered
- * and keeps full write access.
- */
-export const CLIENT_WRITE_DENY = [
-	"Write",
-	"Edit",
-	"MultiEdit",
-	"NotebookEdit",
-	"Bash(git commit*)",
-	"Bash(git push*)",
-	"Bash(git add*)",
-	"Bash(git merge*)",
-	"Bash(git rebase*)",
-	"Bash(git cherry-pick*)",
-];
-
 /** Does this ask look like the change-request confirmation? */
 export function isReworkConfirmQuestion(question: {
 	options?: Array<{ label: string }>;

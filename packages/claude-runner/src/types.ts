@@ -100,6 +100,14 @@ export interface ClaudeRunnerConfig {
 	 * Note: Only one question at a time is supported. Multiple questions will be rejected.
 	 */
 	onAskUserQuestion?: OnAskUserQuestion;
+	/**
+	 * v3.1 capability gate consulted in canUseTool before any tool runs.
+	 * Deny to block; undefined to fall through. See AgentRunnerConfig.
+	 */
+	guardCapability?: (
+		toolName: string,
+		input: Record<string, unknown>,
+	) => Promise<{ deny: true; message: string } | undefined>;
 	onMessage?: (message: SDKMessage) => void | Promise<void>;
 	onError?: (error: Error) => void | Promise<void>;
 	onComplete?: (messages: SDKMessage[]) => void | Promise<void>;
