@@ -263,13 +263,15 @@ describe("PON-225 — delegating a queued mirror starts the work", () => {
 		expect(resumed).toHaveLength(1);
 	});
 
-	it("an unclaimed mirror does NOT start, and says nothing when nobody asked", async () => {
+	it("an unclaimed mirror does NOT start, and closes its birth session with one honest line", async () => {
 		// The hazard this guards: the machinery opens a session on the mirror
-		// at birth (the narration thread). If that could start the work, the
-		// auto-start PON-224 removed would be back, one layer down.
+		// at birth (Linear does, on creation). If that could start the work,
+		// the auto-start PON-224 removed would be back, one layer down. And a
+		// birth session left with no activity renders as "Agent didn't start —
+		// Retry", a failure shape on work that is merely waiting — so it gets
+		// one honest closing line (a response, which completes the turn).
 		const { p, resumed, cockpitPosts } = setup();
 		p.cockpitMirror.assigneeIdFor = vi.fn().mockResolvedValue(undefined);
-		const before = cockpitPosts.length;
 
 		await p.handleMirrorAction(
 			{ ...action(""), actorId: undefined },
@@ -278,9 +280,28 @@ describe("PON-225 — delegating a queued mirror starts the work", () => {
 
 		expect(resumed).toHaveLength(0);
 		expect(p.scopeApprovals.isImplementationDeferred(CLIENT_ISSUE)).toBe(true);
-		// Silent: a refusal on every mirror birth is noise on the one surface
-		// that has to stay readable.
-		expect(cockpitPosts.length).toBe(before);
+		expect(cockpitPosts.at(-1).content.type).toBe("response");
+		expect(cockpitPosts.at(-1).content.body).toContain(
+			"Parked — nothing running here",
+		);
+	});
+
+	it("the birth line posts at most once per session", async () => {
+		const { p, cockpitPosts } = setup();
+		p.cockpitMirror.assigneeIdFor = vi.fn().mockResolvedValue(undefined);
+
+		await p.handleMirrorAction(
+			{ ...action(""), actorId: undefined },
+			CLIENT_ISSUE,
+		);
+		const afterFirst = cockpitPosts.length;
+		await p.handleMirrorAction(
+			{ ...action(""), actorId: undefined },
+			CLIENT_ISSUE,
+		);
+
+		// A re-delivered birth webhook does not double-post.
+		expect(cockpitPosts.length).toBe(afterFirst);
 	});
 
 	it("a person on an unclaimed mirror is told to claim it", async () => {
