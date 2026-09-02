@@ -72,10 +72,10 @@ describe("policy matching", () => {
 		// cross-client position, queue depth. Each must trip the sweep.
 		for (const leak of [
 			"Suggested next across clients — assign yourself to start.",
-			"You're waiting on FRO-76 before this can build.",
-			"There are 3 issues ahead of you in the global queue.",
+			"There are 3 issues ahead of you in the queue.",
 			"This is behind another client's delivery.",
 			"Position across workspaces: #4.",
+			"It's queued behind work in the global queue.",
 		]) {
 			expect(findClientContentViolations(leak).map((v) => v.rule)).toContain(
 				"cross-tenant-position",
@@ -94,6 +94,16 @@ describe("policy matching", () => {
 		]) {
 			expect(findClientContentViolations(clean)).toEqual([]);
 		}
+	});
+
+	it("a same-tenant issue reference in an operator note is NOT refused", () => {
+		// The rule runs on four operator->client REFUSAL paths (delivery notes,
+		// cancels, questions, needs-info). An operator legitimately references
+		// the client's OWN issue by identifier — that is same-tenant and must
+		// not block a delivery. Only cross-tenant/global framing is banned.
+		expect(
+			findClientContentViolations("This was waiting on your DVV-12 to land."),
+		).toEqual([]);
 	});
 
 	it("redacts the unambiguous cases loudly and leaves ambiguous words alone", () => {
