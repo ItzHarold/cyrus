@@ -734,9 +734,18 @@ export class CockpitMirror {
 				for (const issueId of order) {
 					const record = this.mirrors.get(issueId);
 					if (!record?.mirrorIssueId) continue;
+					const base = record.state.replace(/ \(#\d+\)$/, "");
+					// A claim takes an in-verification or needs-info mirror out of
+					// the order: that reviewer holds it. It does NOT take queued
+					// or rework work out — under Harold's ruling (2026-09-02) the
+					// claimant is exactly the one whose delegation starts it, so
+					// the claimed queued mirror is the one to mark next up. Live
+					// on CKP-24/CKP-25: both claimed, neither ranked, no marker.
 					const waiting =
-						!claimed.has(record.mirrorIssueId) &&
-						WAITING_STATES.has(record.state.replace(/ \(#\d+\)$/, ""));
+						WAITING_STATES.has(base) &&
+						(base === "queued" ||
+							base === "rework" ||
+							!claimed.has(record.mirrorIssueId));
 					if (!waiting) {
 						if (record.queueRank !== undefined) changed++;
 						record.queueRank = undefined;

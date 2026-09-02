@@ -91,6 +91,10 @@ describe("CockpitMirror", () => {
 				},
 			};
 		}
+		// The claim lookup (PON-211) reads assignees off the team's issues.
+		if (call.query.includes("nodes { id assignee { id } }")) {
+			return { issues: { nodes: linearMirrorIssues } };
+		}
 		if (call.query.includes("issues(")) {
 			return { team: { issues: { nodes: linearMirrorIssues } } };
 		}
@@ -847,6 +851,45 @@ describe("CockpitMirror", () => {
 			expect(
 				Object.values(mirror.serialize()).filter((r) => r.nextUp),
 			).toHaveLength(1);
+		});
+
+		it("a CLAIMED queued mirror keeps its rank and is next up — the claimant's delegation is what starts it", async () => {
+			// Live after deploy #2 (2026-09-02 00:40Z): CKP-24 and CKP-25 were
+			// both claimed by the reviewer, so the claim rule dropped them from
+			// the order and nothing carried the marker.
+			makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
+			// The claim lookup reads assignees off the team's issues.
+			linearMirrorIssues = [
+				{
+					id: "mirror-1",
+					title: "DeVitaliteitVerrijkers · DVV-12 — Add CSV export",
+					labels: { nodes: [] },
+					project: null,
+					assignee: { id: "reviewer-1" },
+				} as never,
+			];
+			await mirror.upsert(issue, TENANT_WS, "queued");
+
+			expect(mirror.serialize()[issue.issueId]?.queueRank).toBe(1);
+			expect(lastLabels("mirror-1")).toContain("label-next-up");
+			expect(lastDescription("mirror-1")).toContain("▶ **Next up**");
+		});
+
+		it("a claimed in-verification mirror is that reviewer's, not next up for anyone", async () => {
+			makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
+			linearMirrorIssues = [
+				{
+					id: "mirror-1",
+					title: "DeVitaliteitVerrijkers · DVV-12 — Add CSV export",
+					labels: { nodes: [] },
+					project: null,
+					assignee: { id: "reviewer-1" },
+				} as never,
+			];
+			await mirror.upsert(issue, TENANT_WS, "in-verification");
+
+			expect(mirror.serialize()[issue.issueId]?.queueRank).toBeUndefined();
+			expect(lastLabels("mirror-1") ?? []).not.toContain("label-next-up");
 		});
 
 		it("the marker moves on when the next-up mirror starts, and vanishes when nothing can start", async () => {
