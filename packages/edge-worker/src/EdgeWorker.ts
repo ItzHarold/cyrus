@@ -7576,6 +7576,46 @@ ${taskSection}`;
 		);
 	}
 
+	/**
+	 * Remove the pull-request and preview links from a held client summary
+	 * (cosmetic, 2026-09-02). The delivery footer carries each link exactly
+	 * once — "See it working" / "To take it: merge …" — so a summary that also
+	 * names them shows the client every link twice. The run is asked to omit
+	 * them; this makes it certain. It drops a line that is only a labelled link
+	 * ("Preview: …", "Pull request: …", a bare URL) and a "you can see it here:"
+	 * lead-in whose links it just removed, then collapses the gap.
+	 */
+	private stripDeliveryLinks(summary: string): string {
+		const PATTERN =
+			"https?:\\/\\/(?:[^\\s)]*(?:vercel\\.app|\\/preview\\/)[^\\s)]*|github\\.com\\/[^\\s)]+\\/pull\\/\\d+)";
+		const kept: string[] = [];
+		for (const line of summary.split("\n")) {
+			if (new RegExp(PATTERN, "i").test(line)) {
+				const rest = line.replace(new RegExp(PATTERN, "gi"), "").trim();
+				const labelOnly =
+					/^(?:\*\*|__)?\s*(?:preview|pull request|pr|link|see it working|to take it)?\s*(?:\*\*|__)?\s*[:>*_.—-]*$/i.test(
+						rest,
+					);
+				if (labelOnly) continue;
+			}
+			kept.push(line);
+		}
+		const out: string[] = [];
+		for (let i = 0; i < kept.length; i++) {
+			const line = kept[i] ?? "";
+			const isLeadIn =
+				/^\s*(?:you can see it here|here(?:'?s)? (?:where|the)\b[^:]*|see (?:it|the change)\b[^:]*)\s*[:.]?\s*$/i.test(
+					line,
+				);
+			if (isLeadIn && (kept[i + 1] ?? "").trim() === "") continue;
+			out.push(line);
+		}
+		return out
+			.join("\n")
+			.replace(/\n{3,}/g, "\n\n")
+			.trim();
+	}
+
 	/** Upsert the cockpit mirror to in-verification, assigned, with the held summary. */
 	/**
 	 * End the mirror's narration turn in plain words (PON-221).
@@ -8554,7 +8594,11 @@ ${taskSection}`;
 			this.testAccountsLine(record.workspaceId),
 		);
 		const clientSummary = [
-			this.bypassPreviewLinksIn(record.summary, record.workspaceId, issueId),
+			// Bypass first (a preview link the strip misses still opens), then
+			// strip the preview/PR links the footer already carries once.
+			this.stripDeliveryLinks(
+				this.bypassPreviewLinksIn(record.summary, record.workspaceId, issueId),
+			),
 			whatNext,
 			footer,
 		]
@@ -8656,7 +8700,11 @@ ${taskSection}`;
 			const user = await this.issueTrackers
 				.get(cockpitWs)
 				?.fetchUser?.(reviewerId);
-			const name = user?.displayName || user?.name;
+			// The reviewer's full name reads better on a client surface than
+			// their short handle. Linear's `name` is the full name ("Harold
+			// Ponte da Costa"); `displayName` is the handle ("haroldpdc").
+			// Prefer the name, fall back to the handle.
+			const name = user?.name || user?.displayName;
 			if (!name) return undefined;
 			return `Implemented by Ponte Digital · Reviewed by ${name}`;
 		} catch (error) {
