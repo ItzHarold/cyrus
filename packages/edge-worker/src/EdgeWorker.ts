@@ -11544,6 +11544,29 @@ ${taskSection}`;
 			answeredAt: this.needsInfo.get(issueId)?.answeredAt,
 		});
 		void this.persistScopeApprovals("needs_info_answered");
+		// A needs-info answer that lands on ALREADY-HELD work re-opens the
+		// review turn (the reviewer asked the client from the held state; the
+		// mirror session resumes and will re-hold). The FIRST hold's two
+		// once-guards must be cleared, or the re-hold is broken two ways:
+		//  1. `verificationSignedOff` blocks signOffIntoVerification, so no
+		//     closing hand-off is posted — the resumed turn never closes and
+		//     the session shows as "working" forever (seen live on FRO-65).
+		//  2. when the work is unchanged, composeVerificationMirror's
+		//     "note unchanged" early-return (keyed on `lastReviewBlock`) skips
+		//     the state upsert, so the mirror stays `active` instead of
+		//     returning to `in-verification`.
+		// Same rationale as reject (PON-221): the next hold is a genuinely new
+		// turn and must say so again. Only fires when the issue was actually
+		// held, so scope-conversation needs-info is unaffected.
+		if (this.verificationGate.get(issueId)) {
+			this.verificationSignedOff.delete(issueId);
+			this.lastReviewBlock.delete(issueId);
+			this.logger.event("verification_reopened_for_answer", {
+				issueId,
+				issueIdentifier:
+					issueIdentifier ?? this.needsInfo.get(issueId)?.issueIdentifier,
+			});
+		}
 		void this.cockpitMirror.upsert(
 			{
 				issueId,
