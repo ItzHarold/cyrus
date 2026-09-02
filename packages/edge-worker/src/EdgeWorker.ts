@@ -9032,6 +9032,75 @@ ${taskSection}`;
 	 * exactly like any other, and the answer returns into the same
 	 * conversation rather than a new one.
 	 */
+	/**
+	 * `cancel: <reason>` from the mirror (v3.1, Harold's ruling): never
+	 * silent toward the client. The reason is the note they receive, in
+	 * their own thread; their issue goes to Canceled (delegating it again
+	 * reopens it from the scope); the terminal path then closes the mirror
+	 * as Canceled, stops any run, and advances that company's queue.
+	 */
+	private async cancelWorkFromMirror(
+		action: { actorId?: string; actorName?: string },
+		clientIssueId: string,
+		reason: string,
+	): Promise<string> {
+		const violations = findClientContentViolations(reason);
+		if (violations.length > 0) {
+			return `That reason would put internal wording on the client's thread (${violations.join(", ")}). Rephrase it for them and send it again — nothing was cancelled.`;
+		}
+		const scope = this.scopeApprovals.get(clientIssueId);
+		const link = this.operatorSessions.forClientIssue(clientIssueId);
+		const record = this.verificationGate.get(clientIssueId);
+		const workspaceId =
+			scope?.workspaceId ?? link?.clientWorkspaceId ?? record?.workspaceId;
+		if (!workspaceId) {
+			return "I can't tell which workspace this issue belongs to, so I won't cancel anything on a client's side. Nothing was cancelled.";
+		}
+		const clientSessionId =
+			link?.clientSessionId ??
+			record?.sessionId ??
+			this.agentSessionManager
+				.getSessionsByIssueId(clientIssueId)
+				.find((s) => !this.operatorSessions.isOperatorSession(s.id))?.id;
+		const issueIdentifier =
+			scope?.issueIdentifier ??
+			link?.clientIssueIdentifier ??
+			record?.issueIdentifier;
+		// Their note first, then their issue: the state change fires the
+		// terminal path, which tears the session down.
+		let told = false;
+		if (clientSessionId) {
+			try {
+				await this.issueTrackers.get(workspaceId)?.createAgentActivity({
+					agentSessionId: clientSessionId,
+					content: {
+						type: "response",
+						body: this.agentSessionManager.sanitizeClientSurfaceText(
+							clientSessionId,
+							"response",
+							`We've stopped work on this, at our reviewer's decision: ${reason}\n\nNothing in your project has changed. If you'd like to pick it up again, delegate it to us and we'll start again from the scope.`,
+						),
+					},
+				});
+				told = true;
+			} catch (error) {
+				this.logger.error("Could not post the cancellation note:", error);
+			}
+		}
+		if (!told) {
+			return "The client could not be told (no reachable thread on their issue), so nothing was cancelled — a cancel they never hear about is the one thing this must not do.";
+		}
+		this.logger.event("mirror_canceled_by_reviewer", {
+			clientIssueId,
+			issueIdentifier,
+			workspaceId,
+			actorId: action.actorId,
+			reasonLength: reason.length,
+		});
+		await this.moveIssueToTerminalState(clientIssueId, workspaceId, "canceled");
+		return `Cancelled. The client has been told, in their words: "${reason}". Their issue is Canceled; delegating it again reopens it from the scope. This mirror closes with it, and the queue moves on.`;
+	}
+
 	private async askClientFromMirror(
 		clientIssueId: string,
 		question: string,
@@ -9485,8 +9554,11 @@ ${taskSection}`;
 			};
 		}
 
-		if (action.actorId && reviewers.includes(action.actorId))
-			return { ok: true };
+		// The claim is the only authority (Harold's ruling, 2026-09-02): a
+		// delegation is not attributed, so the assignee — always a human act,
+		// the mirror never writes it — is who started this. There is no
+		// "known reviewer typed it" shortcut any more: comments do not start
+		// work, and a colleague takes over by claiming.
 
 		const assignee = await this.cockpitMirror.assigneeIdFor(clientIssueId);
 		if (assignee && reviewers.includes(assignee)) return { ok: true };
@@ -10052,7 +10124,8 @@ ${taskSection}`;
 		const clientFacing =
 			intent.kind === "approve" ||
 			intent.kind === "reject" ||
-			intent.kind === "ask-client";
+			intent.kind === "ask-client" ||
+			intent.kind === "cancel";
 		if (clientFacing) {
 			const reviewers = this.cockpitReviewers();
 			if (reviewers.length === 0) {
@@ -10090,9 +10163,34 @@ ${taskSection}`;
 		// instruction. Placed before the intent dispatch below so neither the
 		// orient reply nor runOperatorIteration's "nothing held" branch can
 		// answer for parked work any more.
+		if (intent.kind === "cancel-unclear") {
+			await reply(
+				"`cancel` needs a reason the client will read: `cancel: <reason>`. Nothing was cancelled.",
+			);
+			return;
+		}
+		if (intent.kind === "cancel") {
+			await reply(
+				await this.cancelWorkFromMirror(action, clientIssueId, intent.reason),
+			);
+			return;
+		}
+		// Harold's ruling (2026-09-02): comments are conversation. Only the
+		// claimant's delegation starts parked work; a colleague takes over by
+		// claiming (reassigning), which is auditable. A comment on a parked
+		// mirror used to start the build with the comment as the instruction.
 		if (
 			this.scopeApprovals.isImplementationDeferred(clientIssueId) &&
-			(intent.kind === "orient" || intent.kind === "iterate")
+			intent.kind === "iterate"
+		) {
+			await reply(
+				"This is queued, not started — comments here are conversation. Delegate it to me to start the work; a colleague takes it over by assigning themselves first.",
+			);
+			return;
+		}
+		if (
+			this.scopeApprovals.isImplementationDeferred(clientIssueId) &&
+			intent.kind === "orient"
 		) {
 			const permitted = await this.mayStartParkedWork(action, clientIssueId);
 			if (!permitted.ok) {
@@ -10100,7 +10198,7 @@ ${taskSection}`;
 				return;
 			}
 			await this.startWorkFromMirror(action, clientIssueId, {
-				instruction: intent.kind === "iterate" ? intent.instruction : "",
+				instruction: "",
 			});
 			return;
 		}
@@ -12481,9 +12579,28 @@ ${taskSection}`;
 	 * mirror and deletes the worktree. Everything that needs those must have
 	 * happened already.
 	 */
-	private async moveIssueToCompletedState(
+	private moveIssueToCompletedState(
 		issueId: string,
 		linearWorkspaceId: string,
+	): Promise<void> {
+		return this.moveIssueToTerminalState(
+			issueId,
+			linearWorkspaceId,
+			"completed",
+		);
+	}
+
+	/**
+	 * Move the client's issue to a terminal state of the given type — Done
+	 * after their merge, Canceled after a reviewer's `cancel:` (v3.1). The
+	 * webhook this causes runs the terminal path, which stops every session
+	 * on the issue, closes the mirror against the issue's own state, removes
+	 * the records and the worktree, and advances that company's queue.
+	 */
+	private async moveIssueToTerminalState(
+		issueId: string,
+		linearWorkspaceId: string,
+		target: "completed" | "canceled",
 	): Promise<void> {
 		try {
 			const tracker = this.issueTrackers.get(linearWorkspaceId);
@@ -12496,23 +12613,26 @@ ${taskSection}`;
 			if (!team) return;
 			const states = await tracker.fetchWorkflowStates(team.id);
 			const done = states.nodes
-				.filter((state) => state.type === "completed")
+				.filter((state) => state.type === target)
 				.sort((a, b) => (a.position ?? 0) - (b.position ?? 0))[0];
 			if (!done) {
 				this.logger.warn(
-					`No completed state on team ${team.id} — leaving ${issue.identifier} open after merge`,
+					`No ${target} state on team ${team.id} — leaving ${issue.identifier} open`,
 				);
 				return;
 			}
-			// Mark before the write: the entity webhook comes back fast, and
-			// the terminal handler must know this completion was ours.
 			this.selfCompletedIssues.add(issueId);
 			await tracker.updateIssue(issueId, { stateId: done.id });
-			this.logger.event("client_issue_completed", {
-				issueId,
-				issueIdentifier: issue.identifier,
-				state: done.name,
-			});
+			this.logger.event(
+				target === "completed"
+					? "client_issue_completed"
+					: "client_issue_canceled",
+				{
+					issueId,
+					issueIdentifier: issue.identifier,
+					state: done.name,
+				},
+			);
 		} catch (error) {
 			this.logger.error(
 				"Could not complete the client's issue after merge:",

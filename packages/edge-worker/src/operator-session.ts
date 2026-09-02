@@ -70,7 +70,10 @@ export type MirrorIntent =
 	 * is the most natural way to pick a mirror up, and it did nothing at all.
 	 * Now it means "I am taking this" — claim it and say what it is.
 	 */
-	| { kind: "orient" };
+	| { kind: "orient" }
+	/** `cancel: <reason>` — the reason is what the client reads (v3.1). */
+	| { kind: "cancel"; reason: string }
+	| { kind: "cancel-unclear" };
 
 /**
  * Asking the client, in plain language (PON-221).
@@ -124,6 +127,14 @@ export function classifyMirrorIntent(body: string): MirrorIntent {
 
 	const reject = /^reject\b[:,-]?\s*([\s\S]*)$/i.exec(text);
 	if (reject) return { kind: "reject", feedback: (reject[1] ?? "").trim() };
+	// Harold's ruling (2026-09-02): a reviewer's cancel is never silent
+	// toward the client, so the reason is required — it is the note they
+	// receive.
+	const cancel = /^cancel\b[:,-]?\s*([\s\S]*)$/i.exec(text);
+	if (cancel) {
+		const reason = (cancel[1] ?? "").trim();
+		return reason ? { kind: "cancel", reason } : { kind: "cancel-unclear" };
+	}
 
 	const askClient = ASK_CLIENT.exec(text);
 	if (askClient) {

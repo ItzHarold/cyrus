@@ -169,16 +169,24 @@ describe("PON-225 — delegating a queued mirror starts the work", () => {
 		expect(clientPosts).toHaveLength(0);
 	});
 
-	it("a comment on a queued mirror starts it too, carrying the instruction", async () => {
-		const { p, resumed } = setup();
-
+	it("a comment on a queued mirror is conversation — it does not start the work", async () => {
+		// Harold's ruling (2026-09-02): only the claimant's delegation starts
+		// work; a colleague takes over by claiming, which is auditable.
+		const { p, resumed, cockpitPosts } = setup();
 		await p.handleMirrorAction(
 			action("go ahead, but keep it simple"),
 			CLIENT_ISSUE,
 		);
+		expect(resumed).toHaveLength(0);
+		expect(p.scopeApprovals.isImplementationDeferred(CLIENT_ISSUE)).toBe(true);
+		expect(cockpitPosts.at(-1).content.body).toContain("Delegate it to me");
+	});
 
-		expect(resumed).toHaveLength(1);
-		expect(resumed[0][4]).toContain("go ahead, but keep it simple");
+	it("a known reviewer typing on an UNCLAIMED mirror does not start it either — the claim is the authority", async () => {
+		const { p, resumed } = setup();
+		p.cockpitMirror.assigneeIdFor = vi.fn().mockResolvedValue(undefined);
+		await p.handleMirrorAction(action("", HAROLD), CLIENT_ISSUE);
+		expect(resumed).toHaveLength(0);
 	});
 
 	it("registers the link BEFORE resuming, marked as owning the delivery", async () => {
