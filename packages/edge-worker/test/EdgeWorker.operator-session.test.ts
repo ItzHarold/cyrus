@@ -522,6 +522,46 @@ describe("cockpit workability (PON-211)", () => {
 		).toBe(1);
 	});
 
+	it("lifecycleTiming computes build time, queue wait and cycle from the records (our authoritative clock)", () => {
+		const { p } = setup();
+		const base = Date.parse("2026-09-02T10:00:00Z");
+		p.scopeApprovals.recordProposed(CLIENT_ISSUE, { workspaceId: CLIENT_WS });
+		p.scopeApprovals.recordApproved(CLIENT_ISSUE, { workspaceId: CLIENT_WS });
+		p.scopeApprovals.get(CLIENT_ISSUE).approvedAt = new Date(
+			base,
+		).toISOString();
+		p.operatorSessions.register({
+			mirrorSessionId: MIRROR_SESSION,
+			mirrorIssueId: "m",
+			clientSessionId: CLIENT_SESSION,
+			clientIssueId: CLIENT_ISSUE,
+			clientIssueIdentifier: "ACM-13",
+			clientWorkspaceId: CLIENT_WS,
+			cockpitWorkspaceId: COCKPIT_WS,
+			repositoryId: "r",
+			startedAt: new Date(base + 30 * 60000).toISOString(),
+			ownsDelivery: true,
+		});
+		p.verificationGate.recordPending(CLIENT_ISSUE, {
+			workspaceId: CLIENT_WS,
+			issueIdentifier: "ACM-13",
+			sessionId: CLIENT_SESSION,
+			summary: "Done. https://github.com/x/y/pull/1",
+			isError: false,
+		});
+		p.verificationGate.get(CLIENT_ISSUE).completedAt = new Date(
+			base + 45 * 60000,
+		).toISOString();
+		p.verificationGate.get(CLIENT_ISSUE).mergedAt = new Date(
+			base + 60 * 60000,
+		).toISOString();
+
+		const timing = p.lifecycleTiming(CLIENT_ISSUE);
+		expect(timing.queueWait).toBe("30m"); // approval -> delegation
+		expect(timing.buildTime).toBe("15m"); // delegation -> build end
+		expect(timing.cycle).toBe("1h"); // approval -> merge
+	});
+
 	it("records which human drove the turn", async () => {
 		// The multi-reviewer seam: one agent identity serves every mirror, so
 		// Linear attributes every turn to the app. This is the only place the

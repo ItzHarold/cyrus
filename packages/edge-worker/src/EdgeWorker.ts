@@ -300,6 +300,22 @@ type CyrusToolsMcpContext = {
  */
 const AGENT_SESSION_THREAD_MARKER = "This thread is for an agent session";
 
+/**
+ * Human duration for the lifecycle clock (2026-09-02). Minutes up to an hour,
+ * then hours, then days — the reviewer reads a shape, not a stopwatch.
+ */
+function formatLifecycleDuration(ms: number): string {
+	const min = Math.round(ms / 60000);
+	if (min < 1) return "under a minute";
+	if (min < 60) return `${min}m`;
+	const h = Math.floor(min / 60);
+	const m = min % 60;
+	if (h < 24) return m ? `${h}h ${m}m` : `${h}h`;
+	const d = Math.floor(h / 24);
+	const rh = h % 24;
+	return rh ? `${d}d ${rh}h` : `${d}d`;
+}
+
 export class EdgeWorker extends EventEmitter {
 	private config: EdgeWorkerConfig;
 	private repositories: Map<string, RepositoryConfig> = new Map(); // repository 'id' (internal, stored in config.json) mapped to the full repo config
@@ -7601,6 +7617,38 @@ ${taskSection}`;
 	 * names commits, files and blockers, because its reader is technical and
 	 * about to review a diff. The two audiences finally get one message each.
 	 */
+	/**
+	 * Our own lifecycle clock (2026-09-02). Linear's session timer counts from
+	 * the thread's birth (the mirror's auto-session), not from delegation —
+	 * agentSessionUpdate has no startedAt to correct it, and reusing the birth
+	 * thread is requirement A — so the native number is thread age and THESE
+	 * are the authoritative ones, read from the records the flow already
+	 * stamps. Build time is delegation -> build end; queue wait is scope
+	 * approval -> delegation; cycle is scope approval -> merge.
+	 */
+	private lifecycleTiming(
+		issueId: string,
+		link?: OperatorSessionLink,
+	): { queueWait?: string; buildTime?: string; cycle?: string } {
+		const scope = this.scopeApprovals.get(issueId);
+		const record = this.verificationGate.get(issueId);
+		const startedAt =
+			link?.startedAt ??
+			this.operatorSessions.forClientIssue(issueId)?.startedAt;
+		const approvedAt = scope?.approvedAt;
+		const heldAt = record?.completedAt;
+		const mergedAt = record?.mergedAt;
+		const span = (a?: string, b?: string): string | undefined =>
+			a && b && Date.parse(b) >= Date.parse(a)
+				? formatLifecycleDuration(Date.parse(b) - Date.parse(a))
+				: undefined;
+		return {
+			queueWait: span(approvedAt, startedAt),
+			buildTime: span(startedAt, heldAt),
+			cycle: span(approvedAt, mergedAt),
+		};
+	}
+
 	private async handOffToReviewer(
 		issueId: string,
 		link: OperatorSessionLink,
@@ -7647,11 +7695,24 @@ ${taskSection}`;
 							)
 							.join(", ")}`
 					: "";
+			const timing = this.lifecycleTiming(issueId, link);
+			const timingLine =
+				timing.buildTime || timing.queueWait
+					? `**Timing:** ${[
+							timing.buildTime ? `built in ${timing.buildTime}` : "",
+							timing.queueWait ? `queued ${timing.queueWait} first` : "",
+						]
+							.filter(Boolean)
+							.join(
+								" · ",
+							)}. _(Our clock, from delegation; Linear's timer shows thread age.)_`
+					: "";
 			const body = [
 				`**Finished — over to you.** The work is complete and held; nothing has gone to the client.${
 					record.isError ? " **The session ended with an error.**" : ""
 				}`,
 				record.capturedHeadSha ? `Commit \`${record.capturedHeadSha}\`` : "",
+				timingLine,
 				prs,
 				startHere,
 				handOff ? `\n**From the run:**\n\n${handOff}` : "",
@@ -8913,10 +8974,11 @@ ${taskSection}`;
 			issueIdentifier?: string;
 		},
 	): Promise<boolean> {
+		const timing = this.lifecycleTiming(issueId);
 		try {
 			await this.agentSessionManager.postResponseActivityStrict(
 				record.sessionId,
-				CLIENT_MESSAGES.mergedCloseOut(),
+				CLIENT_MESSAGES.mergedCloseOut(undefined, timing.cycle),
 			);
 		} catch (error) {
 			// Not "carry on": the caller retries the whole close-out next tick
@@ -8927,7 +8989,11 @@ ${taskSection}`;
 		}
 		void this.cockpitMirror.commentOnMirror(
 			issueId,
-			`**Merged by the client** — ${record.issueIdentifier ?? "this work"} is done and closing out.`,
+			`**Merged by the client** — ${record.issueIdentifier ?? "this work"} is done and closing out.${
+				timing.cycle
+					? ` Total cycle time ${timing.cycle} (scope approval → merge).`
+					: ""
+			}`,
 		);
 		// The mirror closes honestly against the client issue's own state
 		// (PON-209), so move the client issue first and let that path do it.

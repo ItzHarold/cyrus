@@ -140,8 +140,9 @@ export const CLIENT_MESSAGES = {
 	 * Short on purpose: the work is done, they did the last step, and the
 	 * thread should end rather than trail off.
 	 */
-	mergedCloseOut: (what?: string) =>
+	mergedCloseOut: (what?: string, cycle?: string) =>
 		`Merged — ${what ?? "this"} is now part of your project. Thanks for ` +
-		`the review. If anything about it needs changing later, open a new ` +
-		`request and we'll pick it up.`,
+		`the review.${cycle ? ` Start to finish, ${cycle} from the go-ahead.` : ""} ` +
+		`If anything about it needs changing later, open a new request and ` +
+		`we'll pick it up.`,
 } as const;
