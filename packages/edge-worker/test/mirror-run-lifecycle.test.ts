@@ -78,7 +78,7 @@ function setup() {
 	p.cockpitMirror.assigneeIdFor = vi.fn().mockResolvedValue(HAROLD);
 	p.cockpitMirror.upsert = vi.fn().mockResolvedValue(undefined);
 	p.cockpitMirror.close = vi.fn().mockResolvedValue(undefined);
-	p.endNarrationTurn = vi.fn();
+	p.cockpitMirror.commentOnMirror = vi.fn().mockResolvedValue(undefined);
 	p.mirrorInVerification = vi.fn();
 	p.persistScopeApprovals = vi.fn().mockResolvedValue(undefined);
 	p.savePersistedState = vi.fn().mockResolvedValue(undefined);
@@ -141,7 +141,9 @@ describe("a mirror-owned run that ends without handing anything over", () => {
 			"queued",
 		);
 		expect(p.scopeApprovals.isImplementationDeferred(CLIENT_ISSUE)).toBe(true);
-		expect(p.endNarrationTurn).toHaveBeenCalledWith(
+		// v3.1: the sign-off is an inbox comment on the mirror, never a
+		// thread — the implementation thread is the only one the mirror has.
+		expect(p.cockpitMirror.commentOnMirror).toHaveBeenCalledWith(
 			CLIENT_ISSUE,
 			expect.stringContaining("your move"),
 		);

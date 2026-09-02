@@ -294,6 +294,14 @@ export interface SerializedCockpitMirror {
 	queueRank?: number;
 	/** Place within this client's own queue, 1-based (PON-211). */
 	clientQueuePosition?: number;
+	/** v3.1: the one queued mirror to start next (carries the `next-up` label). */
+	nextUp?: boolean;
+	/** v3.1: why this queued mirror cannot start yet, in the reviewer's words. */
+	gatedBy?: string;
+	/** v3.1: what this mirror is behind in the working order. */
+	behind?: string;
+	/** v3.1: labels last written in this shape (state labels stripped). */
+	labelsVersion?: number;
 	/**
 	 * The mirror's own agent session (PON-212) — where the client-quiet
 	 * narration is redirected so the operator can read what was done. Created

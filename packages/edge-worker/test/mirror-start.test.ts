@@ -703,17 +703,21 @@ describe("PON-228 — the reviewer gets a finished turn, on the right thread", (
 		expect(cockpitPosts.length).toBe(before + 1);
 	});
 
-	it("points the narration thread at the live thread when work starts", async () => {
-		const { p } = setup();
-		const endNarrationTurn = vi.fn();
-		p.endNarrationTurn = endNarrationTurn;
+	it("starting work opens no second thread and narrates nowhere — the implementation thread is the only one (v3.1, requirement A)", async () => {
+		const { p, resumed } = setup();
+		const createAgentSession = vi.fn();
+		p.activitySinks.set(COCKPIT_WS, {
+			postActivity: vi.fn(),
+			createAgentSession,
+		});
+		p.cockpitMirror.commentOnMirror = vi.fn();
 
 		await p.handleMirrorAction(action(""), CLIENT_ISSUE);
 
-		expect(endNarrationTurn).toHaveBeenCalledWith(
-			CLIENT_ISSUE,
-			expect.stringContaining("Work has started"),
-		);
+		expect(resumed).toHaveLength(1);
+		expect(createAgentSession).not.toHaveBeenCalled();
+		expect(p.cockpitMirror.commentOnMirror).not.toHaveBeenCalled();
+		expect(p.endNarrationTurn).toBeUndefined();
 	});
 });
 

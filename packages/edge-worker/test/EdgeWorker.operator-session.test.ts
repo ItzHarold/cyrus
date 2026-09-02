@@ -413,87 +413,75 @@ describe("cockpit workability (PON-211)", () => {
 		expect(p.operatorSessions.get(MIRROR_SESSION).reviewerId).toBe(HAROLD);
 	});
 
-	it("opens at most one narration thread per mirror, under concurrency", async () => {
-		// Observed live: two threads on one mirror 207ms apart, and the record
-		// kept only the second — so the reviewer arrived at a thread the
-		// narration was not going to.
+	it("re-delegating a mirror that already has its implementation thread reuses it — never a second one (v3.1, requirement A)", async () => {
+		// Observed live on CKP-25: delegating a queued mirror produced a
+		// second agent thread next to the one the work runs in. One thread
+		// per side is the rule; a re-delegation is "start again" on it.
 		const { p } = setup();
-		const createAgentSession = vi
-			.fn()
-			.mockImplementation(
-				() => new Promise((r) => setTimeout(() => r("narr-1"), 5)),
-			);
-		p.activitySinks.set(COCKPIT_WS, {
-			postActivity: vi.fn(),
-			createAgentSession,
+		p.cockpitMirror.clientIssueIdFor = vi.fn().mockReturnValue(CLIENT_ISSUE);
+		p.operatorSessions.register({
+			mirrorSessionId: MIRROR_SESSION,
+			mirrorIssueId: MIRROR_ISSUE,
+			clientSessionId: CLIENT_SESSION,
+			clientIssueId: CLIENT_ISSUE,
+			clientIssueIdentifier: "ACM-13",
+			clientWorkspaceId: CLIENT_WS,
+			cockpitWorkspaceId: COCKPIT_WS,
+			repositoryId: repo.id,
+			startedAt: new Date().toISOString(),
+			reviewerId: HAROLD,
+			ownsDelivery: true,
 		});
-		p.cockpitMirror.narrationSessionIdFor = vi.fn().mockReturnValue(undefined);
-
-		const [a, b, c] = await Promise.all([
-			p.openNarrationSessionOnce(MIRROR_ISSUE, CLIENT_ISSUE),
-			p.openNarrationSessionOnce(MIRROR_ISSUE, CLIENT_ISSUE),
-			p.openNarrationSessionOnce(MIRROR_ISSUE, CLIENT_ISSUE),
-		]);
-
-		expect(createAgentSession).toHaveBeenCalledTimes(1);
-		expect([a, b, c]).toEqual(["narr-1", "narr-1", "narr-1"]);
-	});
-
-	it("adopts the thread Linear opened with the mirror instead of adding one", async () => {
-		// Creating the mirror issue as the app yields an agent session on its
-		// own — issue.createdAt and session.createdAt are identical — so
-		// creating another gave the reviewer two threads with the narration
-		// only in one.
-		const { p } = setup();
-		const createAgentSession = vi.fn().mockResolvedValue("ours-1");
-		p.activitySinks.set(COCKPIT_WS, {
-			postActivity: vi.fn(),
-			createAgentSession,
-		});
-		p.cockpitMirror.narrationSessionIdFor = vi.fn().mockReturnValue(undefined);
-		p.cockpitMirror.existingSessionOnMirror = vi
-			.fn()
-			.mockResolvedValue("linears-own-1");
-
-		const got = await p.openNarrationSessionOnce(MIRROR_ISSUE, CLIENT_ISSUE);
-
-		expect(got).toBe("linears-own-1");
-		expect(createAgentSession).not.toHaveBeenCalled();
-	});
-
-	it("creates a thread when the mirror genuinely has none", async () => {
-		const { p } = setup();
-		const createAgentSession = vi.fn().mockResolvedValue("ours-1");
-		p.activitySinks.set(COCKPIT_WS, {
-			postActivity: vi.fn(),
-			createAgentSession,
-		});
-		p.cockpitMirror.narrationSessionIdFor = vi.fn().mockReturnValue(undefined);
-		p.cockpitMirror.existingSessionOnMirror = vi
-			.fn()
-			.mockResolvedValue(undefined);
-
-		const got = await p.openNarrationSessionOnce(MIRROR_ISSUE, CLIENT_ISSUE);
-
-		expect(got).toBe("ours-1");
-		expect(createAgentSession).toHaveBeenCalledTimes(1);
-	});
-
-	it("never opens a second thread for a mirror that already has one", async () => {
-		const { p } = setup();
 		const createAgentSession = vi.fn();
 		p.activitySinks.set(COCKPIT_WS, {
 			postActivity: vi.fn(),
 			createAgentSession,
 		});
-		p.cockpitMirror.narrationSessionIdFor = vi
-			.fn()
-			.mockReturnValue("existing-1");
+		const handleMirrorAction = vi.fn().mockResolvedValue(undefined);
+		p.handleMirrorAction = handleMirrorAction;
+		const events: string[] = [];
+		p.logger.event = vi.fn((name: string) => events.push(name));
 
-		const got = await p.openNarrationSessionOnce(MIRROR_ISSUE, CLIENT_ISSUE);
+		await p.recoverMissingSessionForAssignment(
+			MIRROR_ISSUE,
+			"CKP-9",
+			COCKPIT_WS,
+		);
 
-		expect(got).toBe("existing-1");
+		expect(handleMirrorAction).toHaveBeenCalledWith(
+			expect.objectContaining({
+				mirrorSessionId: MIRROR_SESSION,
+				organizationId: COCKPIT_WS,
+				rawBody: "",
+			}),
+			CLIENT_ISSUE,
+		);
 		expect(createAgentSession).not.toHaveBeenCalled();
+		expect(events).toContain("mirror_redelegation_reused_thread");
+	});
+
+	it("a mirror with no implementation thread yet takes the ordinary recovery path", async () => {
+		const { p } = setup();
+		p.cockpitMirror.clientIssueIdFor = vi.fn().mockReturnValue(CLIENT_ISSUE);
+		const handleMirrorAction = vi.fn();
+		p.handleMirrorAction = handleMirrorAction;
+
+		await p.recoverMissingSessionForAssignment(
+			MIRROR_ISSUE,
+			"CKP-9",
+			COCKPIT_WS,
+		);
+
+		expect(handleMirrorAction).not.toHaveBeenCalled();
+	});
+
+	it("the narration machinery is gone: no shadow, no opener, no sign-off into a thread", () => {
+		// Requirement A retires the narration thread outright. Its three
+		// entry points must not exist, or the next refactor wires them back.
+		const { p } = setup();
+		expect(p.endNarrationTurn).toBeUndefined();
+		expect(p.openNarrationSessionOnce).toBeUndefined();
+		expect(p.attachNarrationShadow).toBeUndefined();
 	});
 
 	it("does not recompose the mirror when an operator turn ends", async () => {
