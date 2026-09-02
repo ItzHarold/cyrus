@@ -206,6 +206,7 @@ import {
 import {
 	buildDeliveredRequestBlock,
 	buildReviewerRequestBlock,
+	DELIVERED_WORK_DENY,
 	interpretReworkAnswer,
 	isReworkConfirmQuestion,
 } from "./request-intent.js";
@@ -5875,14 +5876,31 @@ ${taskSection}`;
 		// delivered software in front of the person who owns it. The block
 		// only decides question-versus-change-request; the queue mechanics of
 		// a reopened piece of work are §8.8's own increment.
-		const issueId = sessionId ? this.sessionIssueId(sessionId) : undefined;
-		const delivered =
-			issueId && this.verificationGate.get(issueId)?.state === "delivered";
 		return (
 			buildClientSurfaceRuleBlock() +
 			buildNeedsInfoRuleBlock() +
-			(delivered ? buildDeliveredRequestBlock() : "")
+			(this.isDeliveredClientSession(sessionId)
+				? buildDeliveredRequestBlock()
+				: "")
 		);
+	}
+
+	/**
+	 * A CLIENT session (never an operator one) whose issue is delivered and
+	 * so must not be changed directly — a change goes back through review as
+	 * rework. Drives both the prompt guardrail and the tool denial.
+	 */
+	private isDeliveredClientSession(sessionId: string | undefined): boolean {
+		if (this.operatorSessions.isOperatorSession(sessionId)) return false;
+		const issueId = sessionId ? this.sessionIssueId(sessionId) : undefined;
+		return Boolean(
+			issueId && this.verificationGate.get(issueId)?.state === "delivered",
+		);
+	}
+
+	/** The mutation tools withheld from a delivered client session (§8.8). */
+	private deliveredWorkDeny(sessionId: string | undefined): string[] {
+		return this.isDeliveredClientSession(sessionId) ? DELIVERED_WORK_DENY : [];
 	}
 
 	/** Gate on for the workspace AND the issue's scope not yet approved. */
@@ -15019,6 +15037,10 @@ ${input.userComment}
 			...(this.operatorSessions.isOperatorSession(sessionId)
 				? OPERATOR_GIT_DENY
 				: []),
+			// §8.8: a delivered client session cannot change the work — a
+			// change re-enters through review as rework. Enforced, not just
+			// asked, because a client must never receive an unreviewed change.
+			...this.deliveredWorkDeny(sessionId),
 		];
 
 		// Set up attachments directory
