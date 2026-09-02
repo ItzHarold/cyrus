@@ -642,6 +642,31 @@ describe("PON-228 — the reviewer gets a finished turn, on the right thread", (
 		expect(body).toContain("approve:");
 	});
 
+	it("names background tasks that were terminated with the run (Harold's ruling)", async () => {
+		// A run that leaves a dev server or a watch up: the delivery is a
+		// finished state, so the task is cut off with the run and the reviewer
+		// is told which, not left to wonder why their preview went dark.
+		const { p, cockpitPosts } = await held();
+		p.agentSessionManager.getTerminatedBackgroundTasks = vi
+			.fn()
+			.mockReturnValue([
+				{
+					id: "t1",
+					type: "shell",
+					status: "running",
+					description: "dev server",
+					command: "npm run dev",
+				},
+			]);
+
+		await p.signOffIntoVerification(CLIENT_ISSUE);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const body = cockpitPosts.at(-1).content.body;
+		expect(body).toContain("Background tasks stopped with the run");
+		expect(body).toContain("npm run dev");
+	});
+
 	it("will not pass off the pre-approval reading as an account of the run", async () => {
 		// Seen on CKP-22: the scoping-time internal reading appeared under
 		// "From the run" — a note about what the work was going to be,
