@@ -9057,6 +9057,17 @@ ${taskSection}`;
 	private selfCompletedIssues = new Set<string>();
 
 	/**
+	 * Mirror birth sessions that have had their honest "parked" line posted.
+	 *
+	 * Linear opens an agent session when a mirror is created; on parked work
+	 * nothing runs on it, which Linear renders as "Agent didn't start — Retry"
+	 * — a failure shape on work that is merely waiting to be delegated. We
+	 * close the turn once with a plain line; this remembers which sessions we
+	 * already closed so a re-delivered birth webhook does not double-post.
+	 */
+	private parkedBirthClosed = new Set<string>();
+
+	/**
 	 * The client merged: end the cycle on both sides (PON-233).
 	 *
 	 * Order is load-bearing. The client's close-out and the merged mark go
@@ -10444,7 +10455,20 @@ ${taskSection}`;
 		) {
 			const permitted = await this.mayStartParkedWork(action, clientIssueId);
 			if (!permitted.ok) {
-				if (permitted.say) await reply(permitted.say);
+				if (permitted.say) {
+					await reply(permitted.say);
+				} else if (!this.parkedBirthClosed.has(mirrorSessionId)) {
+					// The mirror's birth: Linear opened this session when the
+					// mirror was created and nothing is running on it (parked,
+					// nobody has delegated). A refusal with no `say` is the
+					// nobody-asked case — left silent, the session sits as
+					// "Agent didn't start — Retry", a failure shape on work
+					// that is only waiting. Close the turn once, honestly, as a
+					// response so the turn completes. The reviewer's delegation
+					// reuses this same session.
+					this.parkedBirthClosed.add(mirrorSessionId);
+					await reply("Parked — nothing running here; delegate to start.");
+				}
 				return;
 			}
 			await this.startWorkFromMirror(action, clientIssueId, {
