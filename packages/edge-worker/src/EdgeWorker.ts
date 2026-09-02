@@ -54,6 +54,7 @@ import type {
 	WebhookIssue,
 } from "cyrus-core";
 import {
+	AgentActivitySignal,
 	AgentSessionStatus,
 	CLIIssueTrackerService,
 	CLIRPCServer,
@@ -206,9 +207,10 @@ import {
 import {
 	buildDeliveredRequestBlock,
 	buildReviewerRequestBlock,
-	CLIENT_WRITE_DENY,
 	interpretReworkAnswer,
 	isReworkConfirmQuestion,
+	REWORK_NO_LABEL,
+	REWORK_YES_LABEL,
 } from "./request-intent.js";
 import { ScopeApprovalStore } from "./ScopeApprovalStore.js";
 import {
@@ -5898,29 +5900,155 @@ ${taskSection}`;
 		);
 	}
 
-	/** The mutation tools withheld from a delivered client session (§8.8). */
-	private deliveredWorkDeny(sessionId: string | undefined): string[] {
-		return this.isDeliveredClientSession(sessionId) ? CLIENT_WRITE_DENY : [];
+	/**
+	 * Capability by state (Harold's ruling, 2026-09-02). Building the work —
+	 * file edits, git write/push — is a capability of the DELEGATED MIRROR
+	 * session and nothing else. Two invariants, both enforced here rather than
+	 * asked in a prompt:
+	 *   A. A client-workspace session never mutates the work, in any state —
+	 *      before or after approval, on delivery, ever. It scopes, elicits,
+	 *      confirms, answers, relays.
+	 *   B. A mirror session mutates only after claim + delegation. Inert birth
+	 *      is a capability, not the absence of activity: a session Linear
+	 *      creates on a mirror before it is delegated (isOperatorSession is
+	 *      false) still cannot build, however many activities it has.
+	 * Native cockpit work (the team's own build issues) and non-client-flow
+	 * workspaces are untouched.
+	 */
+	private shouldDenyMutation(
+		sessionId: string | undefined,
+		workspaceId: string | undefined,
+	): boolean {
+		const cockpit = this.config.cockpit;
+		if (!cockpit) return false;
+		// The delegated mirror build/review session is the one that may build.
+		if (this.operatorSessions.isOperatorSession(sessionId)) return false;
+		const issueId = sessionId ? this.sessionIssueId(sessionId) : undefined;
+		if (workspaceId === cockpit.linearWorkspaceId) {
+			// Invariant B: a cockpit-workspace session is denied only on a
+			// DERIVED mirror issue (an un-delegated mirror session). A native
+			// cockpit build is normal work.
+			return Boolean(issueId && this.cockpitMirror.clientIssueIdFor(issueId));
+		}
+		// Invariant A: a client-workspace session never mutates while its
+		// workspace runs the client flow.
+		const ws = workspaceId
+			? this.config.linearWorkspaces?.[workspaceId]
+			: undefined;
+		if (ws?.clientQuiet !== undefined) return ws.clientQuiet;
+		return (
+			this.scopeGateEnabled(workspaceId) || ws?.verifyBeforeDelivery !== false
+		);
+	}
+
+	/** File edits and git write/push — the tools that change the work. */
+	private isMutationTool(
+		toolName: string,
+		input: Record<string, unknown>,
+	): boolean {
+		if (
+			toolName === "Write" ||
+			toolName === "Edit" ||
+			toolName === "MultiEdit" ||
+			toolName === "NotebookEdit"
+		) {
+			return true;
+		}
+		if (toolName === "Bash") {
+			const cmd = String((input as { command?: unknown }).command ?? "");
+			return /\bgit\s+(commit|push|add|merge|rebase|cherry-pick|reset|apply|am|tag|stash)\b/.test(
+				cmd,
+			);
+		}
+		return false;
+	}
+
+	/** Sessions already handed a delivered-change confirm this turn (dedup). */
+	private deliveredConfirmPosted = new Set<string>();
+
+	/**
+	 * The v3.1 capability gate (Harold's ruling): consulted before any tool
+	 * runs. Denies a mutation the session has no capability for, and — on a
+	 * DELIVERED client session (decision 1) — posts the canonical
+	 * "make this change?" confirm itself and logs the attempt as a classifier
+	 * miss, so the model never has to author the confirm and a blocked change
+	 * still reaches the client as a choice.
+	 */
+	private createCapabilityGuard(
+		sessionId: string,
+		workspaceId: string,
+	): NonNullable<AgentRunnerConfig["guardCapability"]> {
+		return async (toolName, input) => {
+			if (!this.isMutationTool(toolName, input)) return undefined;
+			if (!this.shouldDenyMutation(sessionId, workspaceId)) return undefined;
+			const issueId = this.sessionIssueId(sessionId);
+			const delivered = Boolean(
+				issueId && this.verificationGate.get(issueId)?.state === "delivered",
+			);
+			if (delivered && issueId) {
+				this.postDeliveredChangeConfirm(sessionId, issueId, workspaceId);
+			}
+			this.logger.event("capability_denied", {
+				sessionId,
+				toolName,
+				issueId,
+				// Decision 1: a blocked mutation on delivered work is a miss by
+				// whatever should have classified the message as a change
+				// request before it reached a build attempt.
+				classifierMiss: delivered,
+				phase: delivered ? "delivered" : "pre-build",
+			});
+			return {
+				deny: true,
+				message: delivered
+					? "This work is already delivered. A change goes back through review as rework, never straight onto the client's branch — I've asked the client to confirm the change. Do not edit, commit or push here."
+					: "Building happens on the reviewer's mirror once it is delegated, not on this session. Read and propose, or ask — do not edit, commit or push here.",
+			};
+		};
 	}
 
 	/**
-	 * A CLIENT session (never an operator one) whose scope is NOT yet approved
-	 * must not build — it investigates and proposes, then parks on approval.
-	 * Both the assignee (API) and delegate (UI) entry paths create the same
-	 * AgentSession here, so both park identically (Harold's ruling,
-	 * 2026-09-02). Enforced, not just asked, because the scope-gate prompt
-	 * alone let a model build a trivial task before approval (seen live on
-	 * FRO-70: work held unapproved).
+	 * Post the canonical change-request confirm on a delivered client session
+	 * (decision 1). Once per turn. The client's "Yes, make this change" is read
+	 * by interpretReworkReply, which reopens the work as rework.
 	 */
-	private scopePendingClientDeny(
-		sessionId: string | undefined,
-		workspaceId: string | undefined,
-	): string[] {
-		if (this.operatorSessions.isOperatorSession(sessionId)) return [];
-		const issueId = sessionId ? this.sessionIssueId(sessionId) : undefined;
-		return this.scopeGatePendingForIssue(workspaceId, issueId)
-			? CLIENT_WRITE_DENY
-			: [];
+	private postDeliveredChangeConfirm(
+		sessionId: string,
+		_issueId: string,
+		workspaceId: string,
+	): void {
+		if (this.deliveredConfirmPosted.has(sessionId)) return;
+		this.deliveredConfirmPosted.add(sessionId);
+		const tracker = this.issueTrackers.get(workspaceId);
+		if (!tracker?.createAgentActivity) return;
+		const body =
+			"It sounds like you'd like a change to what was delivered. Shall I make it? It goes back through review, the same path the first delivery took.";
+		void tracker
+			.createAgentActivity({
+				agentSessionId: sessionId,
+				content: {
+					type: "elicitation",
+					body: this.agentSessionManager.sanitizeClientSurfaceText(
+						sessionId,
+						"elicitation",
+						body,
+					),
+				},
+				signal: AgentActivitySignal.Select,
+				signalMetadata: {
+					options: [
+						{ value: REWORK_YES_LABEL },
+						{ value: REWORK_NO_LABEL },
+						{ value: "Other" },
+					],
+				},
+			})
+			.then(() => {
+				this.logger.event("delivered_change_confirm_posted", { sessionId });
+			})
+			.catch((error) => {
+				this.logger.error("Could not post the change confirm:", error);
+			});
 	}
 
 	/** Gate on for the workspace AND the issue's scope not yet approved. */
@@ -10570,6 +10698,8 @@ ${taskSection}`;
 	}
 
 	private handleLaneSessionEnded(sessionId: string, reason: string): void {
+		// A new turn may post a fresh delivered-change confirm.
+		this.deliveredConfirmPosted.delete(sessionId);
 		// PON-138: a transient startup death schedules its own replay — the
 		// mirror stays as it was (the work is not over, it is retrying) and
 		// only the lane release below still applies.
@@ -13796,6 +13926,7 @@ ${input.userComment}
 			},
 			createAskUserQuestionCallback: (sid, wid) =>
 				this.createAskUserQuestionCallback(sid, wid)!,
+			createCapabilityGuard: (sid, wid) => this.createCapabilityGuard(sid, wid),
 			requireLinearWorkspaceId,
 		});
 
@@ -15057,15 +15188,11 @@ ${input.userComment}
 			...(this.operatorSessions.isOperatorSession(sessionId)
 				? OPERATOR_GIT_DENY
 				: []),
-			// §8.8: a delivered client session cannot change the work — a
-			// change re-enters through review as rework. Enforced, not just
-			// asked, because a client must never receive an unreviewed change.
-			...this.deliveredWorkDeny(sessionId),
-			// Scope gate: before approval the session proposes, it does not
-			// build. Withheld here so the assignee and delegate entry paths
-			// park identically and the mirror is born inert.
-			...this.scopePendingClientDeny(sessionId, resolvedWorkspaceId),
 		];
+		// v3.1 (Harold's capability-by-state): the deny above is a static
+		// list; WHO may mutate the work is enforced dynamically in the
+		// capability gate (createCapabilityGuard), so it holds in every state,
+		// not just the ones a label happened to name.
 
 		// Set up attachments directory
 		const workspaceFolderName = basename(session.workspace.path);

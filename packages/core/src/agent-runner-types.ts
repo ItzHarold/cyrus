@@ -526,6 +526,18 @@ export interface AgentRunnerConfig {
 	 * a single tool call will be rejected.
 	 */
 	onAskUserQuestion?: OnAskUserQuestion;
+	/**
+	 * v3.1 capability gate: consulted in `canUseTool` BEFORE a tool runs, so a
+	 * capability can be enforced by construction rather than by prompt. Return
+	 * a deny to block the tool (with a message the model sees); return
+	 * undefined to fall through to normal handling. The session id is captured
+	 * in the closure. Used to enforce that only a delegated mirror session may
+	 * mutate the work — every other session scopes, elicits, confirms, answers.
+	 */
+	guardCapability?: (
+		toolName: string,
+		input: Record<string, unknown>,
+	) => Promise<{ deny: true; message: string } | undefined>;
 	/** Logger instance for the runner */
 	logger?: ILogger;
 	/** Callback for each message received */

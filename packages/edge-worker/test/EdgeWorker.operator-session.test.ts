@@ -404,45 +404,28 @@ describe("cockpit workability (PON-211)", () => {
 		expect(p.sessionRuleBlocks(MIRROR_SESSION)).toBe("");
 	});
 
-	it("a scope-pending client session cannot build — tools withheld until approval, both entry paths park (§scope gate)", async () => {
-		// Root cause of the criterion-3 anomaly: the scope gate was a prompt
-		// the model could miss, so on a trivial task it sometimes built before
-		// approval (seen live on FRO-70: work held unapproved). The tools are
-		// now withheld by construction. The assignee (API) and delegate (UI)
-		// paths both create the same AgentSession on the issue, so both hit
-		// this state — the enforcement is entry-path independent.
+	it("capability by state — invariant A: a client session never gets mutating tools, any state", async () => {
 		const { p } = setup();
-		// Default: scope gate on, scope not approved -> pending.
-		expect(p.scopeGatePendingForIssue(CLIENT_WS, CLIENT_ISSUE)).toBe(true);
-		const denied = p.scopePendingClientDeny(CLIENT_SESSION, CLIENT_WS);
-		expect(denied).toContain("Write");
-		expect(denied).toContain("Edit");
-		expect(denied.some((x: string) => x.startsWith("Bash(git commit"))).toBe(
-			true,
-		);
-		expect(denied.some((x: string) => x.startsWith("Bash(git push"))).toBe(
-			true,
-		);
-		// The reviewer's mirror session is never scope-gated this way.
-		expect(p.scopePendingClientDeny(MIRROR_SESSION, CLIENT_WS)).toEqual([]);
-		// Once the client approves, the build tools are restored (the build
-		// runs after the reviewer delegates the inert mirror).
+		const guard = p.createCapabilityGuard(CLIENT_SESSION, CLIENT_WS);
+		// scope-pending (default): mutation denied, read-only allowed.
+		expect(await guard("Write", {})).toMatchObject({ deny: true });
+		expect(await guard("Edit", {})).toMatchObject({ deny: true });
+		expect(await guard("Bash", { command: "git commit -m x" })).toMatchObject({
+			deny: true,
+		});
+		expect(await guard("Bash", { command: "git push" })).toMatchObject({
+			deny: true,
+		});
+		expect(await guard("Read", {})).toBeUndefined();
+		expect(await guard("Grep", {})).toBeUndefined();
+		expect(
+			await guard("Bash", { command: "git log --oneline" }),
+		).toBeUndefined();
+		// approved + parked (implementation deferred): STILL denied.
 		p.scopeApprovals.recordProposed(CLIENT_ISSUE, { workspaceId: CLIENT_WS });
 		p.scopeApprovals.recordApproved(CLIENT_ISSUE, { workspaceId: CLIENT_WS });
-		expect(p.scopeGatePendingForIssue(CLIENT_WS, CLIENT_ISSUE)).toBe(false);
-		expect(p.scopePendingClientDeny(CLIENT_SESSION, CLIENT_WS)).toEqual([]);
-	});
-
-	it("a delivered client session cannot change the work — mutation tools are withheld (§8.8)", async () => {
-		// A client change request must go back through review as rework; a
-		// prompt alone let a model push a direct, unreviewed change to a
-		// client's own software (seen live on FRO-65). The constraint is now
-		// also enforced by construction.
-		const { p } = setup();
-		// Not delivered yet: nothing withheld, and no delivered block.
-		expect(p.deliveredWorkDeny(CLIENT_SESSION)).toEqual([]);
-		expect(p.isDeliveredClientSession(CLIENT_SESSION)).toBe(false);
-
+		expect(await guard("Write", {})).toMatchObject({ deny: true });
+		// delivered: STILL denied.
 		p.verificationGate.recordPending(CLIENT_ISSUE, {
 			workspaceId: CLIENT_WS,
 			issueIdentifier: "ACM-13",
@@ -451,24 +434,92 @@ describe("cockpit workability (PON-211)", () => {
 			isError: false,
 		});
 		p.verificationGate.markDelivered(CLIENT_ISSUE);
+		expect(await guard("MultiEdit", {})).toMatchObject({ deny: true });
+	});
 
-		// Delivered client session: mutation tools withheld, prompt guardrail on.
-		expect(p.isDeliveredClientSession(CLIENT_SESSION)).toBe(true);
-		const denied = p.deliveredWorkDeny(CLIENT_SESSION);
-		expect(denied).toContain("Write");
-		expect(denied).toContain("Edit");
-		expect(denied.some((x: string) => x.startsWith("Bash(git commit"))).toBe(
-			true,
-		);
-		expect(denied.some((x: string) => x.startsWith("Bash(git push"))).toBe(
-			true,
-		);
-		expect(p.sessionRuleBlocks(CLIENT_SESSION)).toContain("change request");
+	it("capability by state — invariant B: only a delegated mirror session may build; an inert mirror session cannot, activities or not", async () => {
+		const { p } = setup();
+		// The delegated mirror (operator) session builds.
+		const opGuard = p.createCapabilityGuard(MIRROR_SESSION, COCKPIT_WS);
+		expect(await opGuard("Write", {})).toBeUndefined();
+		expect(await opGuard("Bash", { command: "git push" })).toBeUndefined();
+		// A session Linear created on a mirror issue that has NOT been delegated
+		// (not an operator session) cannot build — inert by capability.
+		const INERT = "sess-inert-mirror";
+		const MIRROR_UUID = "mirror-issue-uuid";
+		p.agentSessionManager.sessions.set(INERT, {
+			id: INERT,
+			issueId: MIRROR_UUID,
+			issueContext: { issueId: MIRROR_UUID, trackerId: "linear" },
+		});
+		const realClientIssueIdFor = p.cockpitMirror.clientIssueIdFor;
+		p.cockpitMirror.clientIssueIdFor = (id: string) =>
+			id === MIRROR_UUID
+				? CLIENT_ISSUE
+				: realClientIssueIdFor?.call(p.cockpitMirror, id);
+		const inertGuard = p.createCapabilityGuard(INERT, COCKPIT_WS);
+		expect(
+			await inertGuard("Bash", { command: "git commit -am x" }),
+		).toMatchObject({ deny: true });
+		expect(await inertGuard("Write", {})).toMatchObject({ deny: true });
+		// A native cockpit build issue (not a mirror) is normal work.
+		const NATIVE = "sess-native";
+		p.agentSessionManager.sessions.set(NATIVE, {
+			id: NATIVE,
+			issueId: "PON-999-uuid",
+			issueContext: { issueId: "PON-999-uuid", trackerId: "linear" },
+		});
+		const nativeGuard = p.createCapabilityGuard(NATIVE, COCKPIT_WS);
+		expect(await nativeGuard("Write", {})).toBeUndefined();
+	});
 
-		// The reviewer's mirror session is never treated as delivered client
-		// work — the rework runs there with full write access.
-		expect(p.isDeliveredClientSession(MIRROR_SESSION)).toBe(false);
-		expect(p.deliveredWorkDeny(MIRROR_SESSION)).toEqual([]);
+	it("decision 1 — a delivered change attempt posts the canonical confirm and logs a classifier miss", async () => {
+		const { p, clientPosts } = setup();
+		p.agentSessionManager.sanitizeClientSurfaceText = (
+			_s: string,
+			_k: string,
+			text: string,
+		) => text;
+		p.verificationGate.recordPending(CLIENT_ISSUE, {
+			workspaceId: CLIENT_WS,
+			issueIdentifier: "ACM-13",
+			sessionId: CLIENT_SESSION,
+			summary: "Done. https://github.com/x/y/pull/1",
+			isError: false,
+		});
+		p.verificationGate.markDelivered(CLIENT_ISSUE);
+		const events: Array<[string, any]> = [];
+		p.logger.event = vi.fn((n: string, d: any) => events.push([n, d]));
+
+		const guard = p.createCapabilityGuard(CLIENT_SESSION, CLIENT_WS);
+		const res = await guard("Write", {});
+		expect(res).toMatchObject({ deny: true });
+		await new Promise((r) => setTimeout(r, 10));
+
+		// The canonical confirm was posted by the system, with the exact labels.
+		const confirm = clientPosts.find(
+			(a: any) => a.content?.type === "elicitation",
+		);
+		expect(confirm).toBeDefined();
+		expect(JSON.stringify(confirm.signalMetadata)).toContain(
+			"Yes, make this change",
+		);
+		expect(JSON.stringify(confirm.signalMetadata)).toContain(
+			"No, leave it as it is",
+		);
+		// The attempt is logged as a classifier miss.
+		expect(
+			events.some(
+				([n, d]) => n === "capability_denied" && d.classifierMiss === true,
+			),
+		).toBe(true);
+
+		// Only once per turn, however many attempts.
+		await guard("Edit", {});
+		await new Promise((r) => setTimeout(r, 10));
+		expect(
+			clientPosts.filter((a: any) => a.content?.type === "elicitation").length,
+		).toBe(1);
 	});
 
 	it("records which human drove the turn", async () => {

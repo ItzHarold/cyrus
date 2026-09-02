@@ -340,7 +340,37 @@ describe("ClaudeRunner pending-work lifecycle (CYPACK-1310)", () => {
 		await sessionPromise;
 	});
 
-	it("keeps warm-mode behavior unchangeds warm-mode behavior unchanged (stream stays open regardless)", async () => {
+	it("canUseTool consults the capability guard: denies what the guard denies, allows the rest", async () => {
+		const guard = vi.fn(async (toolName: string) =>
+			toolName === "Write"
+				? { deny: true as const, message: "no building here" }
+				: undefined,
+		);
+		const state = installMockQuery(mockQuery);
+		const runner = new ClaudeRunner(
+			{ ...defaultConfig, guardCapability: guard },
+			false,
+		);
+		const sessionPromise = runner.startStreaming("go");
+		await vi.waitFor(() => {
+			expect(state.queryOptions).not.toBeNull();
+		});
+		const canUseTool = state.queryOptions.canUseTool;
+		expect(canUseTool).toBeDefined();
+		const opts = { signal: new AbortController().signal, toolUseID: "t1" };
+		expect(await canUseTool("Write", {}, opts)).toMatchObject({
+			behavior: "deny",
+			message: "no building here",
+		});
+		expect((await canUseTool("Read", {}, opts)).behavior).toBe("allow");
+		expect(guard).toHaveBeenCalledWith("Write", {});
+
+		runner.stop();
+		await state.endTurn([], "done").catch(() => {});
+		await sessionPromise.catch(() => {});
+	});
+
+	it("keeps warm-mode behavior unchanged (stream stays open regardless)", async () => {
 		const state = installMockQuery(mockQuery);
 		const runner = new ClaudeRunner(defaultConfig, true);
 

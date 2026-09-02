@@ -146,6 +146,11 @@ export interface IssueRunnerConfigInput {
 		sessionId: string,
 		workspaceId: string,
 	) => OnAskUserQuestion;
+	/** Factory for the v3.1 capability gate (Claude runner only) */
+	createCapabilityGuard?: (
+		sessionId: string,
+		workspaceId: string,
+	) => AgentRunnerConfig["guardCapability"];
 	/** Resolve the Linear workspace ID for a repository */
 	requireLinearWorkspaceId: (repo: RepositoryConfig) => string;
 	/** Plugins to load for the session (provides skills, hooks, etc.) */
@@ -444,6 +449,13 @@ export class RunnerConfigBuilder {
 			...(runnerType === "claude" &&
 				input.createAskUserQuestionCallback && {
 					onAskUserQuestion: input.createAskUserQuestionCallback(
+						input.sessionId,
+						resolvedWorkspaceId,
+					),
+				}),
+			...(runnerType === "claude" &&
+				input.createCapabilityGuard && {
+					guardCapability: input.createCapabilityGuard(
 						input.sessionId,
 						resolvedWorkspaceId,
 					),
