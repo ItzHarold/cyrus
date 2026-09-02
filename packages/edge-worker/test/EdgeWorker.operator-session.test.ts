@@ -404,6 +404,35 @@ describe("cockpit workability (PON-211)", () => {
 		expect(p.sessionRuleBlocks(MIRROR_SESSION)).toBe("");
 	});
 
+	it("a scope-pending client session cannot build — tools withheld until approval, both entry paths park (§scope gate)", async () => {
+		// Root cause of the criterion-3 anomaly: the scope gate was a prompt
+		// the model could miss, so on a trivial task it sometimes built before
+		// approval (seen live on FRO-70: work held unapproved). The tools are
+		// now withheld by construction. The assignee (API) and delegate (UI)
+		// paths both create the same AgentSession on the issue, so both hit
+		// this state — the enforcement is entry-path independent.
+		const { p } = setup();
+		// Default: scope gate on, scope not approved -> pending.
+		expect(p.scopeGatePendingForIssue(CLIENT_WS, CLIENT_ISSUE)).toBe(true);
+		const denied = p.scopePendingClientDeny(CLIENT_SESSION, CLIENT_WS);
+		expect(denied).toContain("Write");
+		expect(denied).toContain("Edit");
+		expect(denied.some((x: string) => x.startsWith("Bash(git commit"))).toBe(
+			true,
+		);
+		expect(denied.some((x: string) => x.startsWith("Bash(git push"))).toBe(
+			true,
+		);
+		// The reviewer's mirror session is never scope-gated this way.
+		expect(p.scopePendingClientDeny(MIRROR_SESSION, CLIENT_WS)).toEqual([]);
+		// Once the client approves, the build tools are restored (the build
+		// runs after the reviewer delegates the inert mirror).
+		p.scopeApprovals.recordProposed(CLIENT_ISSUE, { workspaceId: CLIENT_WS });
+		p.scopeApprovals.recordApproved(CLIENT_ISSUE, { workspaceId: CLIENT_WS });
+		expect(p.scopeGatePendingForIssue(CLIENT_WS, CLIENT_ISSUE)).toBe(false);
+		expect(p.scopePendingClientDeny(CLIENT_SESSION, CLIENT_WS)).toEqual([]);
+	});
+
 	it("a delivered client session cannot change the work — mutation tools are withheld (§8.8)", async () => {
 		// A client change request must go back through review as rework; a
 		// prompt alone let a model push a direct, unreviewed change to a

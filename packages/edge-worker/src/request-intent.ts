@@ -43,20 +43,21 @@ export const REWORK_YES_LABEL = "Yes, make this change";
 export const REWORK_NO_LABEL = "No, leave it as it is";
 
 /**
- * Tools denied on a DELIVERED client session (§8.8, 2026-09-02).
- *
- * The delivered-request prompt block tells the model to never change
- * delivered work directly — a change goes back through review as rework. But
- * a prompt is an instruction the model can miss, and here a miss means the
- * client gets an unreviewed change to their own software. So the constraint
- * is also made true by construction, the same way the pre-approval scope
- * phase withholds implementation tools: a delivered client session cannot
- * edit files or commit/push. It can still read (to answer questions) and ask
- * (to restate a change for confirmation). The rework itself, once confirmed,
- * runs on the reviewer's mirror session, which is not delivered and keeps
- * full write access.
+ * Implementation tools withheld from a CLIENT session that must not change
+ * the work (2026-09-02). Two phases withhold them, for the same reason — a
+ * prompt telling the model not to build is an instruction it can miss, and a
+ * miss changes the client's software when nobody asked:
+ *   - SCOPE PENDING: before the client approves the scope, the session
+ *     investigates and proposes, it does not build. The mirror is born inert
+ *     on approval; the reviewer's delegation starts the build.
+ *   - DELIVERED (§8.8): a change to delivered work goes back through review
+ *     as rework, never straight onto the client's branch.
+ * Either way the session can still read (Read/Grep/Glob) and ask
+ * (AskUserQuestion). The build — first pass or rework — runs on the
+ * reviewer's mirror session, which is neither scope-pending nor delivered
+ * and keeps full write access.
  */
-export const DELIVERED_WORK_DENY = [
+export const CLIENT_WRITE_DENY = [
 	"Write",
 	"Edit",
 	"MultiEdit",
