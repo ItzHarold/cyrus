@@ -404,6 +404,44 @@ describe("cockpit workability (PON-211)", () => {
 		expect(p.sessionRuleBlocks(MIRROR_SESSION)).toBe("");
 	});
 
+	it("a delivered client session cannot change the work — mutation tools are withheld (§8.8)", async () => {
+		// A client change request must go back through review as rework; a
+		// prompt alone let a model push a direct, unreviewed change to a
+		// client's own software (seen live on FRO-65). The constraint is now
+		// also enforced by construction.
+		const { p } = setup();
+		// Not delivered yet: nothing withheld, and no delivered block.
+		expect(p.deliveredWorkDeny(CLIENT_SESSION)).toEqual([]);
+		expect(p.isDeliveredClientSession(CLIENT_SESSION)).toBe(false);
+
+		p.verificationGate.recordPending(CLIENT_ISSUE, {
+			workspaceId: CLIENT_WS,
+			issueIdentifier: "ACM-13",
+			sessionId: CLIENT_SESSION,
+			summary: "Done. https://github.com/x/y/pull/1",
+			isError: false,
+		});
+		p.verificationGate.markDelivered(CLIENT_ISSUE);
+
+		// Delivered client session: mutation tools withheld, prompt guardrail on.
+		expect(p.isDeliveredClientSession(CLIENT_SESSION)).toBe(true);
+		const denied = p.deliveredWorkDeny(CLIENT_SESSION);
+		expect(denied).toContain("Write");
+		expect(denied).toContain("Edit");
+		expect(denied.some((x: string) => x.startsWith("Bash(git commit"))).toBe(
+			true,
+		);
+		expect(denied.some((x: string) => x.startsWith("Bash(git push"))).toBe(
+			true,
+		);
+		expect(p.sessionRuleBlocks(CLIENT_SESSION)).toContain("change request");
+
+		// The reviewer's mirror session is never treated as delivered client
+		// work — the rework runs there with full write access.
+		expect(p.isDeliveredClientSession(MIRROR_SESSION)).toBe(false);
+		expect(p.deliveredWorkDeny(MIRROR_SESSION)).toEqual([]);
+	});
+
 	it("records which human drove the turn", async () => {
 		// The multi-reviewer seam: one agent identity serves every mirror, so
 		// Linear attributes every turn to the app. This is the only place the

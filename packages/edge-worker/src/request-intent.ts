@@ -42,6 +42,33 @@ import { splitLabelAndNote } from "./scope-confirm-gate.js";
 export const REWORK_YES_LABEL = "Yes, make this change";
 export const REWORK_NO_LABEL = "No, leave it as it is";
 
+/**
+ * Tools denied on a DELIVERED client session (§8.8, 2026-09-02).
+ *
+ * The delivered-request prompt block tells the model to never change
+ * delivered work directly — a change goes back through review as rework. But
+ * a prompt is an instruction the model can miss, and here a miss means the
+ * client gets an unreviewed change to their own software. So the constraint
+ * is also made true by construction, the same way the pre-approval scope
+ * phase withholds implementation tools: a delivered client session cannot
+ * edit files or commit/push. It can still read (to answer questions) and ask
+ * (to restate a change for confirmation). The rework itself, once confirmed,
+ * runs on the reviewer's mirror session, which is not delivered and keeps
+ * full write access.
+ */
+export const DELIVERED_WORK_DENY = [
+	"Write",
+	"Edit",
+	"MultiEdit",
+	"NotebookEdit",
+	"Bash(git commit*)",
+	"Bash(git push*)",
+	"Bash(git add*)",
+	"Bash(git merge*)",
+	"Bash(git rebase*)",
+	"Bash(git cherry-pick*)",
+];
+
 /** Does this ask look like the change-request confirmation? */
 export function isReworkConfirmQuestion(question: {
 	options?: Array<{ label: string }>;
