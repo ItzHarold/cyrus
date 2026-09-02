@@ -661,8 +661,6 @@ export class EdgeWorker extends EventEmitter {
 				// any live session for that issue at it — so the narration the
 				// client's surface suppresses lands somewhere the operator can
 				// read instead of being dropped.
-				openNarrationSession: (mirrorIssueId, clientIssueId) =>
-					this.openNarrationSessionOnce(mirrorIssueId, clientIssueId),
 				// PON-219: the invariant that keeps unapproved work off the
 				// operator's board. Read live, per write — an issue crosses this
 				// line exactly once, mid-session, and a value captured earlier
@@ -4421,6 +4419,29 @@ ${taskSection}`;
 		issueIdentifier: string | undefined,
 		workspaceId: string,
 	): Promise<void> {
+		// v3.1 (requirement A): a cockpit mirror gets exactly ONE implementation
+		// thread. A re-delegation of a mirror that already has one is "start
+		// again" on that thread, not a reason to open another.
+		const mirrorClientIssueId = this.cockpitMirror.clientIssueIdFor(issueId);
+		if (mirrorClientIssueId) {
+			const link = this.operatorSessions.forClientIssue(mirrorClientIssueId);
+			if (link?.mirrorSessionId) {
+				this.logger.event("mirror_redelegation_reused_thread", {
+					issueId,
+					issueIdentifier,
+					mirrorSessionId: link.mirrorSessionId,
+				});
+				await this.handleMirrorAction(
+					{
+						organizationId: workspaceId,
+						mirrorSessionId: link.mirrorSessionId,
+						rawBody: "",
+					},
+					mirrorClientIssueId,
+				);
+				return;
+			}
+		}
 		const live = this.agentSessionManager
 			.getSessionsByIssueId(issueId)
 			.filter((session) => session.status !== AgentSessionStatus.Complete);
@@ -5202,13 +5223,6 @@ ${taskSection}`;
 		const activitySink = this.getActivitySinkForRepo(primaryRepo.id);
 		if (activitySink) {
 			agentSessionManager.setActivitySink(sessionId, activitySink);
-			// PON-212: if this issue already has a mirror thread, narrate into
-			// it from the first activity. The mirror may be created before or
-			// after the session; both orders have to work.
-			this.attachNarrationShadow(
-				issue.id,
-				this.cockpitMirror.narrationSessionIdFor(issue.id),
-			);
 		}
 
 		// PON-189: routing is operator information, not client information.
@@ -7350,27 +7364,6 @@ ${taskSection}`;
 	 * Best-effort throughout — a missing sign-off must never hold up the work
 	 * it is describing.
 	 */
-	private endNarrationTurn(clientIssueId: string, body: string): void {
-		try {
-			const narrationSessionId =
-				this.cockpitMirror.narrationSessionIdFor?.(clientIssueId);
-			const cockpitWs = this.config.cockpit?.linearWorkspaceId;
-			if (!narrationSessionId || !cockpitWs) return;
-			const tracker = this.issueTrackers.get(cockpitWs);
-			void tracker
-				?.createAgentActivity?.({
-					agentSessionId: narrationSessionId,
-					content: { type: "response", body },
-				})
-				.catch((error: unknown) => {
-					this.logger.debug(
-						`Could not end the narration turn: ${String(error)}`,
-					);
-				});
-		} catch (error) {
-			this.logger.debug(`Could not end the narration turn: ${String(error)}`);
-		}
-	}
 
 	private mirrorInVerification(issueId: string): void {
 		const record = this.verificationGate.get(issueId);
@@ -7419,9 +7412,10 @@ ${taskSection}`;
 			void this.handOffToReviewer(issueId, link);
 			return;
 		}
-		this.endNarrationTurn(
+		// v3.1 (requirement A): status goes to the inbox, never to a thread.
+		void this.cockpitMirror.commentOnMirror(
 			issueId,
-			"**Finished this turn — over to you.** The work is complete and held; nothing has gone to the client. Read the summary and links above, then `approve:` to release it, `reject: <feedback>` to send it back, or just say what you want changed.",
+			"**Finished this turn — over to you.** The work is complete and held; nothing has gone to the client. Read the summary and links, then `approve:` to release it, `reject: <feedback>` to send it back, or just say what you want changed.",
 		);
 	}
 
@@ -7615,98 +7609,6 @@ ${taskSection}`;
 					);
 				}
 			}
-		}
-	}
-
-	/**
-	 * Point every live session for a client issue at the mirror's thread
-	 * (PON-212).
-	 *
-	 * Called when the mirror's thread is created, and again whenever a session
-	 * starts on an issue that already has one — the two can happen in either
-	 * order, and a session that starts first would otherwise narrate into the
-	 * void for its whole run.
-	 */
-	/**
-	 * In-flight narration opens, keyed by mirror issue (PON-212).
-	 *
-	 * Observed live: two threads appeared on one mirror 207ms apart, and the
-	 * record kept only the second — so the reviewer arrived at a thread the
-	 * narration was not going to. Whatever the exact interleaving, opening a
-	 * thread is not idempotent and the guard has to be, so concurrent callers
-	 * share one promise and a mirror can only ever have one.
-	 */
-	private narrationOpens = new Map<string, Promise<string | undefined>>();
-
-	private openNarrationSessionOnce(
-		mirrorIssueId: string,
-		clientIssueId: string,
-	): Promise<string | undefined> {
-		const inFlight = this.narrationOpens.get(mirrorIssueId);
-		if (inFlight) return inFlight;
-		// An already-recorded thread is the strongest answer: never open a
-		// second one for a mirror that has one.
-		const known = this.cockpitMirror.narrationSessionIdFor(clientIssueId);
-		if (known) return Promise.resolve(known);
-
-		const cockpitWs = this.config.cockpit?.linearWorkspaceId;
-		const sink = cockpitWs ? this.activitySinks.get(cockpitWs) : undefined;
-		if (!sink) return Promise.resolve(undefined);
-
-		const open = (async () => {
-			try {
-				// Linear opens a thread on the mirror as it is created, so ask
-				// before making one — otherwise the reviewer sees two threads
-				// and the narration only lands in the second.
-				const adopted =
-					await this.cockpitMirror.existingSessionOnMirror(mirrorIssueId);
-				if (adopted) {
-					this.attachNarrationShadow(clientIssueId, adopted);
-					return adopted;
-				}
-				const sessionId = await sink.createAgentSession(mirrorIssueId);
-				this.attachNarrationShadow(clientIssueId, sessionId);
-				return sessionId;
-			} catch (error) {
-				this.logger.warn(
-					`Could not open the mirror's narration thread: ${String(error)}`,
-				);
-				return undefined;
-			}
-		})();
-		this.narrationOpens.set(mirrorIssueId, open);
-		return open;
-	}
-
-	private attachNarrationShadow(
-		clientIssueId: string,
-		narrationSessionId: string | undefined,
-	): void {
-		const cockpitWs = this.config.cockpit?.linearWorkspaceId;
-		const sink = cockpitWs ? this.activitySinks.get(cockpitWs) : undefined;
-		if (!sink || !narrationSessionId) return;
-		for (const session of this.agentSessionManager.getSessionsByIssueId(
-			clientIssueId,
-		)) {
-			// Operator sessions already post to the cockpit; shadowing one
-			// would echo it back into its own thread.
-			if (this.operatorSessions.isOperatorSession(session.id)) continue;
-			this.agentSessionManager.setShadowSink?.(session.id, {
-				sink,
-				targetSessionId: narrationSessionId,
-			});
-			// PON-216: the attach is the thing that silently stopped happening
-			// on resume, and there was no way to see it. A mirror going quiet
-			// looks identical to an agent with nothing to say, so the absence
-			// had to be inferred from missing activities weeks later. Journal
-			// it: whether narration is wired is now a grep, not an inference.
-			this.logger.info(
-				`[event:narration_shadow_attached] ${JSON.stringify({
-					sessionId: session.id,
-					issueId: clientIssueId,
-					narrationSessionId,
-				})}`,
-			);
 		}
 	}
 
@@ -8542,7 +8444,7 @@ ${taskSection}`;
 				});
 			return;
 		}
-		this.endNarrationTurn(issueId, body);
+		void this.cockpitMirror.commentOnMirror(issueId, body);
 	}
 
 	/**
@@ -9166,10 +9068,6 @@ ${taskSection}`;
 			target.workspaceId,
 			"needs-info",
 		);
-		this.endNarrationTurn(
-			clientIssueId,
-			"**Waiting on the client — their move.** I asked them on their own thread and nothing else is happening until they answer. Their reply comes back into this same work; the delivery stays held meanwhile.",
-		);
 		this.logger.event("operator_asked_client", {
 			clientIssueId,
 			issueIdentifier: target.issueIdentifier,
@@ -9742,11 +9640,6 @@ ${taskSection}`;
 			// moment this starts — Harold read exactly that and reported the
 			// run as stuck while it was sixteen minutes into working. Point it
 			// at the live one rather than leaving it insisting otherwise.
-			this.endNarrationTurn(
-				clientIssueId,
-				"**Work has started.** It runs in its own thread on this issue — follow it there; this thread stays as the record of the client's own conversation.",
-			);
-
 			this.logger.event("mirror_work_started", {
 				clientIssueId,
 				issueIdentifier: scope.issueIdentifier,
@@ -10692,16 +10585,9 @@ ${taskSection}`;
 		// shadow has finished writing, and the true state is "queued, nobody
 		// has picked this up". It self-corrects — a later client turn reopens
 		// the thread and its own end closes it again.
-		if (
-			endedIssueId &&
-			!operatorLink &&
-			this.scopeApprovals.isImplementationDeferred(endedIssueId)
-		) {
-			this.endNarrationTurn(
-				endedIssueId,
-				"**Queued — your move.** Nothing is running here: the client approved the scope and this is waiting to be picked up. Anything above is narration from their own conversation, not work on this issue. Assign yourself and delegate this to me and I'll start it.",
-			);
-		}
+		// v3.1 (requirement A): a parked mirror has no thread to sign off. Its
+		// description says "next up" or its place in the order; that is the
+		// whole surface until the reviewer delegates.
 		if (endedIssueId && this.verificationGate.isPending(endedIssueId)) {
 			// PON-152: completed work awaiting approval — the mirror shows
 			// in-verification instead of closing. Idempotent with the
@@ -10765,7 +10651,7 @@ ${taskSection}`;
 					: reason === "service_restart"
 						? "the service restarted underneath it"
 						: "it ended without handing anything over";
-		this.endNarrationTurn(
+		void this.cockpitMirror.commentOnMirror(
 			issueId,
 			`**Stopped before it was finished — your move.** The run ended (${why}). Whatever it pushed is still on the branch; delegate this mirror to me again and I'll pick it up from there. Nothing has gone to the client.`,
 		);
@@ -14871,13 +14757,6 @@ ${input.userComment}
 		// ACM-19: the mirror showed the scope investigation and NONE of the
 		// implementation that followed approval, which is the half that makes
 		// the other half read as work-before-consent.
-		const resumedIssueId = session.issueId ?? session.issue?.id;
-		if (resumedIssueId) {
-			this.attachNarrationShadow(
-				resumedIssueId,
-				this.cockpitMirror.narrationSessionIdFor(resumedIssueId),
-			);
-		}
 		// Check for existing runner
 		const existingRunner = session.agentRunner;
 

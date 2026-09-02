@@ -40,6 +40,8 @@ describe("CockpitMirror", () => {
 	let mirror: CockpitMirror;
 	let logger: ReturnType<typeof makeLogger>;
 
+	/** Marker labels (tenant, next-up) that already exist in the team. */
+	let existingMarkerLabels: Set<string>;
 	/** Open mirror-looking issues returned to reconcile's adoption query. */
 	let linearMirrorIssues: Array<{
 		id: string;
@@ -72,6 +74,19 @@ describe("CockpitMirror", () => {
 					state: {
 						type:
 							stateTypeByIssue.get(call.variables.id as string) ?? "started",
+					},
+				},
+			};
+		}
+		// v3.1: marker labels are found by name and created on demand.
+		if (call.query.includes("name: { eq: $name }")) {
+			const name = call.variables.name as string;
+			return {
+				team: {
+					labels: {
+						nodes: existingMarkerLabels.has(name)
+							? [{ id: `label-${name}`, name }]
+							: [],
 					},
 				},
 			};
@@ -171,6 +186,7 @@ describe("CockpitMirror", () => {
 	beforeEach(() => {
 		calls = [];
 		stateTypeByIssue = new Map();
+		existingMarkerLabels = new Set();
 		linearMirrorIssues = [];
 		issueCreateCounter = 0;
 		vi.stubGlobal(
@@ -209,7 +225,7 @@ describe("CockpitMirror", () => {
 		expect(calls).toHaveLength(0);
 	});
 
-	it("creates the mirror with team setup: missing labels created, project set, title carries the client identifier", async () => {
+	it("creates the mirror with team setup: the tenant label created, no state label, project set, title carries the client identifier", async () => {
 		makeMirror({
 			linearWorkspaceId: COCKPIT_WS,
 			teamId: TEAM_ID,
@@ -220,16 +236,11 @@ describe("CockpitMirror", () => {
 		const labelCreates = calls.filter((c) =>
 			c.query.includes("issueLabelCreate"),
 		);
+		// v3.1 (Harold): statuses are the state. The only label a mirror is
+		// born with names the tenant; no state label is created or applied.
 		expect(
 			labelCreates.map((c) => (c.variables.input as { name: string }).name),
-		).toEqual([
-			"active",
-			"needs-info",
-			"in-verification",
-			"in-client-review",
-			"rework",
-			"delivered",
-		]);
+		).toEqual(["devitaliteit"]);
 
 		const create = calls.find((c) => c.query.includes("issueCreate"));
 		const input = create?.variables.input as Record<string, unknown>;
@@ -239,7 +250,7 @@ describe("CockpitMirror", () => {
 		expect(input.title).toBe(
 			"DeVitaliteitVerrijkers · DVV-12 — Add CSV export",
 		);
-		expect(input.labelIds).toEqual(["label-active"]);
+		expect(input.labelIds).toEqual(["label-devitaliteit"]);
 		expect(String(input.description)).toContain(issue.url);
 		expect(String(input.description)).toContain("DVV Client");
 		expect(String(input.description)).toContain("authoritative");
@@ -347,7 +358,7 @@ describe("CockpitMirror", () => {
 		});
 	});
 
-	it("opens a narration thread for a mirror that predates it", async () => {
+	it("never opens a thread on a mirror — not even one that predates v3.1 (requirement A)", async () => {
 		// Otherwise only brand-new work becomes readable, and everything
 		// already in flight stays opaque forever.
 		const openNarrationSession = vi.fn().mockResolvedValue("narr-1");
@@ -368,13 +379,14 @@ describe("CockpitMirror", () => {
 
 		await mirror.upsert(issue, TENANT_WS, "in-verification");
 
-		expect(openNarrationSession).toHaveBeenCalledWith(
-			"mirror-old",
-			issue.issueId,
-		);
-		expect(mirror.serialize()[issue.issueId]?.narrationSessionId).toBe(
-			"narr-1",
-		);
+		// v3.1 (requirement A): a mirror carries ZERO sessions until the
+		// reviewer delegates it. A leftover opener is never called, nothing
+		// on the record points at a thread, and no session mutation is sent.
+		expect(openNarrationSession).not.toHaveBeenCalled();
+		expect(
+			mirror.serialize()[issue.issueId]?.narrationSessionId,
+		).toBeUndefined();
+		expect(calls.some((c) => /agentSession/i.test(c.query))).toBe(false);
 	});
 
 	it("refreshes an existing mirror when the renderer changes", async () => {
@@ -421,7 +433,7 @@ describe("CockpitMirror", () => {
 		expect(update).toBeDefined();
 		expect(
 			(update?.variables.input as { labelIds: string[] }).labelIds,
-		).toEqual(["label-needs-info"]);
+		).toEqual(["label-devitaliteit"]);
 	});
 
 	it("renders the queue position into the state", async () => {
@@ -637,6 +649,11 @@ describe("CockpitMirror", () => {
 		// first boot after the client model is in — and "I don't recognise
 		// this title" must never be grounds for closing a live delivery.
 		expect(
+			calls
+				.filter((c) => (c.variables.id as string) === "mirror-orphan")
+				.map((c) => c.query.slice(0, 70)),
+		).toEqual([]);
+		expect(
 			calls.some((c) => (c.variables.id as string) === "mirror-orphan"),
 		).toBe(false);
 		expect(
@@ -723,7 +740,7 @@ describe("CockpitMirror", () => {
 		const labelWarnings = (
 			logger as never as { warn: ReturnType<typeof vi.fn> }
 		).warn.mock.calls.filter((c) =>
-			String(c[0]).includes("cannot create state labels"),
+			String(c[0]).includes("could not resolve label"),
 		);
 		expect(labelWarnings).toHaveLength(1);
 		expect(mirror.size).toBe(1);
@@ -745,6 +762,149 @@ describe("CockpitMirror", () => {
 
 	// PON-169: the internal reading lands in the mirror description and
 	// survives every later state transition.
+	describe("working order (v3.1, requirement B)", () => {
+		const TENANT2 = "tenant-2";
+		const issueB = {
+			issueId: "client-issue-2",
+			issueIdentifier: "ACM-2",
+			title: "Totals",
+			url: "https://linear.app/acme/issue/ACM-2",
+		};
+		const issueC = {
+			issueId: "client-issue-3",
+			issueIdentifier: "ACM-3",
+			title: "Rounding",
+			url: "https://linear.app/acme/issue/ACM-3",
+		};
+		const lastLabels = (mirrorId: string): string[] | undefined =>
+			(
+				calls
+					.filter(
+						(c) =>
+							c.query.includes("issueUpdate") &&
+							c.variables.id === mirrorId &&
+							(c.variables.input as { labelIds?: string[] }).labelIds !==
+								undefined,
+					)
+					.pop()?.variables.input as { labelIds: string[] } | undefined
+			)?.labelIds;
+		const lastDescription = (mirrorId: string): string =>
+			String(
+				(
+					calls
+						.filter(
+							(c) =>
+								c.query.includes("issueUpdate") &&
+								c.variables.id === mirrorId &&
+								(c.variables.input as { description?: string }).description !==
+									undefined,
+						)
+						.pop()?.variables.input as { description: string } | undefined
+				)?.description ?? "",
+			);
+
+		it("exactly one startable mirror is next up; a gated one says why; a queued one says what it is behind", async () => {
+			makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
+			await mirror.upsert(issue, TENANT_WS, "queued"); // mirror-1, DVV
+			await mirror.upsert(issueB, TENANT2, "active"); // mirror-2, Acme building
+			await mirror.upsert(issueC, TENANT2, "queued"); // mirror-3, Acme, gated
+
+			// The DVV mirror is the one to start: it carries the label that
+			// renders in every list view, and the description says so.
+			expect(lastLabels("mirror-1")).toContain("label-next-up");
+			expect(lastDescription("mirror-1")).toContain("▶ **Next up**");
+			// The Acme mirror cannot start while Acme is building: no marker,
+			// and the reason in the reviewer's words.
+			expect(lastLabels("mirror-3") ?? []).not.toContain("label-next-up");
+			expect(lastDescription("mirror-3")).toContain(
+				"waiting: Client tenant-2 has ACM-2 active (one build at a time)",
+			);
+			// And it knows its place in the order.
+			expect(lastDescription("mirror-3")).toContain(
+				"behind DVV-12 (DeVitaliteitVerrijkers)",
+			);
+			// Never more than one next-up across the board.
+			const nextUps = Object.entries(mirror.serialize()).filter(
+				([, r]) => r.nextUp,
+			);
+			expect(nextUps.map(([id]) => id)).toEqual([issue.issueId]);
+			expect(logger.event).toHaveBeenCalledWith(
+				"cockpit_next_up",
+				expect.objectContaining({ issueId: "DVV-12" }),
+			);
+		});
+
+		it("two startable mirrors from two clients: only the first in the order is next up, the other is behind it", async () => {
+			makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
+			await mirror.upsert(issue, TENANT_WS, "queued"); // mirror-1, DVV
+			await mirror.upsert(issueC, TENANT2, "queued"); // mirror-2, Acme, nothing in flight
+
+			expect(lastLabels("mirror-1")).toContain("label-next-up");
+			expect(lastLabels("mirror-2") ?? []).not.toContain("label-next-up");
+			expect(lastDescription("mirror-2")).toContain(
+				"**Working order:** #2 — behind DVV-12 (DeVitaliteitVerrijkers)",
+			);
+			expect(
+				Object.values(mirror.serialize()).filter((r) => r.nextUp),
+			).toHaveLength(1);
+		});
+
+		it("the marker moves on when the next-up mirror starts, and vanishes when nothing can start", async () => {
+			makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
+			await mirror.upsert(issue, TENANT_WS, "queued");
+			await mirror.upsert(issueB, TENANT2, "active");
+			await mirror.upsert(issueC, TENANT2, "queued");
+			expect(lastLabels("mirror-1")).toContain("label-next-up");
+
+			await mirror.upsert(issue, TENANT_WS, "active"); // DVV starts
+
+			// DVV is building, Acme is gated: nothing is next up anywhere.
+			expect(lastLabels("mirror-1")).not.toContain("label-next-up");
+			expect(lastLabels("mirror-3") ?? []).not.toContain("label-next-up");
+			expect(
+				Object.values(mirror.serialize()).filter((r) => r.nextUp),
+			).toHaveLength(0);
+
+			await mirror.upsert(issueB, TENANT2, "delivered"); // Acme frees up
+
+			expect(lastLabels("mirror-3")).toContain("label-next-up");
+			expect(lastDescription("mirror-3")).toContain("▶ **Next up**");
+		});
+
+		it("a mirror carries the tenant label and never a state label, through every transition (requirement C)", async () => {
+			makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
+			for (const state of [
+				"queued",
+				"active",
+				"needs-info",
+				"in-verification",
+				"rework",
+				"delivered",
+			] as const) {
+				await mirror.upsert(issue, TENANT_WS, state);
+			}
+			const written = calls
+				.filter(
+					(c) =>
+						c.query.includes("issueCreate") || c.query.includes("issueUpdate"),
+				)
+				.map((c) => (c.variables.input as { labelIds?: string[] }).labelIds)
+				.filter((l): l is string[] => l !== undefined);
+			expect(written.length).toBeGreaterThan(0);
+			for (const labelIds of written) {
+				for (const id of labelIds) {
+					expect(["label-devitaliteit", "label-next-up"]).toContain(id);
+				}
+			}
+			// No state label was ever created either.
+			expect(
+				calls
+					.filter((c) => c.query.includes("issueLabelCreate"))
+					.map((c) => (c.variables.input as { name: string }).name),
+			).toEqual(["devitaliteit", "next-up"]);
+		});
+	});
+
 	describe("operator note (PON-169)", () => {
 		it("setOperatorNote writes the reading into the description, keeping the current state", async () => {
 			makeMirror({ linearWorkspaceId: COCKPIT_WS, teamId: TEAM_ID });
@@ -768,10 +928,10 @@ describe("CockpitMirror", () => {
 				.input;
 			expect(input.description).toContain("## Internal reading");
 			expect(input.description).toContain("Touch api/export.ts");
-			// State unchanged: the active label stays on the mirror.
-			expect((input as unknown as { labelIds: string[] }).labelIds).toContain(
-				"label-active",
-			);
+			// v3.1: the tenant label stays; there is no state label to keep.
+			const labelIds = (input as unknown as { labelIds: string[] }).labelIds;
+			expect(labelIds).toContain("label-devitaliteit");
+			expect(labelIds).not.toContain("label-active");
 		});
 
 		it("a later state transition re-renders the description WITH the note", async () => {
@@ -806,7 +966,8 @@ describe("CockpitMirror", () => {
 				}
 			).input;
 			expect(input.description).toContain("early reading");
-			expect(input.labelIds).toContain("label-active");
+			expect(input.description).toContain("active");
+			expect(input.labelIds).toEqual(["label-devitaliteit"]);
 		});
 
 		it("the operator brief renders all sections and survives transitions (PON-170)", async () => {

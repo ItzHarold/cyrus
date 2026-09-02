@@ -173,38 +173,36 @@ describe("EdgeWorker - approval parks the work (PON-224)", () => {
 		);
 	});
 
-	it("closes the mirror's narration turn when the scoping session ends (PON-226)", () => {
-		// Found live on CKP-22: the narration thread is a real agent session,
-		// client narration is shadowed onto it, and a turn is only closed by a
-		// `response` — so a parked mirror sat in Linear's `active` state with
-		// a running timer, quoting a stale plan item, on work nobody had
-		// claimed. Nothing was running; the board said otherwise.
+	it("says nothing into any thread when the scoping session ends — a parked mirror has no thread (v3.1, requirement A)", () => {
+		// PON-226 used to close a narration turn here with "Queued — your
+		// move". There is no narration thread any more: the mirror's
+		// description carries its place in the order, and the mirror sits at
+		// zero sessions until the reviewer delegates it.
 		registerSession(worker);
 		approve();
-		const endNarrationTurn = vi.fn();
-		privates(worker).endNarrationTurn = endNarrationTurn;
+		const cockpitSink = { postActivity: vi.fn(), createAgentSession: vi.fn() };
+		privates(worker).activitySinks.set("cockpit-ws", cockpitSink);
+		mirror.commentOnMirror = vi.fn();
 
 		privates(worker).handleLaneSessionEnded(SESSION_ID, "result");
 
-		expect(endNarrationTurn).toHaveBeenCalledWith(
-			ISSUE_ID,
-			expect.stringContaining("Queued — your move"),
-		);
-		// It says the truth about what is above it, so the stale narration is
-		// not read as this mirror working.
-		expect(endNarrationTurn.mock.calls[0][1]).toContain("Nothing is running");
+		expect(cockpitSink.postActivity).not.toHaveBeenCalled();
+		expect(cockpitSink.createAgentSession).not.toHaveBeenCalled();
+		expect(mirror.commentOnMirror).not.toHaveBeenCalled();
+		expect(
+			privates(worker).scopeApprovals.isImplementationDeferred(ISSUE_ID),
+		).toBe(true);
 	});
 
 	it("does not sign off a mirror whose work has actually started", () => {
 		registerSession(worker);
 		approve();
 		privates(worker).scopeApprovals.markImplementationStarted(ISSUE_ID);
-		const endNarrationTurn = vi.fn();
-		privates(worker).endNarrationTurn = endNarrationTurn;
+		mirror.commentOnMirror = vi.fn();
 
 		privates(worker).handleLaneSessionEnded(SESSION_ID, "result");
 
-		expect(endNarrationTurn).not.toHaveBeenCalled();
+		expect(mirror.commentOnMirror).not.toHaveBeenCalled();
 	});
 
 	it("the scoping session ending does not close a parked mirror", () => {

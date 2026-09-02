@@ -295,8 +295,10 @@ export class ScopeWaitingRoom {
 			);
 			const nodes = states?.team?.states?.nodes ?? [];
 			const target =
-				nodes.find((s) => s.type === "unstarted") ??
-				nodes.find((s) => s.type === "backlog");
+				// v3.1: the room is not work — it lives in the team's backlog
+				// column, not beside queued mirrors.
+				nodes.find((s) => s.type === "backlog") ??
+				nodes.find((s) => s.type === "unstarted");
 			if (!target) return;
 			await this.gql(
 				config.linearWorkspaceId,
@@ -361,15 +363,19 @@ export class ScopeWaitingRoom {
 		});
 		if (this.lastBody !== empty) await this.updateRoom(config, empty);
 		const states = await this.gql<{
-			team: { states: { nodes: Array<{ id: string; type: string }> } };
+			team: {
+				states: { nodes: Array<{ id: string; type: string; name?: string }> };
+			};
 		}>(
 			config.linearWorkspaceId,
-			`query($id:String!){ team(id:$id){ states(first:30){ nodes{ id type } } } }`,
+			`query($id:String!){ team(id:$id){ states(first:30){ nodes{ id type name } } } }`,
 			{ id: config.teamId },
 		);
-		const done = states?.team?.states?.nodes?.find(
-			(s) => s.type === "completed",
-		);
+		// v3.1: a closed room says "Done", never "Delivered".
+		const nodes = states?.team?.states?.nodes ?? [];
+		const done =
+			nodes.find((s) => s.type === "completed" && s.name === "Done") ??
+			nodes.find((s) => s.type === "completed");
 		if (done) {
 			await this.gql(
 				config.linearWorkspaceId,

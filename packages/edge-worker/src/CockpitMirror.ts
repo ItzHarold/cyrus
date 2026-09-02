@@ -89,16 +89,6 @@ export interface CockpitMirrorDeps {
 	 */
 	resolveClient: (workspaceId: string, teamKey?: string) => ResolvedClient;
 	/**
-	 * Open an agent session on a freshly created mirror (PON-212), so the
-	 * operator has somewhere to read the working narration that the client's
-	 * surface suppresses. Optional: a cockpit without one simply keeps the
-	 * previous behaviour, which is a body-only mirror.
-	 */
-	openNarrationSession?: (
-		mirrorIssueId: string,
-		clientIssueId: string,
-	) => Promise<string | undefined>;
-	/**
 	 * Is this issue still inside its scope conversation? (PON-219)
 	 *
 	 * The cockpit contains only APPROVED work. Before the client approves,
@@ -217,7 +207,11 @@ const WAITING_STATES = new Set([
 // the client-issue line no longer promises links that are held, and the
 // preview renders as an anchor. Mirrors written by the previous release
 // refresh themselves on first touch rather than showing the old wording.
-const DESCRIPTION_VERSION = 4;
+const DESCRIPTION_VERSION = 5;
+/** Bumped when the label shape changes; mirrors below it get their labels rewritten. */
+const LABELS_VERSION = 1;
+/** The one queued mirror to start next. */
+const NEXT_UP_LABEL = "next-up";
 
 /**
  * A duration in the reviewer's words (PON-221).
@@ -512,8 +506,10 @@ export class CockpitMirror {
 			const description =
 				this.renderDescription(record, tenantWorkspaceId) +
 				(detail?.note ? `\n\n${detail.note}` : "");
-			const labelId = setup.labelIds[state];
-			const labelIds = labelId ? [labelId] : [];
+			// v3.1 (Harold): statuses are the state; labels only for what is
+			// not a state — the tenant, and the single next-up marker.
+			const labelIds = await this.markerLabelIds(config, client.id, record);
+			record.labelsVersion = LABELS_VERSION;
 			// PON-207: the lifecycle is a board column when the team defines
 			// the statuses; labels stay alongside so a half-migrated cockpit
 			// still filters and nothing is lost if the statuses go away.
@@ -552,20 +548,11 @@ export class CockpitMirror {
 					: undefined;
 			if (usableExisting?.mirrorIssueId) {
 				const existing = usableExisting;
-				// PON-212: a mirror created before the narration thread existed
-				// (or before this release) has nowhere to put the working
-				// detail. Open one on first touch rather than only at creation,
-				// so existing work becomes readable too instead of waiting for
-				// the next issue.
-				if (!existing.narrationSessionId) {
-					const opened = await this.deps
-						.openNarrationSession?.(existing.mirrorIssueId, issue.issueId)
-						.catch(() => undefined);
-					if (opened) {
-						existing.narrationSessionId = opened;
-						record.narrationSessionId = opened;
-					}
-				}
+				// v3.1 (Harold's requirement A): no narration thread, ever. A
+				// mirror carries ZERO sessions until the reviewer delegates; the
+				// delegation creates the one implementation thread. Legacy
+				// mirrors keep their recorded narrationSessionId untouched and
+				// nothing posts to it any more.
 				const noteChanged =
 					detail?.operatorNote !== undefined &&
 					detail.operatorNote !== existing.operatorNote;
@@ -648,12 +635,10 @@ export class CockpitMirror {
 					},
 				);
 				record.mirrorIssueId = created.issueCreate.issue.id;
-				// PON-212: give the new mirror a thread before anything needs
-				// it. Best-effort — a mirror without one is the old behaviour,
-				// not a broken one.
-				record.narrationSessionId = await this.deps
-					.openNarrationSession?.(record.mirrorIssueId, issue.issueId)
-					.catch(() => undefined);
+				// v3.1: no thread at birth. An app-created issue with no delegate
+				// gets no agent session from Linear (probed live on CKP-26,
+				// 2026-09-01), so the mirror sits at zero sessions until the
+				// reviewer delegates it.
 				record.mirrorTitle = mirrorTitle;
 				record.mirrorTeamId = config.teamId;
 				this.mirrors.set(issue.issueId, record);
@@ -773,6 +758,112 @@ export class CockpitMirror {
 					}
 					record.queueRank = waitingRank;
 					record.clientQueuePosition = within;
+				}
+				// v3.1 (requirement B): exactly one startable mirror is next up;
+				// a gated one says why; every queued one says what it is behind.
+				// Surfaced natively — the next-up LABEL renders in list views —
+				// and in the description, which is rewritten here when the
+				// order changed rather than waiting for the next transition.
+				let nextUpAssigned = false;
+				const ahead: string[] = [];
+				const rewrite: SerializedCockpitMirror[] = [];
+				for (const issueId of order) {
+					const record = this.mirrors.get(issueId);
+					if (!record?.mirrorIssueId) continue;
+					const base = record.state.replace(/ \(#\d+\)$/, "");
+					// A delivered mirror is finished business: its labels and
+					// description are left exactly as they were (CKP-22 stays
+					// untouched through this migration).
+					if (base === "delivered") continue;
+					const startable =
+						record.queueRank !== undefined &&
+						(base === "queued" || base === "rework");
+					let nextUp = false;
+					let gatedBy: string | undefined;
+					if (startable) {
+						const wip = this.clientWorkInFlight(issueId);
+						if (wip.inFlight.length >= wip.limit) {
+							const client = this.deps.resolveClient(
+								record.tenantWorkspaceId,
+								record.teamKey,
+							);
+							const held = wip.inFlight
+								.map(
+									(i) =>
+										`${i.issueIdentifier ?? "another issue"} ${i.state.replace(/-/g, " ")}`,
+								)
+								.join(", ");
+							gatedBy = `${client.displayName ?? client.id} has ${held} (one build at a time)`;
+						} else if (!nextUpAssigned) {
+							nextUp = true;
+							nextUpAssigned = true;
+						}
+					}
+					const behind =
+						record.queueRank !== undefined && ahead.length > 0
+							? ahead.slice(-2).join(", ")
+							: undefined;
+					if (
+						record.nextUp !== nextUp ||
+						record.gatedBy !== gatedBy ||
+						record.behind !== behind ||
+						(record.labelsVersion ?? 0) < LABELS_VERSION
+					) {
+						record.nextUp = nextUp;
+						record.gatedBy = gatedBy;
+						record.behind = behind;
+						changed++;
+						rewrite.push(record);
+					}
+					if (record.queueRank !== undefined) {
+						const client = this.deps.resolveClient(
+							record.tenantWorkspaceId,
+							record.teamKey,
+						);
+						ahead.push(
+							`${record.issueIdentifier ?? "another issue"} (${client.displayName ?? client.id})`,
+						);
+					}
+				}
+				for (const record of rewrite) {
+					try {
+						const client = this.deps.resolveClient(
+							record.tenantWorkspaceId,
+							record.teamKey,
+						);
+						const labelIds = await this.markerLabelIds(
+							config,
+							client.id,
+							record,
+						);
+						await this.gql(
+							config.linearWorkspaceId,
+							`mutation($id: String!, $input: IssueUpdateInput!) {
+								issueUpdate(id: $id, input: $input) { success }
+							}`,
+							{
+								id: record.mirrorIssueId,
+								input: {
+									labelIds,
+									description: this.renderDescription(
+										record,
+										record.tenantWorkspaceId,
+									),
+								},
+							},
+						);
+						record.labelsVersion = LABELS_VERSION;
+						if (record.nextUp) {
+							this.logger.event("cockpit_next_up", {
+								issueId: record.issueIdentifier,
+								mirrorIssueId: record.mirrorIssueId,
+							});
+						}
+					} catch (error) {
+						this.logger.warn(
+							`[cockpit] could not write the working order on ${record.issueIdentifier}: ${String(error)}`,
+						);
+					}
 				}
 				if (changed > 0) {
 					this.logger.event("cockpit_ordering_resynced", {
@@ -1105,7 +1196,7 @@ export class CockpitMirror {
 					nodes: Array<{
 						id: string;
 						title: string;
-						labels: { nodes: Array<{ id: string }> };
+						labels: { nodes: Array<{ id: string; name?: string }> };
 						project: { id: string } | null;
 					}>;
 				};
@@ -1121,7 +1212,7 @@ export class CockpitMirror {
 						nodes {
 							id
 							title
-							labels(first: 10) { nodes { id } }
+							labels(first: 10) { nodes { id name } }
 							project { id }
 						}
 					}
@@ -1157,19 +1248,25 @@ export class CockpitMirror {
 			// shape inside the DEDICATED project is the marker. Without a
 			// project configured AND without labels, adoption stays off
 			// rather than guessing against a mixed team.
-			const labeled = node.labels.nodes.some((label) =>
-				stateLabelIds.has(label.id),
-			);
-			if (!labeled && !(anyStateLabels === false && config.projectId)) {
-				continue;
-			}
-			if (trackedMirrorIds.has(node.id)) continue; // map already knows it
-
 			// Group 1 is the old `[DVV-12] …` shape, group 2 the client-first
 			// one. Both must resolve, or a boot mid-migration sees half its
 			// mirrors as strangers.
 			const identifier = match[1] ?? match[2];
 			const liveIssue = identifier ? byIdentifier.get(identifier) : undefined;
+			const stateLabeled = node.labels.nodes.some((label) =>
+				stateLabelIds.has(label.id),
+			);
+			// v3.1: mirrors carry the tenant label, not a state — so a title
+			// that names a LIVE issue, on an issue that carries any label at
+			// all, is ours. An orphan (no live match) still needs the legacy
+			// state label or the dedicated project before it is touched.
+			const tenantLabeled =
+				liveIssue !== undefined && node.labels.nodes.length > 0;
+			const labeled = stateLabeled || tenantLabeled;
+			if (!labeled && !(anyStateLabels === false && config.projectId)) {
+				continue;
+			}
+			if (trackedMirrorIds.has(node.id)) continue; // map already knows it
 			if (liveIssue && !liveTracked.has(node.id)) {
 				const alreadyAdopted = this.mirrors.get(liveIssue.issueId);
 				if (!alreadyAdopted) {
@@ -1412,6 +1509,73 @@ export class CockpitMirror {
 	 * Public so the scope-record prune (PON-219) can ask the same question
 	 * without a second GraphQL client and a second token lookup.
 	 */
+	/**
+	 * The labels a mirror carries (v3.1): the tenant, and `next-up` on the
+	 * one queued mirror to start next. Never a state — the statuses are the
+	 * state. Labels are found or created once per name and cached; the app
+	 * token can create labels in the cockpit team (probed live 2026-09-01).
+	 */
+	private markerLabelCache = new Map<string, string>();
+	/** One denied create is enough: the token cannot make labels here. */
+	private markerLabelCreateDenied = false;
+	private async ensureLabelId(
+		config: { linearWorkspaceId: string; teamId: string },
+		name: string,
+	): Promise<string | undefined> {
+		const cached = this.markerLabelCache.get(name);
+		if (cached) return cached;
+		try {
+			const found = await this.gql<{
+				team: { labels: { nodes: Array<{ id: string; name: string }> } };
+			}>(
+				config.linearWorkspaceId,
+				`query($teamId: String!, $name: String!) {
+					team(id: $teamId) { labels(filter: { name: { eq: $name } }, first: 1) { nodes { id name } } }
+				}`,
+				{ teamId: config.teamId, name },
+			);
+			let id = found?.team?.labels?.nodes?.[0]?.id;
+			if (!id && this.markerLabelCreateDenied) return undefined;
+			if (!id) {
+				const created = await this.gql<{
+					issueLabelCreate: { issueLabel: { id: string } };
+				}>(
+					config.linearWorkspaceId,
+					`mutation($input: IssueLabelCreateInput!) {
+						issueLabelCreate(input: $input) { success issueLabel { id } }
+					}`,
+					{ input: { teamId: config.teamId, name } },
+				);
+				id = created.issueLabelCreate.issueLabel.id;
+			}
+			if (id) this.markerLabelCache.set(name, id);
+			return id;
+		} catch (error) {
+			this.markerLabelCreateDenied = true;
+			this.logger.warn(
+				`[cockpit] could not resolve label ${name}: ${String(error)} — mirrors carry no labels from here on`,
+			);
+			return undefined;
+		}
+	}
+
+	private async markerLabelIds(
+		config: { linearWorkspaceId: string; teamId: string },
+		clientId: string,
+		record: { nextUp?: boolean },
+	): Promise<string[]> {
+		const ids: string[] = [];
+		if (clientId && clientId !== "unassigned") {
+			const tenant = await this.ensureLabelId(config, clientId);
+			if (tenant) ids.push(tenant);
+		}
+		if (record.nextUp) {
+			const nextUp = await this.ensureLabelId(config, NEXT_UP_LABEL);
+			if (nextUp) ids.push(nextUp);
+		}
+		return ids;
+	}
+
 	async clientIssueStateType(
 		tenantWorkspaceId: string,
 		issueId: string,
@@ -1675,39 +1839,12 @@ export class CockpitMirror {
 					}`,
 					{ teamId: config.teamId, labelNames: [...COCKPIT_STATES] },
 				);
+				// v3.1: state labels are no longer created or applied — the
+				// statuses are the state. Existing ones are still looked up so
+				// they can be stripped from mirrors that carry them.
 				const labelIds: Record<string, string> = {};
 				for (const label of data.team.labels.nodes) {
 					labelIds[label.name] = label.id;
-				}
-				// Label creation is BEST-EFFORT: agent-app tokens (scope
-				// write,app:assignable,app:mentionable) are not allowed to
-				// create labels. Existing labels are still found by name, so
-				// an operator pre-creating the three state labels once gets
-				// filterable state; without them the mirror still works —
-				// state lives in the description.
-				let labelCreateDenied = false;
-				for (const state of COCKPIT_STATES) {
-					if (labelIds[state] || labelCreateDenied) continue;
-					try {
-						const created = await this.gql<{
-							issueLabelCreate: {
-								success: boolean;
-								issueLabel: { id: string };
-							};
-						}>(
-							config.linearWorkspaceId,
-							`mutation($input: IssueLabelCreateInput!) {
-								issueLabelCreate(input: $input) { success issueLabel { id } }
-							}`,
-							{ input: { teamId: config.teamId, name: state } },
-						);
-						labelIds[state] = created.issueLabelCreate.issueLabel.id;
-					} catch (error) {
-						labelCreateDenied = true;
-						this.logger.warn(
-							`[cockpit] cannot create state labels in the cockpit team (agent tokens may lack permission) — mirrors carry state in the description only. Pre-create labels ${COCKPIT_STATES.join(", ")} in the team for filterable state. (${error instanceof Error ? error.message.slice(0, 120) : String(error)})`,
-						);
-					}
 				}
 				const completedStateId = data.team.states.nodes.find(
 					(state) => state.type === "completed",
@@ -1785,10 +1922,13 @@ export class CockpitMirror {
 			// PON-211: say the place out loud. The ordering has been computed
 			// and written as sortOrder since PON-173, which decides row order
 			// in a view — useful, and invisible on the issue itself.
-			record.queueRank === 1
-				? "▶ **Next up** — this is the one to pick up. Assign yourself to claim it."
+			// v3.1 (requirement B): the working order, said outright — the one
+			// to start next, what each queued item is behind, and why a gated
+			// one cannot start yet.
+			record.nextUp
+				? "▶ **Next up** — #1 in the working order. Assign yourself and delegate it to me to start."
 				: record.queueRank
-					? `**#${record.queueRank} in the review queue**${record.clientQueuePosition ? ` · #${record.clientQueuePosition} for this client` : ""} — assign yourself to claim it.`
+					? `**Working order:** #${record.queueRank}${record.behind ? ` — behind ${record.behind}` : ""}${record.gatedBy ? ` — waiting: ${record.gatedBy}` : ""}${record.clientQueuePosition ? ` · #${record.clientQueuePosition} for this client` : ""}.`
 					: "",
 			// PON-221: an age the reviewer can act on, measured from this
 			// mirror's own transition. The ISO stamp this replaced was

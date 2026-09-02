@@ -338,6 +338,77 @@ describe("the room itself", () => {
 		expect(update?.variables.id).toBe("room-existing");
 	});
 
+	it("reopens into Backlog, not Todo, so the room stays out of the work views (v3.1, requirement C)", async () => {
+		const { room, calls } = makeRoom([
+			{
+				team: {
+					issues: {
+						nodes: [
+							{
+								id: "room-old",
+								title: WAITING_ROOM_TITLE,
+								state: { type: "completed" },
+							},
+						],
+					},
+				},
+			},
+			{
+				team: {
+					states: {
+						nodes: [
+							{ id: "state-todo", type: "unstarted" },
+							{ id: "state-backlog", type: "backlog" },
+						],
+					},
+				},
+			},
+			{ issueUpdate: { success: true } },
+			{ issueUpdate: { success: true } },
+		]);
+
+		await room.sync([
+			{ issueId: "i", issueIdentifier: "ACM-7", proposedAt: hoursAgo(1) },
+		]);
+
+		const reopen = calls.find(
+			(c) =>
+				c.query.includes("issueUpdate") &&
+				(c.variables as { s?: string }).s !== undefined,
+		);
+		expect((reopen?.variables as { s?: string }).s).toBe("state-backlog");
+	});
+
+	it("closes to the state named Done, not to the first completed state it finds (v3.1, requirement C)", async () => {
+		// Cockpit teams have two completed states, Delivered and Done. A
+		// closed waiting room in "Delivered" reads as a delivery on the board.
+		const { room, calls } = makeRoom([
+			{ team: { issues: { nodes: [] } } },
+			{ issueCreate: { issue: { id: "room-1" } } },
+			{ issueUpdate: { success: true } },
+			{
+				team: {
+					states: {
+						nodes: [
+							{ id: "state-delivered", type: "completed", name: "Delivered" },
+							{ id: "state-done", type: "completed", name: "Done" },
+						],
+					},
+				},
+			},
+			{ issueUpdate: { success: true } },
+		]);
+		await room.sync([
+			{ issueId: "i", issueIdentifier: "ACM-7", proposedAt: hoursAgo(1) },
+		]);
+		await room.sync([]);
+
+		const close = calls
+			.filter((c) => c.query.includes("issueUpdate"))
+			.find((c) => (c.variables as { s?: string }).s !== undefined);
+		expect((close?.variables as { s?: string }).s).toBe("state-done");
+	});
+
 	it("closes itself when nothing is waiting", async () => {
 		const { room, calls } = makeRoom([
 			{ team: { issues: { nodes: [] } } },
