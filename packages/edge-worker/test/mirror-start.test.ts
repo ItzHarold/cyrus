@@ -717,6 +717,65 @@ describe("PON-228 — the reviewer gets a finished turn, on the right thread", (
 		expect(p.cockpitMirror.commentOnMirror).toHaveBeenCalledTimes(1);
 	});
 
+	it("a needs-info answer on HELD work re-opens the turn — the resumed re-hold signs off AGAIN (fix: session stuck showing 'working')", async () => {
+		// Live on FRO-65: work was held and signed off, the reviewer asked the
+		// client from the held state, the client answered, the mirror session
+		// resumed and re-held — but the FIRST hold's once-guards were never
+		// cleared, so no closing hand-off posted. The resumed turn never
+		// closed and Linear showed the session working for hours.
+		const { p, cockpitPosts } = await held();
+		const handoffs = () =>
+			cockpitPosts.filter((x) =>
+				String(x.content?.body ?? "").includes("Finished — over to you"),
+			).length;
+		await p.signOffIntoVerification(CLIENT_ISSUE);
+		await new Promise((r) => setTimeout(r, 10));
+		const first = handoffs();
+		expect(first).toBeGreaterThanOrEqual(1);
+		expect(p.verificationSignedOff.has(CLIENT_ISSUE)).toBe(true);
+
+		// The reviewer asked the client from the held state; the client answers.
+		p.needsInfo.recordAsked(CLIENT_ISSUE, {
+			workspaceId: CLIENT_WS,
+			sessionId: CLIENT_SESSION,
+			issueIdentifier: "ACM-13",
+			question: "npm or pnpm?",
+		});
+		p.markNeedsInfoAnswered(CLIENT_ISSUE, CLIENT_WS, "ACM-13");
+
+		// The fix: both once-guards are cleared — it is a genuinely new turn.
+		expect(p.verificationSignedOff.has(CLIENT_ISSUE)).toBe(false);
+		expect(p.lastReviewBlock.has(CLIENT_ISSUE)).toBe(false);
+
+		// The resume re-holds the same work (recordPending clears signedOffAt);
+		// a FRESH hand-off closes the re-opened turn.
+		p.holdCompletionForVerification(
+			MIRROR_SESSION,
+			"Done. https://github.com/Ponte-Digital/Acme-Metrics/pull/9",
+			false,
+		);
+		await p.signOffIntoVerification(CLIENT_ISSUE);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(handoffs()).toBe(first + 1);
+	});
+
+	it("a needs-info answer on work that was NEVER held does not touch the verification guards", async () => {
+		// scope-conversation needs-info: no held record, so the reopen is a
+		// no-op and nothing is falsely reset.
+		const { p } = setup();
+		expect(p.verificationGate.get(CLIENT_ISSUE)).toBeUndefined();
+		p.needsInfo.recordAsked(CLIENT_ISSUE, {
+			workspaceId: CLIENT_WS,
+			sessionId: CLIENT_SESSION,
+			issueIdentifier: "ACM-13",
+			question: "which framework?",
+		});
+		const events: string[] = [];
+		p.logger.event = vi.fn((name: string) => events.push(name));
+		p.markNeedsInfoAnswered(CLIENT_ISSUE, CLIENT_WS, "ACM-13");
+		expect(events).not.toContain("verification_reopened_for_answer");
+	});
+
 	it("signs off once, however many times the mirror recomposes", async () => {
 		const { p, cockpitPosts } = await held();
 		const before = cockpitPosts.length;
