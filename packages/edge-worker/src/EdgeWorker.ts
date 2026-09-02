@@ -206,7 +206,7 @@ import {
 import {
 	buildDeliveredRequestBlock,
 	buildReviewerRequestBlock,
-	DELIVERED_WORK_DENY,
+	CLIENT_WRITE_DENY,
 	interpretReworkAnswer,
 	isReworkConfirmQuestion,
 } from "./request-intent.js";
@@ -5900,7 +5900,27 @@ ${taskSection}`;
 
 	/** The mutation tools withheld from a delivered client session (§8.8). */
 	private deliveredWorkDeny(sessionId: string | undefined): string[] {
-		return this.isDeliveredClientSession(sessionId) ? DELIVERED_WORK_DENY : [];
+		return this.isDeliveredClientSession(sessionId) ? CLIENT_WRITE_DENY : [];
+	}
+
+	/**
+	 * A CLIENT session (never an operator one) whose scope is NOT yet approved
+	 * must not build — it investigates and proposes, then parks on approval.
+	 * Both the assignee (API) and delegate (UI) entry paths create the same
+	 * AgentSession here, so both park identically (Harold's ruling,
+	 * 2026-09-02). Enforced, not just asked, because the scope-gate prompt
+	 * alone let a model build a trivial task before approval (seen live on
+	 * FRO-70: work held unapproved).
+	 */
+	private scopePendingClientDeny(
+		sessionId: string | undefined,
+		workspaceId: string | undefined,
+	): string[] {
+		if (this.operatorSessions.isOperatorSession(sessionId)) return [];
+		const issueId = sessionId ? this.sessionIssueId(sessionId) : undefined;
+		return this.scopeGatePendingForIssue(workspaceId, issueId)
+			? CLIENT_WRITE_DENY
+			: [];
 	}
 
 	/** Gate on for the workspace AND the issue's scope not yet approved. */
@@ -15041,6 +15061,10 @@ ${input.userComment}
 			// change re-enters through review as rework. Enforced, not just
 			// asked, because a client must never receive an unreviewed change.
 			...this.deliveredWorkDeny(sessionId),
+			// Scope gate: before approval the session proposes, it does not
+			// build. Withheld here so the assignee and delegate entry paths
+			// park identically and the mirror is born inert.
+			...this.scopePendingClientDeny(sessionId, resolvedWorkspaceId),
 		];
 
 		// Set up attachments directory
