@@ -7463,6 +7463,24 @@ ${taskSection}`;
 				noteAt && noteAt > link.startedAt
 					? scopeRecord?.operatorNote
 					: undefined;
+			// v3.1 (Harold's ruling): a background task never blocks delivery,
+			// so any that were still running when the work finished were cut
+			// off with it. Name them, so the reviewer knows what stopped —
+			// a dev server or a watch the run left up is now down.
+			const terminated = this.agentSessionManager.getTerminatedBackgroundTasks(
+				link.mirrorSessionId,
+			);
+			const terminatedNote =
+				terminated.length > 0
+					? `\n**Background tasks stopped with the run** (a delivery is a finished state): ${terminated
+							.map(
+								(task) =>
+									`\`${(task.command ?? task.description ?? task.type)
+										.replace(/\s+/g, " ")
+										.slice(0, 80)}\``,
+							)
+							.join(", ")}`
+					: "";
 			const body = [
 				`**Finished — over to you.** The work is complete and held; nothing has gone to the client.${
 					record.isError ? " **The session ended with an error.**" : ""
@@ -7471,6 +7489,7 @@ ${taskSection}`;
 				prs,
 				startHere,
 				handOff ? `\n**From the run:**\n\n${handOff}` : "",
+				terminatedNote,
 				checkout ? `\n**Work on it yourself**\n\n${checkout}` : "",
 				"\n`approve: <notes>` delivers it · `reject: <feedback>` sends it back · `mine` hands me the branch · `ask client: <question>` is the only thing that reaches them. Plain instructions are fine — say what you want changed and I'll do it on this same branch.",
 			]

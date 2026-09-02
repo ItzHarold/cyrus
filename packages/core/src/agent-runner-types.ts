@@ -369,6 +369,15 @@ export interface IAgentRunner {
 	getPendingWork?(): AgentPendingWork;
 
 	/**
+	 * Background tasks (`run_in_background` shells) that were still running
+	 * when the turn produced its final result and were terminated with it
+	 * (Harold's ruling, 2026-09-02: a background task never blocks delivery).
+	 * Empty when the turn ended with none, or the runner does not track them.
+	 * Read by the reviewer hand-off so the reviewer learns what was cut off.
+	 */
+	getTerminatedBackgroundTasks?(): BackgroundTaskSummary[];
+
+	/**
 	 * Check if the session is currently running
 	 *
 	 * @returns True if the session is active and processing, false otherwise

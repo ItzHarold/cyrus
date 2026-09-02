@@ -263,14 +263,13 @@ describe("ClaudeRunner pending-work lifecycle (CYPACK-1310)", () => {
 		await sessionPromise;
 	});
 
-	it("holds the prompt open for an in-flight background task, then completes when it settles", async () => {
+	it("does NOT hold for a background task — the result completes and the task is terminated (Harold's ruling, 2026-09-02)", async () => {
 		// A `Bash(run_in_background: true)` task is registered by the SDK and
-		// reported in the Stop hook's background_tasks. Verified against the
-		// real SDK (CYPACK-1310 bgbash probe): closing stdin while such a task
-		// is running KILLS it, so the prompt must stay open until it settles.
-		// (A bare `sleep 120 &` is NOT registered — the Bash tool call returns
-		// instantly — so background_tasks is empty and there is nothing to
-		// hold open; that is an SDK-tracking limitation, not a Cyrus bug.)
+		// reported in the Stop hook's background_tasks. It used to hold the
+		// prompt open (closing stdin kills the task). Harold's ruling reverses
+		// that: a background task never blocks delivery. The final response is
+		// the completion signal, the prompt completes (which terminates the
+		// task with the runner), and the task is recorded for the hand-off.
 		const BG_TASK = {
 			id: "task-1",
 			type: "shell",
@@ -281,7 +280,6 @@ describe("ClaudeRunner pending-work lifecycle (CYPACK-1310)", () => {
 		const state = installMockQuery(mockQuery);
 		const runner = new ClaudeRunner(defaultConfig, false);
 
-		const firstResult = waitForMessageCount(runner, 2);
 		const completed = new Promise<void>((resolve) => {
 			runner.on("complete", () => resolve());
 		});
@@ -290,24 +288,59 @@ describe("ClaudeRunner pending-work lifecycle (CYPACK-1310)", () => {
 			expect(state.queryOptions).not.toBeNull();
 		});
 
-		// Turn 1 ends with the background task still running.
+		// Turn 1 ends with the background task still running and NO wakeup.
 		await state.endTurnWithWork({ backgroundTasks: [BG_TASK] }, "STARTED");
+
+		// The prompt completed on the result — the session is finished, not held.
+		await completed;
+		expect(runner.isRunning()).toBe(false);
+		expect(runner.hasPendingWakeups()).toBe(false);
+		// The task is recorded as terminated with the run, for the hand-off.
+		expect(runner.getTerminatedBackgroundTasks()).toEqual([BG_TASK]);
+		await sessionPromise;
+	});
+
+	it("a wakeup still holds even when a background task is also in flight — the task rides along, not terminated", async () => {
+		const BG_TASK = {
+			id: "task-1",
+			type: "shell",
+			status: "running",
+			description: "watcher",
+			command: "npm run watch",
+		};
+		const state = installMockQuery(mockQuery);
+		const runner = new ClaudeRunner(defaultConfig, false);
+
+		const firstResult = waitForMessageCount(runner, 2);
+		const completed = new Promise<void>((resolve) => {
+			runner.on("complete", () => resolve());
+		});
+		const sessionPromise = runner.startStreaming("schedule + background");
+		await vi.waitFor(() => {
+			expect(state.queryOptions).not.toBeNull();
+		});
+
+		// Both a wakeup and a background task are pending: the wakeup holds.
+		await state.endTurnWithWork(
+			{ sessionCrons: [SESSION_CRON], backgroundTasks: [BG_TASK] },
+			"HELD",
+		);
 		await firstResult;
 
-		expect(runner.hasPendingWork()).toBe(true);
-		expect(runner.getPendingWork().backgroundTasks).toEqual([BG_TASK]);
+		expect(runner.hasPendingWakeups()).toBe(true);
 		expect(runner.isRunning()).toBe(true);
+		// The task was NOT terminated — the session is legitimately still alive.
+		expect(runner.getTerminatedBackgroundTasks()).toEqual([]);
+		expect(runner.getPendingWork().backgroundTasks).toEqual([BG_TASK]);
 
-		// The task settles → its notification wakes a turn that ends with no
-		// pending work → prompt completes → session finishes.
-		await state.endTurnWithWork({ backgroundTasks: [] }, "done");
+		// The wakeup turn ends clean → prompt completes → session finishes.
+		await state.endTurnWithWork({}, "WOKE");
 		await completed;
-		expect(runner.hasPendingWork()).toBe(false);
 		expect(runner.isRunning()).toBe(false);
 		await sessionPromise;
 	});
 
-	it("keeps warm-mode behavior unchanged (stream stays open regardless)", async () => {
+	it("keeps warm-mode behavior unchangeds warm-mode behavior unchanged (stream stays open regardless)", async () => {
 		const state = installMockQuery(mockQuery);
 		const runner = new ClaudeRunner(defaultConfig, true);
 

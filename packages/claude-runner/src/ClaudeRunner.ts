@@ -338,6 +338,13 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 	private keepSessionWarm: boolean;
 	private pendingSessionCrons: SessionCronSummary[] = [];
 	private pendingBackgroundTasks: BackgroundTaskSummary[] = [];
+	/**
+	 * Background tasks terminated with the turn's final result (v3.1). A
+	 * scheduled wakeup holds the session open; a backgrounded shell task does
+	 * not — the final response is the completion signal, so the task is cut
+	 * off and named here for the reviewer hand-off.
+	 */
+	private terminatedBackgroundTasks: BackgroundTaskSummary[] = [];
 
 	constructor(config: ClaudeRunnerConfig, keepSessionWarm = false) {
 		super();
@@ -531,6 +538,7 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 		// Reset pending-work state from any previous query on this runner
 		this.pendingSessionCrons = [];
 		this.pendingBackgroundTasks = [];
+		this.terminatedBackgroundTasks = [];
 
 		const isResumed = !!this.config.resumeSessionId;
 		this.logger.event(isResumed ? "session_resumed" : "session_started", {
@@ -921,13 +929,32 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 					// pending work, and the result that follows completes the
 					// prompt here. Error results always complete: pending-work
 					// state may be stale when a turn dies mid-flight.
-					if (message.subtype === "success" && this.hasPendingWork()) {
+					// Only a scheduled WAKEUP holds the session open (CYPACK-1310):
+					// the agent asked to be woken, and closing stdin would kill
+					// the in-process timer. A backgrounded shell task does NOT
+					// hold it (Harold's ruling, 2026-09-02): the final response
+					// is the completion signal. Complete the prompt — which shuts
+					// the runner and its task subtree down — and record the cut
+					// tasks so the hand-off can name them. Error results always
+					// complete: the pending-work snapshot may be stale.
+					if (message.subtype === "success" && this.hasPendingWakeups()) {
 						this.logger.event("session_held_open_for_pending_work", {
 							sessionCronCount: this.pendingSessionCrons.length,
 							backgroundTaskCount: this.pendingBackgroundTasks.length,
 							claudeSessionId: this.sessionInfo?.sessionId,
 						});
 					} else {
+						if (
+							message.subtype === "success" &&
+							this.pendingBackgroundTasks.length > 0
+						) {
+							this.terminatedBackgroundTasks = [...this.pendingBackgroundTasks];
+							this.logger.event("background_tasks_terminated_on_completion", {
+								backgroundTaskCount: this.pendingBackgroundTasks.length,
+								claudeSessionId: this.sessionInfo?.sessionId,
+							});
+							this.pendingBackgroundTasks = [];
+						}
 						this.streamingPrompt.complete();
 					}
 				}
@@ -1126,6 +1153,22 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 			this.pendingSessionCrons.length > 0 ||
 			this.pendingBackgroundTasks.length > 0
 		);
+	}
+
+	/**
+	 * Whether the session has a scheduled wakeup that should hold it open.
+	 * Background tasks are deliberately excluded (Harold's ruling): they never
+	 * block delivery, so they must not keep the runner streaming.
+	 */
+	hasPendingWakeups(): boolean {
+		return this.pendingSessionCrons.length > 0;
+	}
+
+	/**
+	 * Background tasks terminated with the last successful result (v3.1).
+	 */
+	getTerminatedBackgroundTasks(): BackgroundTaskSummary[] {
+		return [...this.terminatedBackgroundTasks];
 	}
 
 	/**

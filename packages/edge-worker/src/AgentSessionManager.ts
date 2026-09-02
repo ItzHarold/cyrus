@@ -15,6 +15,7 @@ import {
 	AgentSessionStatus,
 	AgentSessionType,
 	type AgentSessionUpdateFields,
+	type BackgroundTaskSummary,
 	type CyrusAgentSession,
 	type CyrusAgentSessionEntry,
 	createLogger,
@@ -897,6 +898,18 @@ export class AgentSessionManager extends EventEmitter {
 			pendingWork.backgroundTasks.length > 0
 			? pendingWork
 			: null;
+	}
+
+	/**
+	 * Background tasks terminated with this session's last successful result
+	 * (v3.1): a backgrounded shell that was still running when the turn
+	 * finished and was cut off with it, because a background task never
+	 * blocks delivery. Read by the reviewer hand-off. Empty when there were
+	 * none or the runner does not track them.
+	 */
+	getTerminatedBackgroundTasks(sessionId: string): BackgroundTaskSummary[] {
+		const runner = this.sessions.get(sessionId)?.agentRunner;
+		return runner?.getTerminatedBackgroundTasks?.() ?? [];
 	}
 
 	private consumeStopRequest(linearAgentActivitySessionId: string): boolean {
