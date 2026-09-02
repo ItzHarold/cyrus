@@ -4443,17 +4443,29 @@ ${taskSection}`;
 		// again" on that thread, not a reason to open another.
 		const mirrorClientIssueId = this.cockpitMirror.clientIssueIdFor(issueId);
 		if (mirrorClientIssueId) {
+			// A parked mirror whose start was refused by the WIP gate has a
+			// birth/narration thread (opened by the delegation, PON-212) but no
+			// operator link — that link is only registered once work actually
+			// starts (startWorkFromMirror, downstream of the WIP gate). Keying
+			// reuse on the link alone let recovery mint a SECOND thread on the
+			// mirror: observed on CKP-25, where a WIP-gated delegation was
+			// followed 60s later by assignment_session_recovered opening a
+			// redundant thread. Reuse whichever thread exists — a mirror gets
+			// exactly one, and the WIP-refusal explanation lands on it.
 			const link = this.operatorSessions.forClientIssue(mirrorClientIssueId);
-			if (link?.mirrorSessionId) {
+			const reuseSessionId =
+				link?.mirrorSessionId ??
+				this.cockpitMirror.narrationSessionIdFor(mirrorClientIssueId);
+			if (reuseSessionId) {
 				this.logger.event("mirror_redelegation_reused_thread", {
 					issueId,
 					issueIdentifier,
-					mirrorSessionId: link.mirrorSessionId,
+					mirrorSessionId: reuseSessionId,
 				});
 				await this.handleMirrorAction(
 					{
 						organizationId: workspaceId,
-						mirrorSessionId: link.mirrorSessionId,
+						mirrorSessionId: reuseSessionId,
 						rawBody: "",
 					},
 					mirrorClientIssueId,
