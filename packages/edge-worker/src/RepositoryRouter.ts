@@ -25,11 +25,26 @@ export type RepositoryRoutingResult =
 				| "label-based"
 				| "project-based"
 				| "team-based"
-				| "team-prefix"
-				| "catch-all"
 				| "workspace-fallback";
 	  }
-	| { type: "needs_selection"; workspaceRepos: RepositoryConfig[] }
+	// TENANT ISOLATION / repo routing (2026-09-02): the two no-single-repo
+	// outcomes are DIFFERENT decisions and must not be conflated.
+	//
+	// `ambiguous` — one implicit mechanism (a team key or a project) matched
+	// MORE THAN ONE repo. The mapping exists but does not resolve; the fix is a
+	// routing label, so we ask (canonical elicitation among the candidates).
+	//
+	// `unmapped` — NOTHING matched. There is no mapping for this team yet, and
+	// the agent must never guess one: it refuses in client language and
+	// notifies the operator. This replaces the old `needs_selection`, which
+	// asked the CLIENT to pick a repo from the whole workspace — leaking the
+	// internal routing concept and, with a catch-all present, silently guessing.
+	| {
+			type: "ambiguous";
+			candidates: RepositoryConfig[];
+			routingMethod: "team-based" | "project-based";
+	  }
+	| { type: "unmapped"; workspaceRepos: RepositoryConfig[] }
 	| { type: "none" };
 
 /**
@@ -63,6 +78,17 @@ export interface RepositoryRouterDeps {
 	 * absent means post verbatim, as before.
 	 */
 	sanitizeClientText?: (sessionId: string, text: string) => string;
+
+	/**
+	 * Requirement 2a: notify the operator that an issue arrived from a team with
+	 * no repository mapping (beyond the journal event). Optional and
+	 * best-effort — the client refusal and the journal event fire regardless.
+	 */
+	notifyOperatorUnmapped?: (info: {
+		teamKey: string;
+		workspaceId: string;
+		issueIdentifier?: string;
+	}) => Promise<void>;
 }
 
 /**
@@ -150,11 +176,12 @@ export class RepositoryRouter {
 	 * Priority 1: Description tag (explicit [repo=...] in issue description)
 	 * Priority 2: Routing labels
 	 * Priority 3: Project-based routing
-	 * Priority 4: Team-based routing
-	 * Priority 5: Catch-all repositories
+	 * Priority 4: Team-based routing (team key, then identifier prefix)
 	 *
 	 * Description-tag and label-based routing, when matched, skip lower-priority routing.
-	 * If no routing matches, returns needs_selection (no default assignment).
+	 * An implicit mechanism (team/project) matching >1 repo returns `ambiguous`.
+	 * If nothing matches, returns `unmapped` — the agent refuses and notifies
+	 * the operator; it NEVER guesses a repo (there is no catch-all).
 	 */
 	async determineRepositoryForWebhook(
 		webhook: AgentSessionCreatedWebhook | AgentSessionPromptedWebhook,
@@ -184,6 +211,12 @@ export class RepositoryRouter {
 		const workspaceRepos = repos.filter(
 			(repo) => repo.linearWorkspaceId === workspaceId,
 		);
+		// A workspace with NO repository footprint at all is a silent drop, as
+		// before — it is almost certainly not a tenant we serve (an agent can be
+		// @mentioned in any workspace it is installed in), so speaking to it
+		// would be noise. The unmapped-team REFUSAL (2a) is reserved for the
+		// case that actually matters: a served workspace that HAS repositories
+		// but none is mapped to the team on this issue (handled at the end).
 		if (workspaceRepos.length === 0) return { type: "none" };
 
 		// Priority 0: Check for existing active sessions
@@ -255,87 +288,81 @@ export class RepositoryRouter {
 			};
 		}
 
-		// Priority 3: Check project-based routing
+		// Priority 3: Check project-based routing. More than one repo claiming
+		// the same project is ambiguous — the mapping exists but does not
+		// resolve, so we ask rather than silently take the first (the old
+		// `.find` behaviour was a hidden guess).
 		if (issueId) {
-			const projectMatchedRepo = await this.findRepositoryByProject(
+			const projectMatchedRepos = await this.findRepositoriesByProject(
 				issueId,
 				workspaceRepos,
 				workspaceId,
 			);
-			if (projectMatchedRepo) {
+			if (projectMatchedRepos.length === 1) {
+				const repo = projectMatchedRepos[0] as RepositoryConfig;
 				this.logger.info(
-					`Repository selected: ${projectMatchedRepo.name} (project-based routing)`,
+					`Repository selected: ${repo.name} (project-based routing)`,
 				);
 				return {
 					type: "selected",
-					repositories: [projectMatchedRepo],
+					repositories: [repo],
+					routingMethod: "project-based",
+				};
+			}
+			if (projectMatchedRepos.length > 1) {
+				this.logger.warn(
+					`Ambiguous project routing: [${projectMatchedRepos.map((r) => r.name).join(", ")}] all claim this project — asking for the routing label`,
+				);
+				return {
+					type: "ambiguous",
+					candidates: projectMatchedRepos,
 					routingMethod: "project-based",
 				};
 			}
 		}
 
-		// Priority 4: Check team-based routing
-		if (teamKey) {
-			const teamMatchedRepo = this.findRepositoryByTeamKey(
-				teamKey,
+		// Priority 4: Check team-based routing (team key on the issue, then the
+		// team prefix parsed from its identifier). Same rule: two repos mapping
+		// the same team key is ambiguous, not first-wins.
+		const teamKeys = [teamKey, issueIdentifier?.split("-")[0]].filter(
+			(k): k is string => Boolean(k),
+		);
+		for (const key of teamKeys) {
+			const teamMatchedRepos = this.findRepositoriesByTeamKey(
+				key,
 				workspaceRepos,
 			);
-			if (teamMatchedRepo) {
+			if (teamMatchedRepos.length === 1) {
+				const repo = teamMatchedRepos[0] as RepositoryConfig;
 				this.logger.info(
-					`Repository selected: ${teamMatchedRepo.name} (team-based routing)`,
+					`Repository selected: ${repo.name} (team-based routing, key ${key})`,
 				);
 				return {
 					type: "selected",
-					repositories: [teamMatchedRepo],
+					repositories: [repo],
+					routingMethod: "team-based",
+				};
+			}
+			if (teamMatchedRepos.length > 1) {
+				this.logger.warn(
+					`Ambiguous team routing for ${key}: [${teamMatchedRepos.map((r) => r.name).join(", ")}] — asking for the routing label`,
+				);
+				return {
+					type: "ambiguous",
+					candidates: teamMatchedRepos,
 					routingMethod: "team-based",
 				};
 			}
 		}
 
-		// Try parsing issue identifier as fallback for team routing
-		// TODO: Remove team prefix routing - should rely on explicit team-based routing only
-		if (issueIdentifier?.includes("-")) {
-			const prefix = issueIdentifier.split("-")[0];
-			if (prefix) {
-				const repo = this.findRepositoryByTeamKey(prefix, workspaceRepos);
-				if (repo) {
-					this.logger.info(
-						`Repository selected: ${repo.name} (team prefix routing)`,
-					);
-					return {
-						type: "selected",
-						repositories: [repo],
-						routingMethod: "team-prefix",
-					};
-				}
-			}
-		}
-
-		// Priority 5: Find catch-all repository (no routing configuration)
-		// TODO: Remove catch-all routing - require explicit routing configuration for all repositories
-		const catchAllRepo = workspaceRepos.find(
-			(repo) =>
-				(!repo.teamKeys || repo.teamKeys.length === 0) &&
-				(!repo.routingLabels || repo.routingLabels.length === 0) &&
-				(!repo.projectKeys || repo.projectKeys.length === 0),
-		);
-
-		if (catchAllRepo) {
-			this.logger.info(
-				`Repository selected: ${catchAllRepo.name} (workspace catch-all)`,
-			);
-			return {
-				type: "selected",
-				repositories: [catchAllRepo],
-				routingMethod: "catch-all",
-			};
-		}
-
-		// No routing match - request user selection (no default assignment)
+		// Nothing matched. There is no mapping for this team — refuse and notify
+		// the operator; NEVER guess a repo (the catch-all that used to route any
+		// no-config repo here was removed with this change: repo routing must be
+		// an explicit mapping — PON-223 tenant/routing invariant).
 		this.logger.info(
-			`No routing match for ${workspaceRepos.length} workspace repositories - requesting user selection`,
+			`[event:repo_unmapped] no repository is mapped for this issue among ${workspaceRepos.length} workspace repo(s) — refusing, operator notified`,
 		);
-		return { type: "needs_selection", workspaceRepos };
+		return { type: "unmapped", workspaceRepos };
 	}
 
 	/**
@@ -556,176 +583,202 @@ export class RepositoryRouter {
 	}
 
 	/**
-	 * Find repository by team key
+	 * Find EVERY repository mapping a team key. Returns all matches so the
+	 * caller can tell a clean 1:1 mapping from an ambiguous one (two repos
+	 * claiming one team key) — the old single-repo `.find` hid the second.
 	 */
-	private findRepositoryByTeamKey(
+	private findRepositoriesByTeamKey(
 		teamKey: string,
 		repos: RepositoryConfig[],
-	): RepositoryConfig | undefined {
-		return repos.find((r) => r.teamKeys?.includes(teamKey));
+	): RepositoryConfig[] {
+		return repos.filter((r) => r.teamKeys?.includes(teamKey));
 	}
 
 	/**
-	 * Find repository by project name
+	 * Find EVERY repository whose projectKeys include the project on the issue.
+	 * Returns all matches (see findRepositoriesByTeamKey for why).
 	 */
-	private async findRepositoryByProject(
+	private async findRepositoriesByProject(
 		issueId: string,
 		repos: RepositoryConfig[],
 		workspaceId: string,
-	): Promise<RepositoryConfig | null> {
-		// Try each repository that has projectKeys configured
-		for (const repo of repos) {
-			if (!repo.projectKeys || repo.projectKeys.length === 0) continue;
+	): Promise<RepositoryConfig[]> {
+		const reposWithProjectKeys = repos.filter(
+			(repo) => repo.projectKeys && repo.projectKeys.length > 0,
+		);
+		if (reposWithProjectKeys.length === 0) return [];
 
-			try {
-				const issueTracker = this.deps.getIssueTracker(workspaceId);
-				if (!issueTracker) {
-					this.logger.warn(
-						`No issue tracker found for workspace ${workspaceId}`,
-					);
-					continue;
-				}
-
-				const fullIssue = await issueTracker.fetchIssue(issueId);
-				const project = await fullIssue?.project;
-				if (!project?.name) {
-					this.logger.debug(
-						`No project name found for issue ${issueId} in repository ${repo.name}`,
-					);
-					continue;
-				}
-
-				const projectName = project.name;
-				if (repo.projectKeys.includes(projectName)) {
-					this.logger.debug(
-						`Matched issue ${issueId} to repository ${repo.name} via project: ${projectName}`,
-					);
-					return repo;
-				}
-			} catch (error) {
-				// Continue to next repository if this one fails
-				this.logger.debug(
-					`Failed to fetch project for issue ${issueId} from repository ${repo.name}:`,
-					error,
-				);
+		try {
+			const issueTracker = this.deps.getIssueTracker(workspaceId);
+			if (!issueTracker) {
+				this.logger.warn(`No issue tracker found for workspace ${workspaceId}`);
+				return [];
 			}
+			// The project is a fact about the ISSUE, fetched once, then matched
+			// against every repo — not re-fetched per repo as the old loop did.
+			const fullIssue = await issueTracker.fetchIssue(issueId);
+			const projectName = (await fullIssue?.project)?.name;
+			if (!projectName) {
+				this.logger.debug(`No project name found for issue ${issueId}`);
+				return [];
+			}
+			return reposWithProjectKeys.filter((repo) =>
+				repo.projectKeys?.includes(projectName),
+			);
+		} catch (error) {
+			this.logger.debug(`Failed to fetch project for issue ${issueId}:`, error);
+			return [];
 		}
-
-		return null;
 	}
 
 	/**
-	 * Elicit user repository selection - post elicitation to Linear
+	 * PON-211: a mirror belonging to ANOTHER agent in this workspace. Several
+	 * agents can be installed in one Linear workspace and a cockpit team lives
+	 * in one of them, so every agent there is mentionable on every mirror and
+	 * all but one have no idea what the issue is. Recognise it by shape and
+	 * refuse, loudly, naming who can answer — no session, no elicitation, no
+	 * pending selection. Shared by both no-single-repo outcomes. Returns true
+	 * when it handled the webhook (the caller must then stop).
 	 */
-	async elicitUserRepositorySelection(
+	private async refuseForeignCockpitMirror(
+		webhook: AgentSessionCreatedWebhook,
+	): Promise<boolean> {
+		const { issue } = webhook.agentSession;
+		if (!issue || !isForeignCockpitMirror(issue.title)) return false;
+		this.logger.warn(
+			`Refusing ${issue.identifier}: it is another agent's cockpit mirror`,
+		);
+		const tracker = this.deps.getIssueTracker(webhook.organizationId);
+		await tracker?.createAgentActivity?.({
+			agentSessionId: webhook.agentSession.id,
+			content: {
+				type: "error",
+				body: "This is another agent's cockpit mirror — I can't see the work behind it, so there's nothing here for me to do. The mirror names the agent that can: look for the \"Work this with @…\" line in the description and delegate it to that one instead.",
+			},
+		});
+		return true;
+	}
+
+	/**
+	 * Unmapped team (requirement 2a): NO repository is mapped for the team on
+	 * this issue. Refuse in client language, notify the operator, and start
+	 * nothing. Critically it opens NO pending selection: a missing mapping is
+	 * an onboarding fact only the operator can fix — the client is never asked
+	 * to pick a repository (that leaked the internal routing concept and, with
+	 * the old catch-all, silently guessed). Best-effort throughout: a workspace
+	 * we do not serve has no tracker, so the client post is a no-op and only the
+	 * journal event fires.
+	 */
+	async refuseUnmappedRepository(
 		webhook: AgentSessionCreatedWebhook,
 		workspaceRepos: RepositoryConfig[],
 	): Promise<void> {
-		const { agentSession } = webhook;
-		const agentSessionId = agentSession.id;
+		const { agentSession, organizationId } = webhook;
 		const { issue } = agentSession;
+		if (!issue) {
+			this.logger.error("Cannot refuse unmapped repository without issue");
+			return;
+		}
+		if (await this.refuseForeignCockpitMirror(webhook)) return;
 
+		const { teamKey, issueIdentifier } = this.extractIssueInfo(webhook);
+		const team = teamKey ?? issueIdentifier?.split("-")[0] ?? "(unknown)";
+		this.logger.warn(
+			`[event:repo_unmapped] team=${team} workspace=${organizationId} issue=${issue.identifier} repos_in_workspace=${workspaceRepos.length}`,
+		);
+		// Operator notification beyond the journal (best-effort — a cockpit
+		// inbox comment naming the team to map). Never fails the refusal.
+		try {
+			await this.deps.notifyOperatorUnmapped?.({
+				teamKey: team,
+				workspaceId: organizationId,
+				issueIdentifier: issue.identifier,
+			});
+		} catch (error) {
+			this.logger.error("Failed to notify operator of unmapped team:", error);
+		}
+
+		const issueTracker = this.deps.getIssueTracker(organizationId);
+		try {
+			await issueTracker?.createAgentActivity?.({
+				agentSessionId: agentSession.id,
+				content: {
+					type: "error",
+					body: CLIENT_MESSAGES.repositoryNotConnected(),
+				},
+			});
+		} catch (error) {
+			this.logger.error("Failed to post unmapped-repository refusal:", error);
+		}
+	}
+
+	/**
+	 * Ambiguous route (requirement 2b): an implicit mechanism (a team key or a
+	 * project) matched MORE THAN ONE repository. Ask, once, with a canonical
+	 * Select among the candidates — the repo the client picks is effectively
+	 * the routing label that resolves it. Reuses the pending-selection
+	 * machinery; the reply is resolved in selectRepositoryFromResponse.
+	 */
+	async elicitAmbiguousRepository(
+		webhook: AgentSessionCreatedWebhook,
+		candidates: RepositoryConfig[],
+	): Promise<void> {
+		const { agentSession, organizationId } = webhook;
+		const { issue } = agentSession;
 		if (!issue) {
 			this.logger.error("Cannot elicit repository selection without issue");
 			return;
 		}
+		if (await this.refuseForeignCockpitMirror(webhook)) return;
 
-		// PON-211: never ask about someone else's cockpit mirror.
-		//
-		// Several agents can be installed in one Linear workspace, and a
-		// cockpit team lives in one of them — so every agent there is
-		// mentionable on every mirror, and all but one of them have no idea
-		// what the issue is. The others fell through to here and asked which
-		// repository to use, offering their OWN repositories for a client's
-		// work they cannot see. Observed live: a delegation to the wrong agent
-		// produced two repository-selection prompts on a mirror.
-		//
-		// Recognise it by shape and refuse, loudly, naming who can answer. No
-		// session, no elicitation, no pending selection to be answered later.
-		if (isForeignCockpitMirror(issue.title)) {
-			this.logger.warn(
-				`Refusing ${issue.identifier}: it is another agent's cockpit mirror`,
-			);
-			const tracker = this.deps.getIssueTracker(webhook.organizationId);
-			await tracker?.createAgentActivity?.({
-				agentSessionId,
-				content: {
-					type: "error",
-					body: "This is another agent's cockpit mirror — I can't see the work behind it, so there's nothing here for me to do. The mirror names the agent that can: look for the \"Work this with @…\" line in the description and delegate it to that one instead.",
-				},
-			});
-			return;
-		}
-
+		const agentSessionId = agentSession.id;
 		this.logger.info(
-			`Posting repository selection elicitation for issue ${issue.identifier}`,
+			`Posting ambiguous-route elicitation for ${issue.identifier} (${candidates.length} candidates)`,
 		);
-
-		// Store pending selection
+		// Store pending selection (the candidate set, not the whole workspace).
 		this.pendingSelections.set(agentSessionId, {
 			issueId: issue.id,
-			workspaceRepos,
+			workspaceRepos: candidates,
 		});
 
-		// Validate we have repositories to offer
-		const firstRepo = workspaceRepos[0];
-		if (!firstRepo) {
-			this.logger.error("No repositories available for selection elicitation");
-			return;
-		}
-
-		// Get issue tracker for the workspace
-		const issueTracker = this.deps.getIssueTracker(webhook.organizationId);
+		const issueTracker = this.deps.getIssueTracker(organizationId);
 		if (!issueTracker) {
 			this.logger.error(
-				`No issue tracker found for workspace ${webhook.organizationId}`,
+				`No issue tracker found for workspace ${organizationId}`,
 			);
 			return;
 		}
 
-		// Create repository options (PON-142).
-		//
-		// The value is the repository NAME, deliberately. It used to be the
-		// GitHub/GitLab URL, and the URL Linear echoed back did not string-match
-		// the URL in config (".git" suffix, case), so every click missed the
-		// lookup and the router silently used the first repository — the
-		// operator's answer was collected and then discarded. The name is both
-		// what a human should see in the selector and exactly what the matcher
-		// resolves, so a click answers by construction.
-		const options = workspaceRepos.map((repo) => ({
-			// PON-194: a select option is a client surface — the label is what
-			// they click — and nothing sanitized these on any path.
+		// The option value is the repository NAME (PON-142): the URL Linear
+		// echoes back did not string-match config, so a click missed the lookup
+		// and the router silently used the first repo. The name is what the
+		// matcher resolves, so a click answers by construction. PON-194: a
+		// select option is a client surface — sanitize the label.
+		const options = candidates.map((repo) => ({
 			value:
 				this.deps.sanitizeClientText?.(agentSessionId, repo.name) ?? repo.name,
 		}));
 
-		// Post elicitation activity
 		try {
 			await issueTracker.createAgentActivity({
 				agentSessionId,
 				content: {
 					type: "elicitation",
-					body: "Which repository should I work in for this issue?",
+					body: CLIENT_MESSAGES.repositoryAmbiguous(),
 				},
 				signal: AgentActivitySignal.Select,
 				signalMetadata: { options },
 			});
-
 			this.logger.info(
-				`Posted repository selection elicitation with ${options.length} options`,
+				`Posted ambiguous-route elicitation with ${options.length} options`,
 			);
 		} catch (error) {
-			this.logger.error(
-				`Failed to post repository selection elicitation:`,
-				error,
-			);
-
+			this.logger.error("Failed to post ambiguous-route elicitation:", error);
 			await this.postRepositorySelectionError(
 				agentSessionId,
 				issueTracker,
 				error,
 			);
-
 			this.pendingSelections.delete(agentSessionId);
 		}
 	}
@@ -781,9 +834,6 @@ export class RepositoryRouter {
 			return null;
 		}
 
-		// Remove from pending map
-		this.pendingSelections.delete(agentSessionId);
-
 		// Resolve the answer (PON-142). Three tiers, most exact first:
 		//   1. name  — what the options now carry, so a click matches here
 		//   2. id    — future-proof, and unambiguous if ever used as a value
@@ -811,27 +861,58 @@ export class RepositoryRouter {
 			);
 
 		if (selectedRepo) {
+			// Resolved — the selection is done; drop the pending entry.
+			this.pendingSelections.delete(agentSessionId);
 			this.logger.info(`User selected repository: ${selectedRepo.name}`);
 			return selectedRepo;
 		}
 
-		// Nothing matched: this is not a selection, it is an unrelated prompt
-		// (the user ignored the selector and said something else — a documented
-		// case, see packages/CLAUDE.md). The contract for that case is the
-		// first-configured repository, and it stays — but LOUDLY. The silent
-		// version of this line is how a correct answer was misrouted for as
-		// long as this code existed, and nobody could see it happening.
-		const fallback = pendingData.workspaceRepos[0];
-		if (!fallback) {
-			this.logger.error(
-				`No repository found for selection: ${selectedRepositoryName}`,
-			);
-			return null;
-		}
+		// Nothing matched. This is an ambiguous-route ask (the only path that
+		// opens a pending selection now), and the reply picked none of the
+		// candidates. NEVER guess a candidate (the old code ran the first
+		// configured repo — a silent misroute). Keep the pending selection alive
+		// and return null; the caller re-posts the ask so a click still
+		// resolves. A client who never picks simply never starts — correct: we
+		// do not choose a tenant repository for them.
 		this.logger.warn(
-			`[event:repo_selection_unresolved] reply ${JSON.stringify(answer.slice(0, 120))} matched no offered repository (offered: ${pendingData.workspaceRepos.map((r) => r.name).join(", ")}); treating as an unrelated prompt and using first-configured ${fallback.name}`,
+			`[event:repo_selection_unresolved] reply ${JSON.stringify(answer.slice(0, 120))} matched no offered repository (offered: ${pendingData.workspaceRepos.map((r) => r.name).join(", ")}); NOT guessing — re-asking`,
 		);
-		return fallback;
+		return null;
+	}
+
+	/**
+	 * Re-post the pending ambiguous-route Select for a session whose last reply
+	 * matched no candidate. Reads the retained pending candidates so the caller
+	 * need not hold them. No-op if there is no pending selection.
+	 */
+	async repostPendingSelection(
+		agentSessionId: string,
+		workspaceId: string,
+	): Promise<void> {
+		const pending = this.pendingSelections.get(agentSessionId);
+		if (!pending) return;
+		const issueTracker = this.deps.getIssueTracker(workspaceId);
+		if (!issueTracker) return;
+		const options = pending.workspaceRepos.map((repo) => ({
+			value:
+				this.deps.sanitizeClientText?.(agentSessionId, repo.name) ?? repo.name,
+		}));
+		try {
+			await issueTracker.createAgentActivity({
+				agentSessionId,
+				content: {
+					type: "elicitation",
+					body: CLIENT_MESSAGES.repositoryAmbiguous(),
+				},
+				signal: AgentActivitySignal.Select,
+				signalMetadata: { options },
+			});
+		} catch (error) {
+			this.logger.error(
+				"Failed to re-post ambiguous-route elicitation:",
+				error,
+			);
+		}
 	}
 
 	/**

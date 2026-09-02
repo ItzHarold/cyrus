@@ -61,6 +61,7 @@ describe("EdgeWorker - Label-Based Prompt Command", () => {
 		workspaceBaseDir: "/test/workspaces",
 		baseBranch: "main",
 		linearWorkspaceId: "test-workspace",
+		teamKeys: ["TEST"],
 		isActive: true,
 		allowedTools: ["Read", "Edit"],
 		labelPrompts: {
@@ -246,7 +247,7 @@ Issue: {{issue_identifier}}`;
 		// Arrange
 		const createdWebhook: LinearAgentSessionCreatedWebhook = {
 			type: "Issue",
-			action: "agentSessionCreated",
+			action: "created",
 			organizationId: "test-workspace",
 			agentSession: {
 				id: "agent-session-123",
@@ -289,7 +290,7 @@ Issue: {{issue_identifier}}`;
 		// Arrange
 		const createdWebhook: LinearAgentSessionCreatedWebhook = {
 			type: "Issue",
-			action: "agentSessionCreated",
+			action: "created",
 			organizationId: "test-workspace",
 			agentSession: {
 				id: "agent-session-123",
@@ -330,7 +331,7 @@ Issue: {{issue_identifier}}`;
 		// Arrange
 		const createdWebhook: LinearAgentSessionCreatedWebhook = {
 			type: "Issue",
-			action: "agentSessionCreated",
+			action: "created",
 			organizationId: "test-workspace",
 			agentSession: {
 				id: "agent-session-123",
@@ -366,7 +367,7 @@ Issue: {{issue_identifier}}`;
 		// Arrange
 		const createdWebhook: LinearAgentSessionCreatedWebhook = {
 			type: "Issue",
-			action: "agentSessionCreated",
+			action: "created",
 			organizationId: "test-workspace",
 			agentSession: {
 				id: "agent-session-123",
