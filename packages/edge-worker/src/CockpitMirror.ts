@@ -1869,7 +1869,11 @@ export class CockpitMirror {
 					}`,
 					{
 						id: projectId,
-						input: { description: this.renderRoutingTable(client, rows) },
+						// `content` is the markdown overview body (the project's
+						// "description" page in the UI); the API's `description`
+						// field is a short length-limited summary and rejects a
+						// table with "Argument Validation Error".
+						input: { content: this.renderRoutingTable(client, rows) },
 					},
 				);
 				this.logger.event("cockpit_routing_table_synced", {
