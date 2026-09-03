@@ -136,7 +136,7 @@ describe("CockpitMirror — routing table + Needs-operator escalation", () => {
 		const up = projectUpdate();
 		expect(up).toBeDefined();
 		expect(up?.variables.id).toBe("proj-acme"); // the client's configured project
-		const desc = (up?.variables.input as { description: string }).description;
+		const desc = (up?.variables.input as { content: string }).content;
 		expect(desc).toContain("## Routing");
 		expect(desc).toContain("do not edit by hand");
 		expect(desc).toContain("| ACM | acme-metrics |");
@@ -148,8 +148,8 @@ describe("CockpitMirror — routing table + Needs-operator escalation", () => {
 		await mirror.syncClientRoutingTables([
 			{ client: CLIENT, tenantWorkspaceId: TENANT_WS, rows: [] },
 		]);
-		const desc = (projectUpdate()?.variables.input as { description: string })
-			.description;
+		const desc = (projectUpdate()?.variables.input as { content: string })
+			.content;
 		expect(desc).toContain("No repository is mapped for **Acme Corp** yet");
 		expect(desc).not.toContain("| Team");
 	});
