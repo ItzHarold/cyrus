@@ -175,7 +175,11 @@ import {
 	CLIENT_MESSAGES,
 	type ClientLifecyclePhase,
 } from "./client-messages.js";
-import { ClientRegistry, teamKeyOf } from "./client-registry.js";
+import {
+	ClientRegistry,
+	type ResolvedClient,
+	teamKeyOf,
+} from "./client-registry.js";
 import { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
 import { EgressProxy } from "./EgressProxy.js";
 import { GitService, WorktreeCreationRefusedError } from "./GitService.js";
@@ -639,6 +643,11 @@ export class EdgeWorker extends EventEmitter {
 			getIssueTracker: (linearWorkspaceId: string) => {
 				return this.getIssueTrackerForWorkspace(linearWorkspaceId);
 			},
+			// Repo routing 2a follow-up: an unmapped team raises a "Needs
+			// operator" issue in that client's cockpit project (best-effort,
+			// operator-side — the client refusal and journal event fire
+			// regardless).
+			notifyOperatorUnmapped: (info) => this.handleUnmappedTeam(info),
 		};
 		this.repositoryRouter = new RepositoryRouter(repositoryRouterDeps);
 		this.gitService = new GitService({
@@ -1062,6 +1071,9 @@ export class EdgeWorker extends EventEmitter {
 				this.configManager.setConfig(changes.newConfig);
 				this.runnerSelectionService.setConfig(changes.newConfig);
 				this.toolPermissionResolver.setConfig(changes.newConfig);
+				// A repo mapping may have just changed — refresh the cockpit
+				// routing tables so the operator's view stays truthful.
+				void this.syncCockpitRoutingTables();
 			},
 		);
 		this.configManager.startConfigWatcher();
@@ -1287,6 +1299,9 @@ export class EdgeWorker extends EventEmitter {
 		// 8. Cockpit reconciliation (PON-151): make the mirror match reality.
 		// Fire-and-forget — startup never waits on a derived view.
 		void this.reconcileCockpitMirror();
+		// Repo routing follow-up (PON-223): write each client's routing table
+		// into its cockpit project and prime the Needs-operator set.
+		void this.syncCockpitRoutingTables();
 
 		// 9. PON-152 escalation ladder — reminders only, never delivery.
 		this.armVerificationLadder();
@@ -5640,6 +5655,18 @@ ${taskSection}`;
 					repositories.map((r) => r.id),
 				);
 			}
+
+			// The issue routed to a repo — if it had a "Needs operator" item
+			// from an earlier unmapped delegation, the mapping has landed and it
+			// was just re-delegated, so close it. No-op (no query) when nothing
+			// is open for this identifier.
+			const routedIdentifier = webhook.agentSession.issue?.identifier;
+			if (routedIdentifier) {
+				void this.cockpitMirror.resolveNeedsOperator({
+					clientIssueIdentifier: routedIdentifier,
+					tenantWorkspaceId: webhook.organizationId,
+				});
+			}
 		}
 
 		if (!webhook.agentSession.issue) {
@@ -7425,6 +7452,101 @@ ${taskSection}`;
 		const routed =
 			tenantWorkspaceId && cockpit?.assignments?.[tenantWorkspaceId];
 		return routed ? [routed] : this.cockpitReviewers();
+	}
+
+	// ─── Repo routing follow-up (PON-223): cockpit routing table + escalation ──
+
+	/**
+	 * Write each configured client's team→repository routing table into its
+	 * cockpit project description, and prime the open-Needs-operator set from
+	 * Linear. Called at boot (after reconcile) and on config change. Derived and
+	 * write-only; a failure never blocks anything.
+	 */
+	private async syncCockpitRoutingTables(): Promise<void> {
+		if (!this.config.cockpit) return;
+		try {
+			const registry = new ClientRegistry(this.config.clients);
+			if (!registry.configured) return;
+			const repos = Array.from(this.repositories.values());
+			const entries: Array<{
+				client: ResolvedClient;
+				tenantWorkspaceId: string;
+				rows: Array<{ team: string; repo: string }>;
+			}> = [];
+			const primedWorkspaces = new Set<string>();
+			for (const client of registry.all) {
+				const clientConfig = this.config.clients?.find(
+					(c) => c.id === client.id,
+				);
+				const workspaceIds = clientConfig?.workspaces ?? [];
+				const tenantWorkspaceId = workspaceIds.find(
+					(w) => w !== this.config.cockpit?.linearWorkspaceId,
+				);
+				if (!tenantWorkspaceId) continue;
+				const rows: Array<{ team: string; repo: string }> = [];
+				for (const repo of repos) {
+					if (repo.isActive === false) continue;
+					if (!workspaceIds.includes(repo.linearWorkspaceId ?? "")) continue;
+					const keys = [
+						...(repo.teamKeys ?? []),
+						...(repo.routingLabels ?? []).map((l) => `label: ${l}`),
+						...(repo.projectKeys ?? []).map((p) => `project: ${p}`),
+					];
+					for (const key of keys.length ? keys : ["(no explicit mapping)"]) {
+						rows.push({ team: key, repo: repo.name });
+					}
+				}
+				entries.push({ client, tenantWorkspaceId, rows });
+				// Prime once per tenant workspace (the cockpit team is one board).
+				if (!primedWorkspaces.has(tenantWorkspaceId)) {
+					primedWorkspaces.add(tenantWorkspaceId);
+					void this.cockpitMirror.primeNeedsOperator(tenantWorkspaceId);
+				}
+			}
+			await this.cockpitMirror.syncClientRoutingTables(entries);
+		} catch (error) {
+			this.logger.error("Failed to sync cockpit routing tables:", error);
+		}
+	}
+
+	/**
+	 * An issue arrived from a team with no repository mapping (repo routing 2a).
+	 * Raise a "Needs operator" issue in that client's cockpit project, assigned
+	 * to its default reviewer, linking the client issue and naming the missing
+	 * mapping. Best-effort — the client refusal and journal event already fired.
+	 */
+	private async handleUnmappedTeam(info: {
+		teamKey: string;
+		workspaceId: string;
+		issueIdentifier?: string;
+	}): Promise<void> {
+		try {
+			if (!this.config.cockpit || !info.issueIdentifier) return;
+			const client = new ClientRegistry(this.config.clients).resolveFor(
+				info.workspaceId,
+				info.teamKey,
+			);
+			const assigneeId =
+				client.reviewerId ?? this.subscribersForWorkspace(info.workspaceId)[0];
+			const slug =
+				this.config.linearWorkspaces?.[info.workspaceId]?.linearWorkspaceSlug;
+			const clientIssueUrl = slug
+				? `https://linear.app/${slug}/issue/${info.issueIdentifier}`
+				: undefined;
+			// Fire-and-forget: the cockpit write must not delay the client's
+			// refusal (raiseNeedsOperator serializes and logs its own failures).
+			void this.cockpitMirror.raiseNeedsOperator({
+				clientIssueIdentifier: info.issueIdentifier,
+				clientIssueUrl,
+				clientDisplayName: client.displayName,
+				teamKey: info.teamKey,
+				tenantWorkspaceId: info.workspaceId,
+				client,
+				...(assigneeId ? { assigneeId } : {}),
+			});
+		} catch (error) {
+			this.logger.error("Failed to raise Needs-operator issue:", error);
+		}
 	}
 
 	/**
