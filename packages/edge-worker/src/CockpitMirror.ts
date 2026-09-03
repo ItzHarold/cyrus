@@ -273,6 +273,15 @@ export class CockpitMirror {
 	 */
 	private writeChains = new Map<string, Promise<void>>();
 
+	/**
+	 * Client-issue identifiers with an OPEN "Needs operator" issue (repo routing
+	 * follow-up). In-memory so `resolveNeedsOperator` can return instantly on the
+	 * common delegation (nothing to close) without a Linear query; primed at boot
+	 * from Linear (`primeNeedsOperator`) so it survives restarts, and Linear stays
+	 * the authority — a lost set cannot mint or strand a duplicate.
+	 */
+	private openNeedsOperator = new Set<string>();
+
 	constructor(deps: CockpitMirrorDeps, logger: ILogger) {
 		this.deps = deps;
 		this.logger = logger;
@@ -1769,6 +1778,276 @@ export class CockpitMirror {
 		} catch (error) {
 			this.logger.error("[cockpit] mirror comment failed:", error);
 		}
+	}
+
+	// ─── Routing table + operator escalation (PON-223 repo-routing follow-up) ──
+	//
+	// The cockpit is where the operator answers "which repository does each team
+	// work in?" and learns when a team arrives with no answer. Both are DERIVED,
+	// WRITE-ONLY, and LINEAR-AUTHORITATIVE — the per-client project is found by
+	// config id, then by name, else created; the routing table replaces the
+	// project's description; a Needs-operator issue is found-or-created and
+	// found-and-closed by querying Linear. Nothing new is persisted, so a lost
+	// in-memory set cannot mint duplicates. Every method catches and logs — a
+	// broken escalation never breaks a client session.
+
+	/** Marker in a Needs-operator issue title, used to recognise our own. */
+	private static readonly NEEDS_OPERATOR_MARK = "Needs operator —";
+
+	/**
+	 * Ensure the cockpit project grouping a client's work exists; return its id.
+	 * Config's `cockpitProjectId` wins (the operator's cache); otherwise a team
+	 * project named for the client is adopted, else created. Best-effort.
+	 */
+	private async ensureClientProject(
+		config: { linearWorkspaceId: string; teamId: string; projectId?: string },
+		client: ResolvedClient,
+	): Promise<string | undefined> {
+		if (client.cockpitProjectId) return client.cockpitProjectId;
+		if (config.projectId) return config.projectId;
+		try {
+			const found = await this.gql<{
+				team: { projects: { nodes: Array<{ id: string; name: string }> } };
+			}>(
+				config.linearWorkspaceId,
+				`query($teamId: String!) {
+					team(id: $teamId) { projects(first: 100) { nodes { id name } } }
+				}`,
+				{ teamId: config.teamId },
+			);
+			const existing = found.team.projects.nodes.find(
+				(p) => p.name === client.displayName,
+			)?.id;
+			if (existing) return existing;
+			const created = await this.gql<{
+				projectCreate: { success: boolean; project: { id: string } };
+			}>(
+				config.linearWorkspaceId,
+				`mutation($input: ProjectCreateInput!) {
+					projectCreate(input: $input) { success project { id } }
+				}`,
+				{ input: { name: client.displayName, teamIds: [config.teamId] } },
+			);
+			this.logger.event("cockpit_client_project_created", {
+				client: client.id,
+				projectId: created.projectCreate.project.id,
+			});
+			return created.projectCreate.project.id;
+		} catch (error) {
+			this.logger.error(
+				`[cockpit] ensureClientProject failed for ${client.id}:`,
+				error,
+			);
+			return undefined;
+		}
+	}
+
+	/**
+	 * Requirement 2c: write each client's routing table (team → repository, from
+	 * config) into its cockpit project description. Called at boot and on config
+	 * change. The description is code-owned — it is replaced wholesale, never
+	 * merged, so a hand edit does not survive (that is the point: it is the
+	 * single source the operator can trust).
+	 */
+	async syncClientRoutingTables(
+		entries: Array<{
+			client: ResolvedClient;
+			tenantWorkspaceId: string;
+			rows: Array<{ team: string; repo: string }>;
+		}>,
+	): Promise<void> {
+		for (const { client, tenantWorkspaceId, rows } of entries) {
+			await this.chain(`routing:${client.id}`, async () => {
+				const config = this.configFor(tenantWorkspaceId);
+				if (!config) return;
+				const projectId = await this.ensureClientProject(config, client);
+				if (!projectId) return;
+				await this.gql(
+					config.linearWorkspaceId,
+					`mutation($id: String!, $input: ProjectUpdateInput!) {
+						projectUpdate(id: $id, input: $input) { success }
+					}`,
+					{
+						id: projectId,
+						input: { description: this.renderRoutingTable(client, rows) },
+					},
+				);
+				this.logger.event("cockpit_routing_table_synced", {
+					client: client.id,
+					rows: rows.length,
+				});
+			});
+		}
+	}
+
+	private renderRoutingTable(
+		client: ResolvedClient,
+		rows: Array<{ team: string; repo: string }>,
+	): string {
+		const header = `## Routing\n\n_Maintained automatically from configuration — do not edit by hand._\n\n`;
+		const body =
+			rows.length === 0
+				? `No repository is mapped for **${client.displayName}** yet. Any delegation from its teams is refused at intake until a mapping is added.`
+				: [
+						`| Team / routing | Repository |`,
+						`|---|---|`,
+						...rows.map((r) => `| ${r.team} | ${r.repo} |`),
+					].join("\n");
+		return (
+			header +
+			body +
+			`\n\nA team not listed here is refused at intake ("we're not set up to work in this team's repository yet") and raised as a **Needs operator** item in this project.`
+		);
+	}
+
+	/** Prime the open-Needs-operator set from Linear at boot. Best-effort. */
+	async primeNeedsOperator(tenantWorkspaceId: string): Promise<void> {
+		try {
+			const config = this.configFor(tenantWorkspaceId);
+			if (!config) return;
+			const data = await this.gql<{
+				issues: { nodes: Array<{ title: string }> };
+			}>(
+				config.linearWorkspaceId,
+				`query($teamId: ID!, $mark: String!) {
+					issues(filter: {
+						team: { id: { eq: $teamId } },
+						title: { contains: $mark },
+						state: { type: { nin: ["completed", "canceled"] } }
+					}, first: 100) { nodes { title } }
+				}`,
+				{ teamId: config.teamId, mark: CockpitMirror.NEEDS_OPERATOR_MARK },
+			);
+			for (const node of data.issues.nodes) {
+				const ident = this.identifierFromNeedsOperatorTitle(node.title);
+				if (ident) this.openNeedsOperator.add(ident);
+			}
+		} catch (error) {
+			this.logger.error("[cockpit] primeNeedsOperator failed:", error);
+		}
+	}
+
+	/** The client identifier a Needs-operator title ends with, e.g. "(WID-3)". */
+	private identifierFromNeedsOperatorTitle(title: string): string | undefined {
+		if (!title.includes(CockpitMirror.NEEDS_OPERATOR_MARK)) return undefined;
+		return /\(([A-Z][A-Z0-9]*-\d+)\)\s*$/.exec(title)?.[1];
+	}
+
+	/**
+	 * Requirement 2 notify: an issue arrived from an unmapped team. Raise a
+	 * "Needs operator" issue in that client's cockpit project, assigned to the
+	 * default reviewer, linking the client issue and naming the missing mapping.
+	 * Idempotent — one open item per client issue.
+	 */
+	async raiseNeedsOperator(input: {
+		clientIssueIdentifier: string;
+		clientIssueUrl?: string;
+		clientDisplayName: string;
+		teamKey: string;
+		tenantWorkspaceId: string;
+		client: ResolvedClient;
+		assigneeId?: string;
+	}): Promise<void> {
+		await this.chain(`needsop:${input.clientIssueIdentifier}`, async () => {
+			const config = this.configFor(input.tenantWorkspaceId);
+			if (!config) return;
+			if (await this.findOpenNeedsOperator(config, input.clientIssueIdentifier))
+				return; // already raised
+			const projectId = await this.ensureClientProject(config, input.client);
+			const title = `${CockpitMirror.NEEDS_OPERATOR_MARK} ${input.teamKey} not mapped (${input.clientIssueIdentifier})`;
+			const description = [
+				`**${input.clientDisplayName}** delegated **${input.clientIssueIdentifier}**, but no repository is mapped for team **${input.teamKey}** — so the agent refused it and told the client we are not connected yet.`,
+				input.clientIssueUrl ? `\nClient issue: ${input.clientIssueUrl}` : "",
+				`\n**To fix:** map team \`${input.teamKey}\` to a repository (a \`teamKeys\` entry, routing label, or project key), then re-delegate ${input.clientIssueIdentifier}. This item closes itself once the mapping lands and the issue is re-delegated.`,
+			]
+				.filter(Boolean)
+				.join("\n");
+			await this.gql(
+				config.linearWorkspaceId,
+				`mutation($input: IssueCreateInput!) {
+					issueCreate(input: $input) { success issue { id } }
+				}`,
+				{
+					input: {
+						teamId: config.teamId,
+						...(projectId ? { projectId } : {}),
+						title,
+						description,
+						...(input.assigneeId ? { assigneeId: input.assigneeId } : {}),
+					},
+				},
+			);
+			this.openNeedsOperator.add(input.clientIssueIdentifier);
+			this.logger.event("cockpit_needs_operator_raised", {
+				issue: input.clientIssueIdentifier,
+				team: input.teamKey,
+				client: input.client.id,
+			});
+		});
+	}
+
+	/**
+	 * The client issue was re-delegated and now routes — close its Needs-operator
+	 * item (the mapping landed). Returns immediately when nothing is open for it,
+	 * so it is safe to call on every successful delegation.
+	 */
+	async resolveNeedsOperator(input: {
+		clientIssueIdentifier: string;
+		tenantWorkspaceId: string;
+	}): Promise<void> {
+		if (!this.openNeedsOperator.has(input.clientIssueIdentifier)) return;
+		await this.chain(`needsop:${input.clientIssueIdentifier}`, async () => {
+			const config = this.configFor(input.tenantWorkspaceId);
+			if (!config) return;
+			const openId = await this.findOpenNeedsOperator(
+				config,
+				input.clientIssueIdentifier,
+			);
+			if (!openId) {
+				this.openNeedsOperator.delete(input.clientIssueIdentifier);
+				return;
+			}
+			const setup = await this.ensureTeamSetup(config);
+			const doneId = setup?.completedStateId;
+			if (!doneId) return; // no Done state to move it to; leave it open
+			await this.gql(
+				config.linearWorkspaceId,
+				`mutation($id: String!, $input: IssueUpdateInput!) {
+					issueUpdate(id: $id, input: $input) { success }
+				}`,
+				{ id: openId, input: { stateId: doneId } },
+			);
+			this.openNeedsOperator.delete(input.clientIssueIdentifier);
+			this.logger.event("cockpit_needs_operator_resolved", {
+				issue: input.clientIssueIdentifier,
+			});
+		});
+	}
+
+	/** Find an OPEN Needs-operator issue for a client identifier; its id or undefined. */
+	private async findOpenNeedsOperator(
+		config: { linearWorkspaceId: string; teamId: string },
+		clientIssueIdentifier: string,
+	): Promise<string | undefined> {
+		const data = await this.gql<{
+			issues: { nodes: Array<{ id: string; title: string }> };
+		}>(
+			config.linearWorkspaceId,
+			`query($teamId: ID!, $q: String!) {
+				issues(filter: {
+					team: { id: { eq: $teamId } },
+					title: { contains: $q },
+					state: { type: { nin: ["completed", "canceled"] } }
+				}, first: 10) { nodes { id title } }
+			}`,
+			{ teamId: config.teamId, q: clientIssueIdentifier },
+		);
+		// The identifier also appears in the MIRROR title — require our marker.
+		return data.issues.nodes.find(
+			(n) =>
+				n.title.includes(CockpitMirror.NEEDS_OPERATOR_MARK) &&
+				n.title.includes(`(${clientIssueIdentifier})`),
+		)?.id;
 	}
 
 	serialize(): Record<string, SerializedCockpitMirror> {
