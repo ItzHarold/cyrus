@@ -28,6 +28,8 @@ describe("CockpitMirror — routing table + Needs-operator escalation", () => {
 	// Scripted state for findOpenNeedsOperator: open issues in the cockpit team.
 	let openIssues: Array<{ id: string; title: string }>;
 	let projectsByTeam: Array<{ id: string; name: string }>;
+	// The team's workflow states (name/type) for ensureTeamSetup.
+	let stateNodes: Array<{ id: string; name: string; type: string }>;
 
 	const respond = (call: GqlCall): unknown => {
 		if (call.query.includes("projects(first: 100)")) {
@@ -40,18 +42,7 @@ describe("CockpitMirror — routing table + Needs-operator escalation", () => {
 			return { projectUpdate: { success: true } };
 		}
 		if (call.query.includes("states(first: 50)")) {
-			return {
-				team: {
-					states: {
-						nodes: [
-							{ id: "state-todo", name: "Todo", type: "unstarted" },
-							{ id: "state-done", name: "Done", type: "completed" },
-							{ id: "state-cancel", name: "Canceled", type: "canceled" },
-						],
-					},
-					labels: { nodes: [] },
-				},
-			};
+			return { team: { states: { nodes: stateNodes }, labels: { nodes: [] } } };
 		}
 		if (call.query.includes("title: { contains: $q }")) {
 			return { issues: { nodes: openIssues } };
@@ -101,6 +92,11 @@ describe("CockpitMirror — routing table + Needs-operator escalation", () => {
 		calls = [];
 		openIssues = [];
 		projectsByTeam = [];
+		stateNodes = [
+			{ id: "state-todo", name: "Todo", type: "unstarted" },
+			{ id: "state-done", name: "Done", type: "completed" },
+			{ id: "state-cancel", name: "Canceled", type: "canceled" },
+		];
 		vi.stubGlobal(
 			"fetch",
 			vi.fn(async (_url: string, init: { body: string }) => {
@@ -268,5 +264,36 @@ describe("CockpitMirror — routing table + Needs-operator escalation", () => {
 		]);
 		expect(calls.some((c) => c.query.includes("projectCreate"))).toBe(true);
 		expect(projectUpdate()?.variables.id).toBe("proj-new");
+	});
+
+	it("closes to the status named 'Done', not a legacy 'Delivered' completed status (PON-223)", async () => {
+		// A cockpit team can carry two completed statuses while "Delivered" is
+		// being retired. The terminal close must land in "Done" — the first
+		// completed status the API returns here is "Delivered", so a bare find
+		// would drift there.
+		stateNodes = [
+			{ id: "state-delivered", name: "Delivered", type: "completed" },
+			{ id: "state-done", name: "Done", type: "completed" },
+			{ id: "state-cancel", name: "Canceled", type: "canceled" },
+		];
+		const mirror = makeMirror();
+		await mirror.raiseNeedsOperator({
+			clientIssueIdentifier: "WID-9",
+			clientDisplayName: "Acme Corp",
+			teamKey: "WID",
+			tenantWorkspaceId: TENANT_WS,
+			client: CLIENT,
+		});
+		openIssues = [
+			{ id: "needsop-9", title: "Needs operator — WID not mapped (WID-9)" },
+		];
+		calls = [];
+		await mirror.resolveNeedsOperator({
+			clientIssueIdentifier: "WID-9",
+			tenantWorkspaceId: TENANT_WS,
+		});
+		expect(
+			(issueUpdate()?.variables.input as { stateId: string }).stateId,
+		).toBe("state-done");
 	});
 });

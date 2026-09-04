@@ -58,7 +58,12 @@ export const COCKPIT_STATUS_NAMES: Record<CockpitState, string> = {
 	"in-verification": "In verification",
 	"in-client-review": "In client review",
 	rework: "Rework",
-	delivered: "Delivered",
+	// "Done", not "Delivered": delivered work lives in "In client review"
+	// now, so the completed column is the plain terminal — merged for a
+	// mirror, closed for an operator task (PON-223). The `delivered` state key
+	// is retained (it is not a live mirror column — delivered work sits in
+	// in-client-review) but its board name is the terminal "Done".
+	delivered: "Done",
 };
 
 /** What the mirror needs to know about a client issue. */
@@ -2134,9 +2139,20 @@ export class CockpitMirror {
 				for (const label of data.team.labels.nodes) {
 					labelIds[label.name] = label.id;
 				}
-				const completedStateId = data.team.states.nodes.find(
+				// Prefer the completed status NAMED like our terminal column
+				// ("Done") over any other completed-type status. A team can carry
+				// more than one completed status (e.g. a legacy "Delivered" being
+				// retired), and a bare `find(type === completed)` would close
+				// mirrors into whichever the API returns first — the exact drift
+				// PON-223 is removing. Fall back to any completed if "Done" is
+				// absent, so a team that hasn't been set up yet still closes.
+				const completedStates = data.team.states.nodes.filter(
 					(state) => state.type === "completed",
-				)?.id;
+				);
+				const completedStateId =
+					completedStates.find(
+						(state) => state.name === COCKPIT_STATUS_NAMES.delivered,
+					)?.id ?? completedStates[0]?.id;
 				const canceledStateId = data.team.states.nodes.find(
 					(state) => state.type === "canceled",
 				)?.id;
