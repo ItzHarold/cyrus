@@ -4,6 +4,9 @@ This changelog documents internal development changes, refactors, tooling update
 
 ## [Unreleased]
 
+### Changed
+- **The cockpit's completed column is "Done", not "Delivered".** A merged mirror and a closed operator task now land in the plain terminal "Done" status; "Delivered" leaves the cockpit vocabulary, because delivered-but-not-merged work already lives in "In client review". The terminal close now deterministically prefers the status named "Done" over any other completed-type status (the same rule the scope waiting room already used), so a team carrying a legacy "Delivered" no longer drifts work into it.
+
 ### Added
 - **The cockpit shows each client's routing table, and raises a "Needs operator" issue when a team isn't mapped.** Each client's cockpit project description now carries a code-maintained team→repository table (written from config at boot and on every config change; the project is created if it doesn't exist yet), so the operator can see at a glance which repository each team works in. And when an issue arrives from a team with no repository mapping, alongside the client-facing refusal the cockpit opens a "Needs operator" issue in that client's project — assigned to the client's reviewer, linking the client issue and naming the missing mapping — which closes itself automatically once the mapping is added and the issue is re-delegated. All derived and write-only; a broken cockpit never affects a client session.
 
